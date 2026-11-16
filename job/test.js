@@ -636,7 +636,7 @@ function product(id, user, fixture, extra) {
     id, user_id: user, name: 'Produkt ' + id, source_url: urlOf(fixture), target_type: 'price', target_value: 1, tracked_variants: null,
     shops_always: [], shops_exclude: [], shops_only: false, active: true, status: 'pending', title: null, variants: null, offers: null, history: null,
     normal_price: null, verdict: null, warning: null, check_note: null, last_checked: null, notified_price: null, notified_at: null,
-    compare_state: null, compare_at: null, shop_url: null,
+    compare_state: null, compare_at: null, shop_url: null, compare_tries: 0,
   }, extra || {});
 }
 function pageFor(fixture, priceFn) {
@@ -2228,7 +2228,7 @@ test('compare: an old error row (already waiting out the 6-hour retry) is marked
     err('E1', 'https://www.a1.dk/x', 'Butikken afviser automatiske opslag.'), err('E2', 'https://www.a2.dk/x', 'Kunne ikke finde en pris på siden.'),
     err('E3', 'https://www.a3.dk/x', 'Prisen på siden er ikke i kroner (valuta EUR), så den kan ikke følges.'),
     err('F1', 'https://www.b1.dk/x', 'Siden findes ikke (HTTP 404). Tjek linket.'), err('F2', 'https://www.b2.dk/x', 'Butikken svarede ikke i tide.'), err('F3', 'https://www.b3.dk/x', 'Siden kunne ikke hentes (HTTP 502).'),
-    err('G1', 'https://www.c1.dk/x', 'Butikken afviser automatiske opslag.', { compare_state: 'none', compare_at: '2026-11-01T00:00:00Z' }),
+    err('G1', 'https://www.c1.dk/x', 'Butikken afviser automatiske opslag.', { compare_state: 'none', compare_at: '2026-11-16T00:00:00Z' }),
     err('G2', 'https://www.c2.dk/x', 'Butikken afviser automatiske opslag.', { compare_state: 'done', shop_url: 'https://old.dk/x' }),
     err('G3', 'https://www.c3.dk/x', 'Butikken afviser automatiske opslag.', { compare_state: 'wanted', compare_at: '2026-11-02T00:00:00Z' }),
     err('H1', 'https://prisjagt.dk/product.php?p=5745115', 'Butikken afviser automatiske opslag.'));
@@ -2239,7 +2239,7 @@ test('compare: an old error row (already waiting out the 6-hour retry) is marked
   assert.deepStrictEqual(ctx.fetched, [], 'nothing is fetched'); assert.strictEqual(res.summary.length, 5);
   ['E1', 'E2', 'E3'].forEach((id) => { assert.strictEqual(by(id).compare_state, 'wanted', id); assert.strictEqual(by(id).compare_at, '2026-11-16T10:00:00Z', id); assert.strictEqual(by(id).status, 'error'); assert.strictEqual(by(id).last_checked, recent, id + ' keeps its check time'); });
   ['F1', 'F2', 'F3', 'H1'].forEach((id) => assert.strictEqual(by(id).compare_state, null, id));
-  assert.strictEqual(by('G1').compare_state, 'none'); assert.strictEqual(by('G1').compare_at, '2026-11-01T00:00:00Z');
+  assert.strictEqual(by('G1').compare_state, 'none'); assert.strictEqual(by('G1').compare_at, '2026-11-16T00:00:00Z', 'a none under 24 hours old is left alone');
   assert.strictEqual(by('G2').compare_state, 'done'); assert.strictEqual(by('G2').shop_url, 'https://old.dk/x');
   assert.strictEqual(by('G3').compare_state, 'wanted'); assert.strictEqual(by('G3').compare_at, '2026-11-02T00:00:00Z');
   assert.strictEqual(db.sent.length, 0);
@@ -2249,6 +2249,46 @@ test('compare: an old error row (already waiting out the 6-hour retry) is marked
   const ctx2 = shopCtx(db2, {}); ctx2.getPage = async (url) => { ctx2.fetched.push(url); throw new Error('no fetch'); };
   await R.run(ctx2);
   assert(!('compare_state' in db2.products[0]) && !('compare_at' in db2.products[0]));
+});
+
+test("compare: an error product with a 'none' older than 24 hours is marked 'wanted' again, at most 3 times in all", async () => {
+  const recent = '2026-11-16T08:00:00Z', REF = 'Butikken afviser automatiske opslag.';
+  const err = (id, url, extra) => shopProduct(id, 'u1', url, Object.assign({ status: 'error', check_note: REF, last_checked: recent, compare_state: 'none', compare_tries: 1 }, extra || {}));
+  const db = newDb();
+  db.products.push(
+    err('R1', 'https://www.a1.dk/x', { compare_at: '2026-11-15T09:00:00Z' }),                       // 25 hours: due
+    err('R2', 'https://www.a2.dk/x', { compare_at: '2026-11-15T11:00:00Z' }),                       // 23 hours: not yet
+    err('R3', 'https://www.a3.dk/x', { compare_at: '2026-11-10T00:00:00Z', compare_tries: 3 }),     // used up
+    err('R4', 'https://www.a4.dk/x', { compare_at: '2026-11-10T00:00:00Z', compare_tries: 2 }),     // the last one
+    err('R5', 'https://www.a5.dk/x', { compare_at: '2026-11-10T00:00:00Z', check_note: 'Siden findes ikke (HTTP 404). Tjek linket.' }),
+    err('R6', 'https://www.a6.dk/x', { compare_at: '2026-11-10T00:00:00Z', status: 'tracking' }),
+    err('R7', 'https://prisjagt.dk/product.php?p=5745115', { compare_at: '2026-11-10T00:00:00Z' }),
+    err('R8', 'https://www.a8.dk/x', { compare_at: '2026-11-10T00:00:00Z', compare_state: 'done', shop_url: 'https://old.dk/x' }),
+    err('R9', 'https://www.a9.dk/x', { compare_at: '2026-11-10T00:00:00Z', check_note: 'Kunne ikke finde en pris på siden.' }));
+  const ctx = shopCtx(db, {}); ctx.getPage = async (url) => { ctx.fetched.push(url); throw new Error('no fetch expected: ' + url); };
+  await R.run(ctx);
+  const by = (id) => db.products.find((p) => p.id === id);
+  assert.strictEqual(by('R1').compare_state, 'wanted'); assert.strictEqual(by('R1').compare_at, '2026-11-16T10:00:00Z'); assert.strictEqual(by('R1').compare_tries, 2); assert.strictEqual(by('R1').status, 'error');
+  assert.strictEqual(by('R2').compare_state, 'none'); assert.strictEqual(by('R2').compare_tries, 1);
+  assert.strictEqual(by('R3').compare_state, 'none'); assert.strictEqual(by('R3').compare_tries, 3, 'stops after 3');
+  assert.strictEqual(by('R4').compare_state, 'wanted'); assert.strictEqual(by('R4').compare_tries, 3);
+  ['R5', 'R6', 'R7'].forEach((id) => assert.strictEqual(by(id).compare_state, 'none', id));
+  assert.strictEqual(by('R8').compare_state, 'done'); assert.strictEqual(by('R9').compare_state, 'wanted');
+  // the first automatic marking counts as try 1
+  const db1 = newDb(); db1.products.push(shopProduct('F1', 'u1', 'https://www.afvisende.dk/a'));
+  await R.run(shopCtx(db1, { 'https://www.afvisende.dk/a': () => resp(403, 'Forbidden') }));
+  assert.strictEqual(db1.products[0].compare_state, 'wanted'); assert.strictEqual(db1.products[0].compare_tries, 1);
+  // a fresh refusal on a retry (the product is fetched again) marks it again too, and a database without the column writes nothing and never retries
+  const db2 = newDb(); db2.products.push(err('S1', 'https://www.afvisende.dk/a', { compare_at: '2026-11-10T00:00:00Z', last_checked: '2026-11-15T00:00:00Z' }));
+  await R.run(shopCtx(db2, { 'https://www.afvisende.dk/a': () => resp(403, 'Forbidden') }));
+  assert.strictEqual(db2.products[0].compare_state, 'wanted'); assert.strictEqual(db2.products[0].compare_tries, 2);
+  const db3 = newDb(); db3.products.push(err('N1', 'https://www.a1.dk/x', { compare_at: '2026-11-10T00:00:00Z' })); delete db3.products[0].compare_tries;
+  const ctx3 = shopCtx(db3, {}); ctx3.getPage = async (url) => { ctx3.fetched.push(url); throw new Error('no fetch'); };
+  await R.run(ctx3);
+  assert.strictEqual(db3.products[0].compare_state, 'none'); assert(!('compare_tries' in db3.products[0]));
+  const db4 = newDb(); db4.products.push(shopProduct('N2', 'u1', 'https://www.afvisende.dk/a')); delete db4.products[0].compare_tries;
+  await R.run(shopCtx(db4, { 'https://www.afvisende.dk/a': () => resp(403, 'Forbidden') }));
+  assert.strictEqual(db4.products[0].compare_state, 'wanted'); assert(!('compare_tries' in db4.products[0]), 'the missing column is never written');
 });
 
 test('compare: Onskeskyen wishes with one shop link ask for a comparison; a prisjagt link or no link does not; a missing column does not stop the import', async () => {

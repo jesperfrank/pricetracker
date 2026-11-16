@@ -97,6 +97,10 @@ alter table public.products add column if not exists alt_note text check (alt_no
 alter table public.products add column if not exists compare_state text;
 alter table public.products add column if not exists compare_at timestamptz;
 alter table public.products add column if not exists shop_url text;
+-- compare_tries: how many times the job has marked the product 'wanted' again by itself after a 'none' (at most 3, the first marking
+-- counts as 1). Job-owned: products_guard keeps the browser off it, and a new source_url resets it. Manual requests do not count.
+alter table public.products add column if not exists compare_tries integer not null default 0;
+
 alter table public.products drop constraint if exists products_compare_state_check;
 alter table public.products add constraint products_compare_state_check check (compare_state is null or compare_state in ('wanted', 'done', 'none'));
 -- shop_url follows the same rule as source_url (see below)
@@ -219,7 +223,7 @@ begin
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     new.digest_price := null; new.digest_at := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
-    new.compare_state := null; new.compare_at := null; new.shop_url := null; new.image_url := null;
+    new.compare_state := null; new.compare_at := null; new.shop_url := null; new.image_url := null; new.compare_tries := 0;
     -- bought_at / bought_price are the person's own, but the time is the server's and the person is who is signed in
     new.bought_by := null;
     if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; end if;
@@ -240,7 +244,7 @@ begin
   new.check_note := old.check_note; new.last_checked := old.last_checked;
   new.notified_price := old.notified_price; new.notified_at := old.notified_at; new.backfill_state := old.backfill_state;
   new.digest_price := old.digest_price; new.digest_at := old.digest_at;
-  new.image_url := old.image_url;
+  new.image_url := old.image_url; new.compare_tries := old.compare_tries;
   -- alternatives: the answer is the AI agent's. A request is a change of alt_requested_at (only the product's own person gets this
   -- far: a list member changing it fails the whole-row check above). Whatever value the browser sends, the time is the server's;
   -- null is ignored. Refused while a request is pending (unless it is over 6 hours old: the page calls that failed), and after 5
@@ -261,12 +265,12 @@ begin
   -- compare: the state is the job's and the AI agent's. Whatever the browser sends is ignored, with two exceptions that only the
   -- product's own person gets this far for (a list member changing it fails the whole-row check above): a request, compare_state
   -- 'wanted' (see the source_url block below for going back). A request is accepted for a single-shop product (a link that is not a
-  -- prisjagt.dk page) never asked before, or asked and not found more than 7 days ago; the time is the server's.
+  -- prisjagt.dk page) never asked before, or asked and not found more than 1 hour ago; the time is the server's.
   asked_compare := new.compare_state;
   new.compare_state := old.compare_state; new.compare_at := old.compare_at; new.shop_url := old.shop_url;
   if asked_compare is not distinct from 'wanted' and old.compare_state is distinct from 'wanted' and new.source_url is not distinct from old.source_url
      and old.source_url is not null and old.source_url !~* '^https://(www\.)?prisjagt\.dk([/?#]|$)'
-     and (old.compare_state is null or (old.compare_state = 'none' and coalesce(old.compare_at, '-infinity') < now() - interval '7 days')) then
+     and (old.compare_state is null or (old.compare_state = 'none' and coalesce(old.compare_at, '-infinity') < now() - interval '1 hour')) then
     new.compare_state := 'wanted'; new.compare_at := now();
   end if;
   -- bought: marking stamps the server time and the person once; the time and the person cannot be edited afterwards
@@ -291,7 +295,7 @@ begin
     new.title := null; new.variants := null; new.offers := null; new.history := null;
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
-    new.digest_price := null; new.digest_at := null; new.image_url := null;
+    new.digest_price := null; new.digest_at := null; new.image_url := null; new.compare_tries := 0;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
     -- A new link is the person's own choice: the comparison starts over, except for going back to the original shop link after a
     -- switch to Prisjagt (exactly shop_url): that is 'none' from now on, so the product is not switched again.

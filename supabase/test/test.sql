@@ -921,10 +921,10 @@ reset role;
 -- a donor row that differs from a-gave in every column but the bought ones, used to try every column
 insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
   status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id,
-  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url)
+  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries)
 values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
   'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01',
-  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg');
+  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2);
 update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
   variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04',
   alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg'
@@ -1603,8 +1603,8 @@ select t.cmpmk('cmp-null', 'https://shop.example.dk/z', null, null, null);
 select t.cmpmk('cmp-pj', 'https://prisjagt.dk/product.php?p=5', null, null, null);
 select t.cmpmk('cmp-pj2', 'https://www.prisjagt.dk/product.php?p=6', null, null, null);
 select t.cmpmk('cmp-done', 'https://prisjagt.dk/product.php?p=7', 'done', now() - interval '1 day', 'https://shop.example.dk/original');
-select t.cmpmk('cmp-none-new', 'https://shop.example.dk/n1', 'none', now() - interval '6 days', null);
-select t.cmpmk('cmp-none-old', 'https://shop.example.dk/n2', 'none', now() - interval '8 days', null);
+select t.cmpmk('cmp-none-new', 'https://shop.example.dk/n1', 'none', now() - interval '59 minutes', null);
+select t.cmpmk('cmp-none-old', 'https://shop.example.dk/n2', 'none', now() - interval '61 minutes', null);
 insert into public.products (user_id, name, target_type) values ('00000000-0000-0000-0000-0000000000a1', 'cmp-navn', 'auto');
 
 select t.chk('compare: the columns exist and are null on an ordinary product',
@@ -1638,7 +1638,7 @@ select t.chk('compare: A cannot request for a prisjagt link (with or without www
 select t.chk('compare: ... the states of those products are what they were',
   (select compare_state is null from public.products where name = 'cmp-pj') and (select compare_state = 'done' and shop_url = 'https://shop.example.dk/original' from public.products where name = 'cmp-done')
   and (select compare_state = 'none' from public.products where name = 'cmp-none-new'));
-select t.chk('compare: a none older than 7 days can be asked again, with a new time',
+select t.chk('compare: a none older than 1 hour (61 minutes) can be asked again, one of 59 minutes cannot (above), with a new time',
   t.err($$update public.products set compare_state = 'wanted' where name = 'cmp-none-old'$$) = 'ok1'
   and t.q($$select (compare_state = 'wanted' and compare_at > now() - interval '1 minute')::text from public.products where name = 'cmp-none-old'$$) = 'true');
 select t.chk('compare: the browser cannot set done, none or null, nor the time or shop_url (the rest of the update goes through)',
@@ -1653,6 +1653,36 @@ select t.chk('compare: the browser cannot set done, none or null, nor the time o
   and t.q($$select (compare_state = 'done' and shop_url = 'https://shop.example.dk/original' and compare_at is not null)::text from public.products where name = 'cmp-done'$$) = 'true');
 update public.products set name = 'cmp-w1' where name = 'cmp-null2';
 select t.chk('compare: asking changes no job state', (select status = 'tracking' and offers is not null and history is not null and last_checked is not null and notified_price = 450 and backfill_state is not null and digest_price = 440 from public.products where name = 'cmp-null'));
+
+-- compare_tries: the job's counter. The browser cannot write it, a manual request does not touch it, a new link resets it
+select t.chk('compare: 59 minutes after a none is refused, 61 minutes is accepted (and the time is now)',
+  t.q($$select (compare_state = 'none')::text from public.products where name = 'cmp-none-new'$$) = 'true'
+  and t.q($$select (compare_state = 'wanted')::text from public.products where name = 'cmp-none-old'$$) = 'true');
+reset role;
+update public.products set compare_tries = 2 where name = 'cmp-none-new';
+set role authenticated;
+select t.asA();
+select t.chk('compare: A cannot write compare_tries (the rest of the update goes through)',
+  t.err($$update public.products set compare_tries = 0, name = 'cmp-none-new' where name = 'cmp-none-new'$$) = 'ok1'
+  and t.q($$select (compare_tries = 2)::text from public.products where name = 'cmp-none-new'$$) = 'true');
+reset role;
+update public.products set compare_tries = 3, compare_at = now() - interval '2 hours' where name = 'cmp-none-new';
+set role authenticated;
+select t.asA();
+select t.chk('compare: with compare_tries at 3 a manual request still works and leaves the counter at 3',
+  t.err($$update public.products set compare_state = 'wanted' where name = 'cmp-none-new'$$) = 'ok1'
+  and t.q($$select (compare_state = 'wanted' and compare_tries = 3)::text from public.products where name = 'cmp-none-new'$$) = 'true');
+select t.chk('compare: a new source_url resets compare_tries',
+  t.err($$update public.products set source_url = 'https://shop.example.dk/n1-ny' where name = 'cmp-none-new'$$) = 'ok1'
+  and t.q($$select (compare_tries = 0 and compare_state is null)::text from public.products where name = 'cmp-none-new'$$) = 'true');
+select t.chk('compare: a browser insert starts at 0',
+  t.err($$insert into public.products (name, source_url, target_type, compare_tries) values ('cmp-tries-ny', 'https://shop.example.dk/tn', 'auto', 3)$$) = 'ok1'
+  and t.q($$select (compare_tries = 0)::text from public.products where name = 'cmp-tries-ny'$$) = 'true');
+reset role;
+delete from public.products where name = 'cmp-tries-ny';
+update public.products set compare_state = 'none', compare_at = now() - interval '59 minutes', source_url = 'https://shop.example.dk/n1' where name = 'cmp-none-new';
+set role authenticated;
+select t.asA();
 
 -- a member of the shared list sees the products but changes nothing in them
 select t.asB();
@@ -1683,7 +1713,7 @@ select t.chk('compare: undo: source_url = shop_url gives compare_state none from
   t.err($$update public.products set source_url = 'https://shop.example.dk/original' where name = 'cmp-done'$$) = 'ok1'
   and t.q($$select (compare_state = 'none' and compare_at > now() - interval '1 minute' and shop_url is null and source_url = 'https://shop.example.dk/original' and status = 'pending' and history is null and title is null
         and notified_price is null and backfill_state is null and alternatives is null and target_type = 'pct' and target_value = 15 and list_id is not null and shops_always = array['Proshop'])::text from public.products where name = 'cmp-done'$$) = 'true');
-select t.chk('compare: ... and the product cannot be asked for again for 7 days', t.err($$update public.products set compare_state = 'wanted' where name = 'cmp-done'$$) = 'ok1'
+select t.chk('compare: ... and the product cannot be asked for again for an hour', t.err($$update public.products set compare_state = 'wanted' where name = 'cmp-done'$$) = 'ok1'
   and t.q($$select (compare_state = 'none')::text from public.products where name = 'cmp-done'$$) = 'true');
 reset role;
 update public.products set source_url = 'https://prisjagt.dk/product.php?p=7', shop_url = 'https://shop.example.dk/original', compare_state = 'done', compare_at = now() where name = 'cmp-done';

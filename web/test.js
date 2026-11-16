@@ -1794,22 +1794,33 @@ let base;
       await p.context().close();
     }
     {   // the states
-      const p = await open({ products: [sh("w1", { compare_state: "wanted", compare_at: ago(1) }), sh("n1", { compare_state: "none", compare_at: ago(3) }), sh("n2", { compare_state: "none", compare_at: ago(8) }),
+      const p = await open({ products: [sh("w1", { compare_state: "wanted", compare_at: ago(1) }), sh("n1", { compare_state: "none", compare_at: ago(30 / 1440) }), sh("n2", { compare_state: "none", compare_at: ago(61 / 1440) }),
         sh("n3", { compare_state: "none", compare_at: ago(3), user_id: "o9", list_id: "lx" }), sh("w3", { compare_state: "wanted", compare_at: ago(1), user_id: "o9", list_id: "lx" })], lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], label: "compare-states" });
       await p.waitForSelector(".item");
       for (const id of ["w1", "n1", "n2", "n3", "w3"]) await p.click('.head[data-id="' + id + '"]');
       check("compare: wanted: the quiet line, no action", (await cmpText(p, "w1")) === "Leder efter flere butikker." && (await body(p, "w1").locator('[data-act="cmp-find"]').count()) === 0);
-      check("compare: none for less than 7 days: 'Fandt ikke varen hos andre butikker.' and no action", (await cmpText(p, "n1")) === "Fandt ikke varen hos andre butikker." && (await body(p, "n1").locator('[data-act="cmp-find"]').count()) === 0);
-      check("compare: none for more than 7 days: the action is back", (await body(p, "n2").locator('[data-act="cmp-find"]').textContent()) === "Find flere butikker");
+      check("compare: none for less than an hour: 'Fandt ikke varen hos andre butikker.' and no action", (await cmpText(p, "n1")) === "Fandt ikke varen hos andre butikker." && (await body(p, "n1").locator('[data-act="cmp-find"]').count()) === 0);
+      check("compare: none for more than an hour: the action is back", (await body(p, "n2").locator('[data-act="cmp-find"]').textContent()) === "Find flere butikker");
       check("compare: others see the lines on a shared product but cannot ask", (await cmpText(p, "n3")) === "Fandt ikke varen hos andre butikker." && (await cmpText(p, "w3")) === "Leder efter flere butikker." && (await p.locator('.item [data-act="cmp-find"][data-id="n3"]').count()) === 0);
       check("compare: no em-dash and no exclamation mark in any of it", !/[—!]/.test(await cmpText(p, "w1") + await cmpText(p, "n1")));
+      await p.context().close();
+    }
+    {   // a refused product in the collapsed error group: the action is reachable by opening the group and the row (no forced opening)
+      const R = "Butikken afviser automatiske opslag.";
+      const p = await open({ products: [sh("g1", { status: "error", check_note: R, compare_state: "none", compare_at: ago(2 / 24), offers: null, last_checked: ago(1) }),
+        sh("g2", { status: "error", check_note: R, compare_state: "none", compare_at: ago(20 / 1440), offers: null, last_checked: ago(1) })], label: "compare-errgroup", collapsed: true });
+      await p.waitForSelector("#errGroup");
+      check("compare: error group: collapsed, the action is not visible yet", !(await p.locator('#errGroup [data-act="cmp-find"]').first().isVisible()));
+      await p.click("#errGroup > summary"); await p.click('.head[data-id="g1"]'); await p.click('.head[data-id="g2"]');
+      check("compare: error group: a 'none' older than an hour shows 'Find flere butikker' and it is visible", (await p.locator('.item:has([data-id="g1"]) [data-act="cmp-find"]').isVisible()) && (await p.locator('.item:has([data-id="g1"]) [data-act="cmp-find"]').textContent()) === "Find flere butikker");
+      check("compare: error group: a 'none' under an hour shows only the quiet text", (await cmpText(p, "g2")) === "Fandt ikke varen hos andre butikker." && (await body(p, "g2").locator('[data-act="cmp-find"]').count()) === 0);
       await p.context().close();
     }
     {   // a shop error
       const R = "Butikken afviser automatiske opslag.";
       const p = await open({ products: [sh("x1", { status: "error", check_note: R, compare_state: "wanted", compare_at: ago(1), offers: null, last_checked: ago(1) }), sh("x2", { status: "error", check_note: R, compare_state: null, offers: null }),
         sh("x3", { status: "error", check_note: "Kunne ikke finde en pris på siden.", compare_state: "wanted", compare_at: ago(1), offers: null }), sh("x4", { status: "tracking", check_note: R, compare_state: "wanted", compare_at: ago(1) }),
-        sh("x5", { status: "error", check_note: R, compare_state: "none", compare_at: ago(2), offers: null })], label: "compare-error" });
+        sh("x5", { status: "error", check_note: R, compare_state: "none", compare_at: ago(10 / 1440), offers: null })], label: "compare-error" });
       await p.waitForSelector(".item");
       for (const id of ["x1", "x2", "x3", "x4", "x5"]) await p.click('.head[data-id="' + id + '"]');
       check("compare: refused and wanted: 'Butikken afviser opslag. Leder efter andre butikker.' in the row", /Butikken afviser opslag\. Leder efter andre butikker\./.test(await headText(p, "x1")) && !/automatiske/.test(await headText(p, "x1")), await headText(p, "x1"));

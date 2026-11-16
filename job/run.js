@@ -22,6 +22,8 @@ const { makeClient } = require('./lib/supabase');
 const PAUSE_MS = 1500;
 const MAX_MAILS = 20;
 const ERROR_RETRY_MS = 6 * 3600 * 1000;
+const COMPARE_RETRY_MS = 24 * 3600 * 1000;   // a 'none' is asked again after this long (only while the product is in error) ...
+const COMPARE_MAX_TRIES = 3;                 // ... and at most this many times in all
 const DEADLINE_MS = 8.5 * 60 * 1000;      // the workflow times out at 10 minutes
 const MAX_BACKFILL = 2;                   // products whose older prices are fetched from the Internet Archive per run
 const BACKFILL_RETRY_MS = 6 * 3600 * 1000;
@@ -155,12 +157,35 @@ function wantsCompare(prod, target, error) {
 // The failure kind is not stored on the row, only the Danish check_note that shopErrorNote wrote. An error row from before the compare
 // feature existed is recognised by that note, built from the same function so it cannot drift: the same kinds as wantsCompare
 // (blocked, noprice, currency), never notfound / timeout / network. Used to mark such rows without fetching the page again.
-function oldErrorWantsCompare(prod, target) {
-  if (!target || !target.shop || prod.status !== 'error' || !Object.prototype.hasOwnProperty.call(prod, 'compare_state') || prod.compare_state !== null) return false;
-  const note = prod.check_note;
+function noteWantsCompare(note) {
   if (typeof note !== 'string' || !note) return false;
   const mk = (kind) => Object.assign(new PJ.PageError(kind, ''), { shop: true });
   return note === shopErrorNote(mk('blocked')) || note === shopErrorNote(mk('noprice')) || note.indexOf(NOTE_CURRENCY_PREFIX) === 0;
+}
+function oldErrorWantsCompare(prod, target) {
+  if (!target || !target.shop || prod.status !== 'error' || !Object.prototype.hasOwnProperty.call(prod, 'compare_state') || prod.compare_state !== null) return false;
+  return noteWantsCompare(prod.check_note);
+}
+
+// The AI agent may have answered 'none' too hastily (a shop that refuses automated requests looks the same as a product that is not
+// on Prisjagt). A single-shop product that is still in error for one of those reasons, 'none' for over 24 hours, is marked 'wanted'
+// again by the job, at most COMPARE_MAX_TRIES times in all (compare_tries, the first marking counts as 1; people's own requests do not
+// count). `error` is the failure just seen, or null to go by the stored note. A database without the compare_tries column (the row has
+// no such key) never does it, as the count could not be kept.
+function wantsCompareAgain(prod, target, error, now) {
+  if (!target || !target.shop || prod.status !== 'error' || prod.compare_state !== 'none') return false;
+  if (!Object.prototype.hasOwnProperty.call(prod, 'compare_tries') || !(Number(prod.compare_tries) < COMPARE_MAX_TRIES)) return false;
+  const at = prod.compare_at ? Date.parse(prod.compare_at) : NaN;
+  if (isFinite(at) && now.getTime() - at < COMPARE_RETRY_MS) return false;
+  if (error) return error instanceof PJ.PageError && !!error.shop && ['blocked', 'noprice', 'currency'].indexOf(error.kind) !== -1;
+  return noteWantsCompare(prod.check_note);
+}
+
+// The patch that asks the AI agent (compare_state 'wanted', now); compare_tries is counted when the database has the column.
+function wantedPatch(prod, now) {
+  const patch = { compare_state: 'wanted', compare_at: isoNow(now) };
+  if (Object.prototype.hasOwnProperty.call(prod, 'compare_tries')) patch.compare_tries = (Number(prod.compare_tries) || 0) + 1;
+  return patch;
 }
 
 // The page kind of a source_url: {url, shop} or null when the link may not be fetched at all.
@@ -310,7 +335,7 @@ async function run(ctx) {
       // an old error row still waiting out the 6-hour retry: mark it (no fetch) if its stored note says the shop refuses us
       if (st === 'error') {
         const t = classify(prod.source_url);
-        if (oldErrorWantsCompare(prod, t)) results.push({ prod, patch: { compare_state: 'wanted', compare_at: isoNow(now) }, hit: null });
+        if (oldErrorWantsCompare(prod, t) || wantsCompareAgain(prod, t, null, now)) results.push({ prod, patch: wantedPatch(prod, now), hit: null });
       }
       continue;
     }
@@ -323,7 +348,8 @@ async function run(ctx) {
     }
     const url = target.url, hostKey = SHOP.registrableDomain(new URL(url).hostname);
     if (stats.blockedHosts.indexOf(hostKey) !== -1) {                // refused earlier in this run: leave the rest of that host alone
-      if (wantsCompare(prod, target, Object.assign(new PJ.PageError('blocked', 'afvist tidligere i kørslen'), { shop: true }))) results.push({ prod, patch: { compare_state: 'wanted', compare_at: isoNow(now) }, hit: null });
+      const blockedErr = Object.assign(new PJ.PageError('blocked', 'afvist tidligere i kørslen'), { shop: true });
+      if (wantsCompare(prod, target, blockedErr) || wantsCompareAgain(prod, target, blockedErr, now)) results.push({ prod, patch: wantedPatch(prod, now), hit: null });
       continue;
     }
     if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; continue; }
@@ -344,7 +370,7 @@ async function run(ctx) {
         if (got.error instanceof PJ.PageError && got.error.kind === 'blocked') { stats.blocked = true; if (stats.blockedHosts.indexOf(hostKey) === -1) stats.blockedHosts.push(hostKey); }
         const note = errorNote(got.error);
         log('  ' + (prod.name || prod.id) + ': ' + note);
-        const want = wantsCompare(prod, target, got.error) ? { compare_state: 'wanted', compare_at: isoNow(now) } : {};
+        const want = wantsCompare(prod, target, got.error) || wantsCompareAgain(prod, target, got.error, now) ? wantedPatch(prod, now) : {};
         if (todo === 'initial') results.push({ prod, patch: Object.assign({ status: 'error', check_note: note, last_checked: isoNow(now) }, want), hit: null });
         else results.push({ prod, patch: Object.assign({ check_note: note }, want), hit: null });
         continue;
@@ -502,7 +528,7 @@ async function run(ctx) {
   return { stats, summary, results };
 }
 
-module.exports = { run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, oldErrorWantsCompare, MAX_BACKFILL };
+module.exports = { run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, wantsCompareAgain, oldErrorWantsCompare, MAX_BACKFILL };
 
 if (require.main === module) {
   const e = process.env;

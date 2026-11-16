@@ -654,7 +654,7 @@
   // ---- compare: a product that follows one shop can be switched to Prisjagt (the AI agent finds the page), and switched back ----
   // The state is the server's (compare_state, written by the job and the AI agent); the person can only ask ('wanted') and go back
   // (source_url = the original shop link). A quiet line each, nothing in the product row.
-  var CMP_WAIT = 7 * 24 * 36e5, CMP_REFUSED = "Butikken afviser automatiske opslag.";
+  var CMP_WAIT = 36e5, CMP_REFUSED = "Butikken afviser automatiske opslag.";
   function cmpSingle(p) { return !!p.url && isShopUrl(p.url); }
   function cmpTime(v) { var t = Date.parse(v); return isFinite(t) ? t : null; }
   // the original shop link of a switched product, only when it is an https link to one shop (it came from the database: checked again)
@@ -662,7 +662,7 @@
     var u = p.shopUrl;
     return typeof u === "string" && /^https:\/\//i.test(u) && parseLink(u) && isShopUrl(u) ? u : null;
   }
-  // may the person ask? A shop link, not asked before (or asked and not found more than 7 days ago); their own product, not bought
+  // may the person ask? A shop link, not asked before (or asked and not found more than 1 hour ago); their own product, not bought
   function cmpMayAsk(p) {
     if (!p.cmpOk || !mayEdit(p) || p.boughtAt || !cmpSingle(p) || (p.status !== "tracking" && p.status !== "error")) return false;
     if (p.cmp === null) return true;
