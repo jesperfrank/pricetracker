@@ -80,6 +80,8 @@ h1 { font: 700 30px/1.1 var(--font); letter-spacing: -0.025em; margin: 0 }
 .sent { background: var(--good-wash); border-radius: 10px; padding: 16px 18px; margin: 0 0 16px; max-width: 520px }
 .sent b { font-size: 16px; display: block; margin-bottom: 2px }
 .sent p { margin: 0 0 8px; color: var(--ink2); overflow-wrap: anywhere }
+.sent .login { margin: 8px 0 }
+.sent .link { margin-right: 14px }
 code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px 5px; border-radius: 4px }
 .add .url { grid-column: 1 / -1 }
 .edit input.wide { width: min(100%, 340px) }

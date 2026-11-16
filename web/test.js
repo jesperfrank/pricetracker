@@ -105,6 +105,7 @@ const FAKE = `
     return b;
   }
   db.writes = function () { return db.ops.filter(function (o) { return o.table !== 'profiles'; }); };
+  window.__authEmit = function (ev, s) { if (authCb) authCb(ev, s); };
   window.__emit = function () { rt.forEach(function (f) { f({ eventType: "UPDATE" }); }); };
   function rpc(name, args) {
     db.rpcs.push({ name: name, args: clone(args || {}) });
@@ -158,6 +159,13 @@ const FAKE = `
         getSession: function () { return Promise.resolve({ data: { session: db.session }, error: null }); },
         onAuthStateChange: function (cb) { authCb = cb; return { data: { subscription: { unsubscribe: function () {} } } }; },
         signInWithOtp: function (a) { db.ops.push({ op: "otp", payload: clone(a) }); return Promise.resolve(db.otpError ? { data: null, error: db.otpError } : { data: {}, error: null }); },
+        verifyOtp: function (a) {
+          db.ops.push({ op: "verify", payload: clone(a) });
+          if (a.type !== "email" || a.token !== (db.goodCode || "123456")) return Promise.resolve({ data: { user: null, session: null }, error: { status: 403, code: "otp_expired", message: "Token has expired or is invalid" } });
+          db.session = { user: { id: "u1", email: a.email } };
+          if (authCb) authCb("SIGNED_IN", db.session);
+          return Promise.resolve({ data: { user: db.session.user, session: db.session }, error: null });
+        },
         signOut: function () { db.session = null; db.ops.push({ op: "signout" }); if (authCb) authCb("SIGNED_OUT", null); return Promise.resolve({ error: null }); }
       },
       channel: function () { var c = { on: function (t, f, cb) { rt.push(cb); return c; }, subscribe: function () { return c; } }; return c; },
@@ -249,6 +257,56 @@ let base;
       await p.evaluate(() => { document.getElementById("lMsg").hidden = true; });
     }
     await p.context().close();
+  }
+
+  // 2a. code login
+  {
+    const p = await open({ session: false, label: "code" });
+    await p.fill("#lEmail", "mor@familie.dk"); await p.click("#lSubmit");
+    await p.waitForSelector("#sentBox:not([hidden])");
+    const inp = await p.getAttribute("#cCode", "inputmode") + "|" + await p.getAttribute("#cCode", "autocomplete");
+    check("code: field has numeric inputmode and one-time-code", inp === "numeric|one-time-code", inp);
+    check("code: sent text offers link or code", /Åbn linket, eller skriv koden/.test(await p.textContent("#sentBox")) && await p.isVisible("#cSubmit") && /Log ind/.test(await p.textContent("#cSubmit")));
+    await p.fill("#cCode", "999999"); await p.click("#cSubmit");
+    await p.waitForFunction(() => !document.getElementById("cMsg").hidden);
+    check("code: wrong code gives Danish message and stays on screen", /Koden passer ikke, eller den er udløbet\./.test(await p.textContent("#cMsg")) && await p.isVisible("#sentBox") && !(await p.isVisible("#appView")));
+    await p.fill("#cCode", "12"); await p.click("#cSubmit");
+    check("code: too short code is not sent", (await ops(p)).filter(x => x.op === "verify").length === 1);
+    // resend cooldown
+    await p.click("#sentResend");
+    check("code: resend inside 30 s is blocked", /Vent/.test(await p.textContent("#cMsg")) && (await ops(p)).filter(x => x.op === "otp").length === 1);
+    await p.evaluate(() => { var o = Date.now; Date.now = function () { return o() + 31000; }; });
+    await p.click("#sentResend");
+    await p.waitForFunction(() => /Ny mail sendt/.test(document.getElementById("cMsg").textContent));
+    const otps = (await ops(p)).filter(x => x.op === "otp");
+    check("code: resend after 30 s sends again with same address and redirect", otps.length === 2 && otps[1].payload.email === "mor@familie.dk" && otps[1].payload.options.emailRedirectTo === base + "/index.html");
+    // reload keeps the address
+    await p.reload();
+    await p.waitForSelector("#sentBox:not([hidden])");
+    check("code: reload keeps the sent screen and address", (await p.textContent("#sentTo")) === "mor@familie.dk");
+    await p.fill("#cCode", " 123 456 "); await p.click("#cSubmit");
+    await p.waitForSelector("#appView:not([hidden])");
+    const v = (await ops(p)).find(x => x.op === "verify");
+    check("code: pasted code with spaces is verified as email OTP for the stored address", v && v.payload.email === "mor@familie.dk" && v.payload.token === "123456" && v.payload.type === "email", JSON.stringify(v));
+    check("code: login continues like after a link (app shown, address in header)", /mor@familie\.dk/.test(await p.textContent("#who")) && !(await p.isVisible("#authView")));
+    check("code: stored address cleared after login", await p.evaluate(() => sessionStorage.getItem("pv_login_email")) === null);
+    await p.context().close();
+    const q = await open({ session: false, label: "code8" });
+    await q.evaluate(() => { window.__db.goodCode = "12345678"; });
+    await q.fill("#lEmail", "far@familie.dk"); await q.click("#lSubmit");
+    await q.waitForSelector("#sentBox:not([hidden])");
+    await q.fill("#cCode", "12345678"); await q.click("#cSubmit");
+    await q.waitForSelector("#appView:not([hidden])");
+    check("code: 8-digit code accepted", true);
+    await q.context().close();
+    // magic link path: session arrives through onAuthStateChange without any code
+    const r = await open({ session: false, label: "link" });
+    await r.fill("#lEmail", "mor@familie.dk"); await r.click("#lSubmit");
+    await r.waitForSelector("#sentBox:not([hidden])");
+    await r.evaluate(() => { window.__db.session = { user: { id: "u1", email: "mor@familie.dk" } }; window.__authEmit("SIGNED_IN", window.__db.session); });
+    await r.waitForSelector("#appView:not([hidden])");
+    check("link: magic-link login (auth event, no code) still logs in", /mor@familie\.dk/.test(await r.textContent("#who")) && !(await r.isVisible("#sentBox")));
+    await r.context().close();
   }
 
   // 2b. link error in URL hash

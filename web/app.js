@@ -1356,8 +1356,40 @@
     sb.auth.signInWithOtp({ email: email, options: { emailRedirectTo: location.origin + location.pathname } }).then(function (r) {
       btn.disabled = false;
       if (r && r.error) { msg.textContent = otpMessage(r.error); msg.hidden = false; if (otpNotAllowed(r.error)) openAsk(email, true); return; }
-      $("sentTo").textContent = email; $("sentBox").hidden = false; $("loginForm").hidden = true;
+      showSent(email, true);
     }, function (e) { btn.disabled = false; msg.textContent = otpMessage(e); msg.hidden = false; if (otpNotAllowed(e)) openAsk(email, true); });
+  });
+  // The e-mail also holds a code, for an installed app that has its own storage: the link opens in the browser, so the code is typed here.
+  var LOGIN_KEY = "pv_login_email", sentEmail = "", lastSent = 0;
+  function loginStore(v) { try { if (v) sessionStorage.setItem(LOGIN_KEY, v); else sessionStorage.removeItem(LOGIN_KEY); } catch (e) {} }
+  function loginStored() { try { return sessionStorage.getItem(LOGIN_KEY) || ""; } catch (e) { return ""; } }
+  function showSent(email, fresh) {
+    sentEmail = email; if (fresh) { lastSent = Date.now(); loginStore(email); }
+    $("sentTo").textContent = email; $("sentBox").hidden = false; $("loginForm").hidden = true;
+    $("cMsg").hidden = true; $("cCode").value = "";
+  }
+  function codeMsg(t) { var el = $("cMsg"); el.textContent = t || ""; el.hidden = !t; }
+  $("codeForm").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var code = $("cCode").value.replace(/\s+/g, "");
+    if (!/^[0-9]{6,8}$/.test(code)) { codeMsg("Koden passer ikke, eller den er udløbet."); return; }
+    if (!sentEmail || !sb) return;
+    var btn = $("cSubmit"); btn.disabled = true; codeMsg("");
+    sb.auth.verifyOtp({ email: sentEmail, token: code, type: "email" }).then(function (r) {
+      btn.disabled = false;
+      if (r && r.error) { codeMsg("Koden passer ikke, eller den er udløbet."); return; }
+      loginStore("");  // onAuthStateChange takes it from here, as after the link
+    }, function () { btn.disabled = false; codeMsg("Koden passer ikke, eller den er udløbet."); });
+  });
+  $("sentResend").addEventListener("click", function () {
+    if (!sentEmail || !sb) return;
+    var wait = Math.ceil((lastSent + 30000 - Date.now()) / 1000);
+    if (wait > 0) { codeMsg("Vent " + wait + " sekunder, før du sender igen."); return; }
+    var btn = $("sentResend"); btn.disabled = true; lastSent = Date.now(); codeMsg("");
+    sb.auth.signInWithOtp({ email: sentEmail, options: { emailRedirectTo: location.origin + location.pathname } }).then(function (r) {
+      btn.disabled = false;
+      codeMsg(r && r.error ? otpMessage(r.error) : "Ny mail sendt.");
+    }, function (e) { btn.disabled = false; codeMsg(otpMessage(e)); });
   });
   // ---- ask for access (signed out) ----
   var ASK_TEXT = {
@@ -1394,7 +1426,7 @@
       if (res === "allowed" && !$("lEmail").value.trim()) $("lEmail").value = email;
     }, function () { btn.disabled = false; askMsg("Kunne ikke sende anmodningen lige nu. Prøv igen om lidt."); });
   });
-  $("sentBack").addEventListener("click", function () { $("sentBox").hidden = true; $("loginForm").hidden = false; $("lEmail").focus(); });
+  $("sentBack").addEventListener("click", function () { loginStore(""); sentEmail = ""; $("sentBox").hidden = true; $("loginForm").hidden = false; $("lEmail").focus(); });
   $("logoutBtn").addEventListener("click", function () {
     sb.auth.signOut().then(function () { handleSession(null); }, function () { handleSession(null); });
   });
@@ -1403,6 +1435,7 @@
     $("authView").hidden = false; $("appView").hidden = true; $("acts").hidden = true; $("reqBadge").hidden = true;
     $("status").textContent = "";
     if (errText) { $("lMsg").textContent = errText; $("lMsg").hidden = false; }
+    var kept = loginStored(); if (kept && $("sentBox").hidden) showSent(kept, false);
   }
   function showApp() {
     $("authView").hidden = true; $("appView").hidden = false; $("acts").hidden = false;
@@ -1415,6 +1448,7 @@
       user = null; showAuth();
       return;
     }
+    loginStore("");
     if (user && user.id === session.user.id) return;
     if (user) stopSession();
     user = session.user; showApp(); startSession();

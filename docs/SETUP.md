@@ -18,6 +18,34 @@ Du skal bruge: en GitHub-konto med repoet, en gratis Supabase-konto og en gratis
 3. Sæt **Authentication** > **Sign In / Providers** (eller *Settings*) så *Allow new users to sign up* er slået **til** (de inviterede skal kunne oprette sig første gang; hooket i trin 3 afviser alle andre).
 4. Supabases indbyggede mailserver må kun sende få mails i timen. Til 10-20 personer er det normalt nok, men vil du være sikker, så tilføj Resend som egen SMTP under **Authentication** > **SMTP Settings** (host `smtp.resend.com`, port `465`, bruger `resend`, adgangskode = din Resend API-nøgle, afsender = din verificerede adresse).
 
+### Kode i mailen (til appen på hjemmeskærmen)
+
+På iPhone har en app på hjemmeskærmen sit eget lager, adskilt fra Safari. Linket i mailen åbner i Safari, så personen bliver logget ind dér, men ikke i appen. Derfor kan man også skrive koden fra mailen på siden. Det kræver, at mailen indeholder koden:
+
+1. **Authentication** > **Emails** (nogle gange **Email Templates**) > skabelonen **Magic Link**.
+2. Sæt emnet og indholdet til nedenstående. Linjen med `{{ .Token }}` er den vigtige: den sætter koden ind. Linket `{{ .ConfirmationURL }}` skal blive, så det virker som før i en almindelig browser.
+3. Brug **samme tekst i skabelonen "Confirm signup"**. Første gang en ny person logger ind, sender Supabase nemlig den skabelon i stedet for "Magic Link".
+
+Emne:
+
+```
+Dit login til Prisvagten
+```
+
+Indhold (HTML):
+
+```html
+<h2>Log ind på Prisvagten</h2>
+<p><a href="{{ .ConfirmationURL }}">Åbn linket for at logge ind</a></p>
+<p>Eller skriv denne kode på siden:</p>
+<p style="font-size:24px;font-weight:bold;letter-spacing:4px">{{ .Token }}</p>
+<p>Koden og linket virker kun en kort tid. Har du ikke bedt om login, kan du se bort fra mailen.</p>
+```
+
+Siden accepterer en kode på 6 til 8 cifre, så den passer, uanset hvor lang en kode projektet er sat til at bruge (**Authentication** > **Sign In / Providers** > **Email** > *Email OTP Length*).
+
+Jeg er usikker på de præcise navne i dashboardet: i nogle versioner hedder menuen **Authentication** > **Email Templates**, i andre ligger skabelonerne under **Authentication** > **Emails** > **Templates**, og skabelonerne hedder "Magic Link" og "Confirm signup" (i nye versioner kan "Confirm signup" hedde "Confirm sign up"). Jeg har ikke afprøvet det mod et rigtigt projekt. Mangler koden i mailen, er det skabelonen, der ikke er ændret.
+
 ## 3. Afvis ikke-inviterede ved tilmelding (hook)
 
 Funktionen `public.hook_before_user_created` er allerede oprettet af `schema.sql`.

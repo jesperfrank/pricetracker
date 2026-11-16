@@ -47,7 +47,14 @@
     <p class="msg" id="lMsg" role="alert" hidden></p>
     <div class="sent" id="sentBox" hidden>
       <b>Tjek din indbakke</b>
-      <p>Login-link sendt til <span class="n" id="sentTo"></span>. Åbn det på denne enhed. Intet at se? Tjek uønsket post.</p>
+      <p>Login-link sendt til <span class="n" id="sentTo"></span>. Åbn linket, eller skriv koden fra mailen. Intet at se? Tjek uønsket post.</p>
+      <form class="login code" id="codeForm" novalidate>
+        <label class="vh" for="cCode">Kode fra mailen</label>
+        <input class="inp" type="text" id="cCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,12}" maxlength="14" placeholder="Kode">
+        <button class="btn" id="cSubmit" type="submit">Log ind</button>
+      </form>
+      <p class="msg" id="cMsg" role="alert" hidden></p>
+      <button type="button" class="link" id="sentResend">Send igen</button>
       <button type="button" class="link" id="sentBack">Brug en anden adresse</button>
     </div>
     <p class="fine ask-row"><button type="button" class="link" id="askToggle" aria-expanded="false" aria-controls="askBox">Ingen adgang endnu? Bed om adgang</button></p>
