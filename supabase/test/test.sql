@@ -172,6 +172,61 @@ select t.chk('service_role can read and update access_requests', (select count(*
 update public.access_requests set owner_notified_at = now() where email = 'p3@x.dk';
 reset role;
 
+-- 11b. products.source_url: any https link with a dotted host; the old prisjagt-only check is replaced idempotently
+insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000a1', 'mor@familie.dk');
+-- the live database has the old constraint: put it back, then re-run the file
+alter table public.products drop constraint products_source_url_check;
+alter table public.products add constraint products_source_url_check
+  check (source_url is null or (char_length(source_url) <= 500 and source_url ~ '^https://(www\.)?prisjagt\.dk/'));
+create function t.ins(u text) returns text language plpgsql as $$
+begin
+  insert into public.products (user_id, name, source_url, target_type, target_value)
+  values ('00000000-0000-0000-0000-0000000000a1', 'x', u, 'price', 100);
+  return 'ok';
+exception when check_violation then return 'rejected'; end $$;
+select t.chk('old constraint (as on the live database) rejects a shop link', t.ins('https://shop.example.dk/vare') = 'rejected');
+\o /dev/null
+\i :schema
+\i :schema
+\o
+select t.chk('exactly one source_url constraint after re-runs', (select count(*) = 1 from pg_constraint where conname = 'products_source_url_check' and conrelid = 'public.products'::regclass));
+select t.chk('prisjagt link accepted', t.ins('https://prisjagt.dk/product.php?p=123') = 'ok');
+select t.chk('www prisjagt link accepted', t.ins('https://www.prisjagt.dk/product.php?p=1') = 'ok');
+select t.chk('shop link accepted', t.ins('https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html') = 'ok');
+select t.chk('shop link with query accepted', t.ins('https://shop.example.com/p?id=1&x=2#a') = 'ok');
+select t.chk('host only accepted', t.ins('https://example.dk') = 'ok');
+select t.chk('null (name only) accepted', t.ins(null) = 'ok');
+select t.chk('http rejected', t.ins('http://shop.example.dk/p') = 'rejected');
+select t.chk('no dot in host rejected', t.ins('https://localhost/p') = 'rejected' and t.ins('https://intranet/p') = 'rejected');
+select t.chk('user:password@ rejected', t.ins('https://user:pw@shop.dk/p') = 'rejected' and t.ins('https://evil.dk@shop.dk/p') = 'rejected');
+select t.chk('port rejected', t.ins('https://shop.dk:8443/p') = 'rejected');
+select t.chk('spaces rejected', t.ins('https://shop.dk/a b') = 'rejected' and t.ins('https://sh op.dk/a') = 'rejected');
+select t.chk('other schemes rejected', t.ins('javascript:alert(1)') = 'rejected' and t.ins('ftp://shop.dk/x') = 'rejected' and t.ins('shop.dk/x') = 'rejected');
+select t.chk('empty host parts rejected', t.ins('https://.dk/x') = 'rejected' and t.ins('https://shop./x') = 'rejected');
+select t.chk('500 characters accepted, 501 rejected',
+  t.ins('https://shop.dk/' || repeat('a', 484)) = 'ok' and t.ins('https://shop.dk/' || repeat('a', 485)) = 'rejected');
+-- a browser user can write a shop link and changing it starts the product over
+set role authenticated;
+select set_config('request.jwt.claims', '{"email":"mor@familie.dk","sub":"00000000-0000-0000-0000-0000000000a1"}', false);
+update public.products set source_url = 'https://shop.example.dk/vare' where source_url = 'https://prisjagt.dk/product.php?p=123';
+select t.chk('authenticated user can change to a shop link', (select count(*) = 1 from public.products where source_url = 'https://shop.example.dk/vare' and status = 'pending'));
+select t.chk('authenticated user cannot set a bad link', t.ins('http://x.dk/') = 'rejected');
+reset role;
+-- resolver_set keeps accepting prisjagt.dk product links only
+insert into public.products (user_id, name, target_type, target_value) values ('00000000-0000-0000-0000-0000000000a1', 'navn kun', 'price', 5);
+update public.resolver_secret set token = repeat('a', 64);
+select set_config('request.headers', '{"x-resolver-token":"' || repeat('a', 64) || '"}', false);
+create function t.rs(u text) returns text language plpgsql as $$
+declare pid uuid := (select id from public.products where name = 'navn kun'); r boolean;
+begin
+  r := public.resolver_set(pid, u); return r::text;
+exception when others then return 'error:' || sqlerrm; end $$;
+select t.chk('resolver_set rejects a shop link', t.rs('https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html') like '%not a prisjagt.dk product link%'
+  and (select source_url is null from public.products where name = 'navn kun'));
+select t.chk('resolver_set rejects other prisjagt pages', t.rs('https://prisjagt.dk/produkt/x') like '%not a prisjagt.dk product link%');
+select t.chk('resolver_set accepts a prisjagt product link', t.rs('https://www.prisjagt.dk/product.php?p=42') = 'true');
+select t.chk('and stores it without www', (select source_url = 'https://prisjagt.dk/product.php?p=42' from public.products where name = 'navn kun'));
+
 -- 12. final whole-file run on the populated database
 \o /dev/null
 \i :schema

@@ -14,6 +14,7 @@ const path = require('path');
 const zlib = require('zlib');
 const P = require('./lib/pricing');
 const PJ = require('./lib/prisjagt');
+const SHOP = require('./lib/shop');
 const { composeMail } = require('./lib/mail');
 const R = require('./run');
 
@@ -203,6 +204,220 @@ test('parser: fetchPage treats 403/429/challenge as blocked', async () => {
   await assert.rejects(PJ.fetchPage('https://prisjagt.dk/x', mk(404, '')), (e) => e.kind === 'notfound');
   let seen; await PJ.fetchPage('https://prisjagt.dk/x', async (u, o) => { seen = o; return { status: 200, url: u, text: async () => fixtureHtml('dyson') }; });
   assert(/^Prisvagten-pricecheck/.test(seen.headers['User-Agent']) && !('Cookie' in seen.headers));
+});
+
+
+// ---------------------------------------------------------------- generic shop pages (any host except prisjagt.dk)
+
+const SHOP_FIX = {};
+function shopHtml(n) { return SHOP_FIX[n] || (SHOP_FIX[n] = fs.readFileSync(path.join(FIX, n + '.html'), 'utf8')); }
+function shopParse(n, url) { return SHOP.parseShopPage(shopHtml(n), url || 'https://www.example.dk/x'); }
+const BED_URL = 'https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html';
+function resp(status, body, headers) {
+  const h = headers || {};
+  return { status, ok: status >= 200 && status < 300, headers: { get: (k) => (k.toLowerCase() in h ? h[k.toLowerCase()] : null) }, text: async () => (body === undefined ? '' : body) };
+}
+
+test('shop: number formats', () => {
+  const cases = [['579,00', 579], ['1.299,00', 1299], ['1299.00', 1299], ['579', 579], ['1,299.00', 1299], ['kr. 579,-', 579], ['579,-', 579], ['1.299', 1299],
+    ['1 299,50', 1299.5], [' 1.299,95 kr.', 1299.95], ['12.5', 12.5], ['0,5', 0.5], ['1.234.567,89', 1234567.89], ['249.95', 249.95], ['89,9', 89.9]];
+  cases.forEach(([i, o]) => assert.strictEqual(SHOP.parseNumber(i), o, JSON.stringify(i)));
+  assert.strictEqual(SHOP.parseNumber(579), 579); assert.strictEqual(SHOP.parseNumber(12.5), 12.5);
+  [['abc'], [''], ['-5'], ['0'], ['0,00'], [null], [undefined], [NaN], [Infinity], [{}], [[]], ['1.2.3'], ['1.299.00,5'], [0], [-3]]
+    .forEach(([i]) => assert.strictEqual(SHOP.parseNumber(i), null, JSON.stringify(i)));
+  assert.strictEqual(SHOP.stockFrom('https://schema.org/InStock'), true); assert.strictEqual(SHOP.stockFrom('http://schema.org/OutOfStock'), false);
+  assert.strictEqual(SHOP.stockFrom('PreOrder'), false); assert.strictEqual(SHOP.stockFrom('https://schema.org/BackOrder'), false);
+  assert.strictEqual(SHOP.stockFrom('LimitedAvailability'), true); assert.strictEqual(SHOP.stockFrom(undefined), true); assert.strictEqual(SHOP.stockFrom('Noget andet'), true);
+  assert.strictEqual(SHOP.stockFrom('out of stock'), false); assert.strictEqual(SHOP.stockFrom('Udsolgt'), false);
+});
+
+test('shop: url guard (user-supplied links)', () => {
+  ['https://www.bedrenaetter.dk/mayan.html', 'https://shop.example.com/p?id=1#x', 'http://shop.dk/vare', 'https://xn--bdrenatter-xyz.dk/a', 'https://shop.co.uk/a', '  https://shop.dk/a  ']
+    .forEach((u) => assert.strictEqual(SHOP.validateShopUrl(u), u.trim(), u));
+  ['', null, undefined, 42, 'ftp://shop.dk/a', 'file:///etc/passwd', 'javascript:alert(1)', 'data:text/html,x', 'shop.dk/a', '//shop.dk/a',
+    'https://localhost/a', 'https://LOCALHOST./a', 'https://foo.localhost/a', 'https://intranet/a', 'https://printer.local/a', 'https://db.internal/a', 'https://router.lan/a', 'https://x.home.arpa/a',
+    'https://127.0.0.1/a', 'https://10.0.0.5/a', 'https://192.168.1.1/a', 'https://169.254.169.254/latest/meta-data', 'https://2130706433/a', 'https://0x7f.0.0.1/a', 'https://017700000001/a', 'https://[::1]/a', 'https://[fe80::1]/a', 'https://1.2.3.4.5/a',
+    'https://user:pw@shop.dk/a', 'https://shop.dk@evil.dk:80/a', 'https://shop.dk:8443/a', 'https://shop.dk:443x/a', 'https://shop/a', 'https://.dk/a', 'https://shop..dk/a', 'https://shop.d1/a', 'https://shop.dk./a/b c',
+    'https://shop.dk/' + 'a'.repeat(500), 'https://shop.dk/a\nb']
+    .forEach((u) => assert.strictEqual(SHOP.validateShopUrl(u), null, String(u)));
+  assert.strictEqual(SHOP.registrableDomain('www.bedrenaetter.dk'), 'bedrenaetter.dk'); assert.strictEqual(SHOP.registrableDomain('shop.example.co.uk'), 'example.co.uk');
+  assert.strictEqual(SHOP.registrableDomain('a.b.shop.dk'), 'shop.dk'); assert(SHOP.isPrisjagtHost('www.prisjagt.dk') && SHOP.isPrisjagtHost('prisjagt.dk') && !SHOP.isPrisjagtHost('prisjagt.dk.evil.com'));
+  assert.strictEqual(R.classify('https://www.prisjagt.dk/product.php?p=1').shop, false); assert.strictEqual(R.classify(BED_URL).shop, true);
+  assert.strictEqual(R.classify('http://prisjagt.dk/product.php?p=1'), null, 'a prisjagt link must stay a valid prisjagt link'); assert.strictEqual(R.classify('https://prisjagt.dk.evil.com/x').shop, true);
+});
+
+test('shop: parser on saved pages (JSON-LD, @graph, AggregateOffer, offers array, microdata, meta, stock, title, shop name)', () => {
+  let r = shopParse('shop-jsonld-single', BED_URL);
+  assert.strictEqual(r.source, 'json-ld'); assert.strictEqual(r.title, 'Mayan kuvertlagen 180x200 hvid');
+  assert.deepStrictEqual(r.rows.map((x) => [x.store, x.price, x.url, x.inStock, x.note, x.variant]), [['Bedre Nætter', 579, BED_URL, true, null, 'shop']]);
+  assert.deepStrictEqual(r.variants, [{ id: 'shop', label: 'Bedre Nætter', lowest: 579, offers: 1, sample: 'Mayan kuvertlagen 180x200 hvid' }]);
+  assert.strictEqual(r.note, null); assert.deepStrictEqual(r.history, []);
+  r = shopParse('shop-graph', 'https://www.soveshoppen.dk/dundyne-alpe');
+  assert.strictEqual(r.source, 'json-ld'); assert.strictEqual(r.rows[0].price, 1299); assert.strictEqual(r.title, 'Dundyne Alpe 140x200');
+  assert.strictEqual(r.rows[0].store, 'Soveshoppen', 'no og:site_name: host name, capitalised, without www and TLD');
+  assert.strictEqual(SHOP.parseShopPage(shopHtml('shop-graph'), 'https://shop.example.co.uk/x').rows[0].store, 'Example');
+  r = shopParse('shop-aggregate');
+  assert.strictEqual(r.rows[0].price, 1449); assert.strictEqual(r.rows[0].store, 'Pudebutikken'); assert(/flere varianter/.test(r.note), 'lowPrice < highPrice: several prices');
+  r = shopParse('shop-offers-array');
+  assert.strictEqual(r.rows[0].price, 399, 'lowest in-stock price (the cheaper one is out of stock)'); assert.strictEqual(r.rows[0].inStock, true); assert.strictEqual(r.note, SHOP.MULTI_NOTE);
+  // the page's canonical url / a sku in the url identify the variant
+  const withUrls = shopHtml('shop-offers-array').replace('"sku":"SET-140"', '"sku":"SET-140","url":"https://www.tekstilhuset.dk/sengesaet?v=140"').replace('"sku":"SET-200"', '"sku":"SET-200","url":"https://www.tekstilhuset.dk/sengesaet?v=200"');
+  r = SHOP.parseShopPage(withUrls, 'https://www.tekstilhuset.dk/sengesaet?v=140');
+  assert.strictEqual(r.rows[0].price, 349); assert.strictEqual(r.rows[0].inStock, false); assert.strictEqual(r.note, null, 'url identifies the variant: no remark');
+  r = SHOP.parseShopPage(withUrls.replace('<title>', '<link rel="canonical" href="https://www.tekstilhuset.dk/sengesaet?v=200"><title>'), 'https://www.tekstilhuset.dk/sengesaet?utm_source=x');
+  assert.strictEqual(r.rows[0].price, 399); assert.strictEqual(r.note, null, 'canonical identifies the variant');
+  r = SHOP.parseShopPage(shopHtml('shop-offers-array'), 'https://www.tekstilhuset.dk/sengesaet?sku=SET-140');
+  assert.strictEqual(r.rows[0].price, 349, 'sku in the url'); assert.strictEqual(r.note, null);
+  r = shopParse('shop-microdata');
+  assert.strictEqual(r.source, 'microdata'); assert.strictEqual(r.rows[0].price, 249.95); assert.strictEqual(r.title, 'Plaid Hygge 130x170'); assert.strictEqual(r.rows[0].inStock, true);
+  r = shopParse('shop-meta');
+  assert.strictEqual(r.source, 'meta'); assert.strictEqual(r.rows[0].price, 1099); assert.strictEqual(r.title, 'Sengetøj Flora 140x200', 'og:title'); assert.strictEqual(r.rows[0].inStock, true);
+  r = shopParse('shop-outofstock');
+  assert.strictEqual(r.rows[0].price, 799); assert.strictEqual(r.rows[0].inStock, false); assert.strictEqual(r.variants[0].lowest, null); assert.strictEqual(r.title, 'Topmadras Komfort 90x200');
+  // JSON-LD wins over meta tags; title falls back to <title>
+  r = SHOP.parseShopPage(shopHtml('shop-jsonld-single').replace('</head>', '<meta property="product:price:amount" content="1"><meta property="product:price:currency" content="DKK"></head>'), BED_URL);
+  assert.strictEqual(r.rows[0].price, 579);
+  r = SHOP.parseShopPage('<title>Kun titel &amp; pris</title><meta property="og:price:amount" content="99,50"><meta property="og:price:currency" content="dkk">', 'https://x.dk/a');
+  assert.strictEqual(r.rows[0].price, 99.5); assert.strictEqual(r.title, 'Kun titel & pris');
+  // no currency: only for .dk hosts
+  const nocur = '<script type="application/ld+json">{"@type":"Product","name":"N","offers":{"@type":"Offer","price":"100"}}</script>';
+  assert.strictEqual(SHOP.parseShopPage(nocur, 'https://shop.dk/a').rows[0].price, 100);
+  assert.throws(() => SHOP.parseShopPage(nocur, 'https://shop.com/a'), (e) => e.kind === 'currency');
+  // broken JSON-LD is skipped, the next block is used
+  r = SHOP.parseShopPage('<script type="application/ld+json">{not json</script>' + shopHtml('shop-jsonld-single'), BED_URL); assert.strictEqual(r.rows[0].price, 579);
+  // a variant listed through @id reference and hasVariant (ProductGroup)
+  const grp = '<script type="application/ld+json">{"@context":"https://schema.org","@type":"ProductGroup","name":"G","hasVariant":[{"@type":"Product","name":"G rød","sku":"R","url":"https://s.dk/g?c=r","offers":{"@type":"Offer","priceCurrency":"DKK","price":200,"availability":"InStock"}},{"@type":"Product","name":"G blå","sku":"B","url":"https://s.dk/g?c=b","offers":{"@type":"Offer","priceCurrency":"DKK","price":300,"availability":"InStock"}}]}</script>';
+  r = SHOP.parseShopPage(grp, 'https://s.dk/g?c=b'); assert.strictEqual(r.rows[0].price, 300); assert.strictEqual(r.note, null); assert.strictEqual(r.title, 'G blå');
+  r = SHOP.parseShopPage(grp, 'https://s.dk/g'); assert.strictEqual(r.rows[0].price, 200); assert(/flere varianter/.test(r.note));
+});
+
+test('shop: rejected pages (EUR, no price data, JavaScript-only price, bot challenge)', async () => {
+  assert.throws(() => shopParse('shop-eur', 'https://www.nordichome.dk/duvet'), (e) => e instanceof PJ.PageError && e.kind === 'currency' && e.shop === true);
+  assert.throws(() => shopParse('shop-noprice'), (e) => e.kind === 'noprice');
+  assert.throws(() => shopParse('shop-challenge'), (e) => e.kind === 'noprice');
+  const note = (n, u) => fetchShop(u || 'https://www.example.dk/x', { 'https://www.example.dk/x': shopHtml(n) }).then(() => null, (e) => R.errorNote(e));
+  assert.strictEqual(await note('shop-challenge'), 'Butikken afviser automatiske opslag.');
+  assert.strictEqual(await note('shop-noprice'), 'Kunne ikke finde en pris på siden.');
+  assert(/ikke i kroner/.test(await note('shop-eur')));
+});
+
+async function fetchShop(url, map, calls) {
+  return SHOP.fetchShopPage(url, async (u, o) => {
+    if (calls) calls.push({ u, o });
+    const x = map[u]; if (x === undefined) return resp(404, '');
+    return typeof x === 'function' ? x() : resp(200, x);
+  });
+}
+
+test('shop: fetching rules (plain GET, honest user agent, one request, blocks are final, redirects stay in the domain)', async () => {
+  const calls = [];
+  const r = await fetchShop(BED_URL, { [BED_URL]: shopHtml('shop-jsonld-single') }, calls);
+  assert.strictEqual(r.rows[0].price, 579); assert.strictEqual(calls.length, 1, 'one request');
+  const o = calls[0].o;
+  assert(!o.method || o.method === 'GET'); assert(!('body' in o)); assert(/^Prisvagten-pricecheck/.test(o.headers['User-Agent']) && o.headers['User-Agent'] === PJ.UA);
+  assert(!('Cookie' in o.headers) && !('Authorization' in o.headers) && !('Referer' in o.headers)); assert(o.signal && o.redirect === 'manual');
+  // 401/403/429 are refusals; a challenge page too (also with status 503); nothing is retried
+  for (const st of [401, 403, 429]) {
+    const c = []; await assert.rejects(fetchShop(BED_URL, { [BED_URL]: () => resp(st, 'nej') }, c), (e) => e.kind === 'blocked' && e.shop);
+    assert.strictEqual(c.length, 1, 'no retry after ' + st);
+  }
+  await assert.rejects(fetchShop(BED_URL, { [BED_URL]: shopHtml('shop-challenge') }), (e) => e.kind === 'blocked');
+  await assert.rejects(fetchShop(BED_URL, { [BED_URL]: () => resp(503, shopHtml('shop-challenge')) }), (e) => e.kind === 'blocked');
+  await assert.rejects(fetchShop(BED_URL, { [BED_URL]: () => resp(503, 'Vedligehold') }), (e) => e.kind === 'network');
+  await assert.rejects(fetchShop(BED_URL, { [BED_URL]: () => resp(404, '') }), (e) => e.kind === 'notfound');
+  await assert.rejects(fetchShop(BED_URL, { [BED_URL]: () => { throw new Error('ECONNRESET'); } }), (e) => e.kind === 'network');
+  await assert.rejects(fetchShop(BED_URL, { [BED_URL]: () => { const e = new Error('aborted'); e.name = 'AbortError'; throw e; } }), (e) => e.kind === 'timeout');
+  // a captcha script on a normal page with a price is not a block
+  const withCaptcha = shopHtml('shop-jsonld-single').replace('</body>', '<script src="https://www.google.com/recaptcha/api.js?render=x"></script><div class="g-recaptcha captcha"></div></body>');
+  assert.strictEqual((await fetchShop(BED_URL, { [BED_URL]: withCaptcha })).rows[0].price, 579);
+  // unsafe links are refused before any request
+  const c2 = []; await assert.rejects(fetchShop('https://127.0.0.1/x', {}, c2), (e) => e.shop); await assert.rejects(fetchShop('ftp://shop.dk/x', {}, c2)); assert.strictEqual(c2.length, 0);
+  // redirects: followed inside the registrable domain only
+  const c3 = [];
+  const ok = await fetchShop('https://bedrenaetter.dk/gammel', { 'https://bedrenaetter.dk/gammel': () => resp(301, '', { location: BED_URL }), [BED_URL]: shopHtml('shop-jsonld-single') }, c3);
+  assert.strictEqual(ok.rows[0].price, 579); assert.deepStrictEqual(c3.map((x) => x.u), ['https://bedrenaetter.dk/gammel', BED_URL]);
+  for (const loc of ['https://evil.example.com/p', 'http://localhost/p', 'https://10.0.0.1/p', 'https://bedrenaetter.dk.evil.com/p', 'ftp://bedrenaetter.dk/p']) {
+    const c = []; await assert.rejects(fetchShop(BED_URL, { [BED_URL]: () => resp(302, '', { location: loc }) }, c), (e) => e.kind === 'network' && e.shop, loc);
+    assert.strictEqual(c.length, 1, 'the foreign location is never requested: ' + loc);
+  }
+  await assert.rejects(fetchShop(BED_URL, { [BED_URL]: () => resp(302, '', { location: BED_URL }) }), (e) => /omdirigeringer/.test(e.message), 'redirect loop ends');
+});
+
+function shopProduct(id, user, url, extra) { return product(id, user, 'dyson', Object.assign({ source_url: url, name: 'Vare ' + id }, extra || {})); }
+function shopCtx(db, map, extra) {
+  const calls = [];
+  const ctx = ctxFor(db, {}, Object.assign({
+    getPage: async (url) => { ctx.fetched.push(url); return fetchShop(url, map, calls); }, calls,
+  }, extra || {}));
+  return ctx;
+}
+
+test('run: shop link pending -> tracking, later run with a lower price mails, no mail twice', async () => {
+  const db = newDb();
+  db.products.push(shopProduct('S1', 'u1', BED_URL, { name: 'Mayan kuvertlagen', target_value: 500 }));
+  const map = { [BED_URL]: shopHtml('shop-jsonld-single') };
+  let ctx = shopCtx(db, map);
+  let res = await R.run(ctx);
+  const S = () => db.products[0];
+  assert.deepStrictEqual(ctx.fetched, [BED_URL]); assert.strictEqual(res.summary.length, 5);
+  assert.strictEqual(S().status, 'tracking'); assert.deepStrictEqual(S().tracked_variants, ['shop']);
+  assert.strictEqual(S().title, 'Mayan kuvertlagen 180x200 hvid');
+  assert.deepStrictEqual(S().variants, [{ id: 'shop', label: 'Bedre Nætter', lowest: 579, offers: 1, sample: 'Mayan kuvertlagen 180x200 hvid' }]);
+  assert.deepStrictEqual(S().offers, [{ store: 'Bedre Nætter', price: 579, url: BED_URL, inStock: true, note: null, variant: 'shop' }]);
+  assert.deepStrictEqual(S().history, [{ d: '2026-11-16', p: 579, s: 'Bedre Nætter', src: 'check' }], 'history starts with today\'s own check');
+  assert.strictEqual(S().verdict.level, 'unknown'); assert.strictEqual(S().normal_price, null); assert.strictEqual(S().warning, null); assert.strictEqual(S().check_note, null);
+  assert.strictEqual(S().notified_price, null); assert.strictEqual(db.sent.length, 0); assert.strictEqual(S().last_checked, '2026-11-16T10:00:00Z');
+  // the next run: a lower price at or under the goal -> one hit e-mail
+  map[BED_URL] = shopHtml('shop-jsonld-single').replace('"579.00"', '"489,00"');
+  ctx = shopCtx(db, map); res = await R.run(ctx);
+  assert.strictEqual(S().offers[0].price, 489); assert.strictEqual(S().notified_price, 489); assert.strictEqual(res.stats.hits, 1);
+  assert.strictEqual(db.sent.length, 1); assert.deepStrictEqual(db.sent[0].to, ['anna@example.dk']); assert(db.sent[0].text.includes('Mayan') && db.sent[0].text.includes('489 kr.') && db.sent[0].text.includes('Bedre Nætter'), db.sent[0].text);
+  assert.strictEqual(S().history.length, 1); assert.strictEqual(S().history[0].p, 489, 'same day: the lower point wins');
+  ctx = shopCtx(db, map); await R.run(ctx); assert.strictEqual(db.sent.length, 1, 'same price again: no second e-mail');
+  // out of stock: no hit, no new history price
+  map[BED_URL] = shopHtml('shop-jsonld-single').replace('https://schema.org/InStock', 'https://schema.org/OutOfStock');
+  ctx = shopCtx(db, map); await R.run(ctx);
+  assert.strictEqual(S().offers[0].inStock, false); assert.strictEqual(S().verdict.level, 'unknown'); assert.strictEqual(S().notified_price, null);
+  // several variants on the page: a short Danish remark in check_note
+  const db2 = newDb(); const U2 = 'https://www.tekstilhuset.dk/sengesaet';
+  db2.products.push(shopProduct('S2', 'u1', U2, { target_value: 1 }));
+  await R.run(shopCtx(db2, { [U2]: shopHtml('shop-offers-array') }));
+  assert.strictEqual(db2.products[0].status, 'tracking'); assert.strictEqual(db2.products[0].offers[0].price, 399); assert.strictEqual(db2.products[0].check_note, SHOP.MULTI_NOTE);
+  // the sanity check against the previous lowest applies to shops too
+  const db3 = newDb();
+  db3.products.push(shopProduct('S3', 'u1', BED_URL, { status: 'tracking', tracked_variants: ['shop'], offers: [{ store: 'Bedre Nætter', price: 2000, inStock: true, url: BED_URL, note: null, variant: 'shop' }] }));
+  await R.run(shopCtx(db3, { [BED_URL]: shopHtml('shop-jsonld-single') }));
+  assert(/forkerte/.test(db3.products[0].check_note) && db3.products[0].offers[0].price === 2000);
+});
+
+test('run: shop errors are specific; a refusal skips the rest of that host only; error retry after six hours', async () => {
+  const db = newDb();
+  const A1 = 'https://www.afvisende.dk/a', A2 = 'https://afvisende.dk/b', B1 = 'https://www.fornuftig.dk/c', EUR = 'https://www.udlandet.dk/d', NOP = 'https://www.tom.dk/e', CH = 'https://www.udfordring.dk/f', CH2 = 'https://www.udfordring.dk/g';
+  db.products.push(shopProduct('X1', 'u1', A1), shopProduct('X2', 'u1', A2), shopProduct('X3', 'u1', B1, { target_value: 1 }), shopProduct('X4', 'u1', EUR), shopProduct('X5', 'u1', NOP),
+    shopProduct('X6', 'u1', CH), shopProduct('X7', 'u1', CH2), product('X8', 'u1', 'dyson', { target_value: 1 }));
+  const map = { [A1]: () => resp(403, 'Forbidden'), [A2]: shopHtml('shop-jsonld-single'), [B1]: shopHtml('shop-jsonld-single'), [EUR]: shopHtml('shop-eur'), [NOP]: shopHtml('shop-noprice'), [CH]: shopHtml('shop-challenge'), [CH2]: shopHtml('shop-jsonld-single') };
+  let ctx = shopCtx(db, map, { getPage: undefined });
+  const dyson = pageFor('dyson');
+  ctx.getPage = async (url) => { ctx.fetched.push(url); return url.indexOf('prisjagt.dk') !== -1 ? dyson : fetchShop(url, map, ctx.calls); };
+  const res = await R.run(ctx);
+  const by = (id) => db.products.find((p) => p.id === id);
+  assert.strictEqual(by('X1').status, 'error'); assert.strictEqual(by('X1').check_note, 'Butikken afviser automatiske opslag.');
+  assert.strictEqual(by('X2').status, 'pending', 'same host (www dropped): not fetched, not touched'); assert(!ctx.fetched.includes(A2));
+  assert.strictEqual(by('X3').status, 'tracking', 'other hosts carry on'); assert.strictEqual(by('X8').status, 'tracking', 'prisjagt carries on');
+  assert(/ikke i kroner/.test(by('X4').check_note) && by('X4').status === 'error');
+  assert.strictEqual(by('X5').status, 'error'); assert.strictEqual(by('X5').check_note, 'Kunne ikke finde en pris på siden.');
+  assert.strictEqual(by('X6').status, 'error'); assert.strictEqual(by('X6').check_note, 'Butikken afviser automatiske opslag.'); assert.strictEqual(by('X7').status, 'pending'); assert(!ctx.fetched.includes(CH2));
+  assert.deepStrictEqual(res.stats.blockedHosts.sort(), ['afvisende.dk', 'udfordring.dk']); assert(res.stats.blocked);
+  assert(/afvist af afvisende\.dk, udfordring\.dk/.test(res.summary[1]), res.summary[1]);
+  assert.strictEqual(res.stats.pages, ctx.fetched.length, 'one request per product at most');
+  // the error is retried after six hours (not before), and still only one request per product
+  ctx = shopCtx(db, map); await R.run(ctx); assert(!ctx.fetched.includes(A1) && !ctx.fetched.includes(NOP), 'error rows wait six hours');
+  by('X1').last_checked = '2026-11-16T03:00:00Z'; map[A1] = shopHtml('shop-jsonld-single');
+  ctx = shopCtx(db, map); await R.run(ctx); assert.strictEqual(by('X1').status, 'tracking'); assert(ctx.fetched.includes(A1));
+  // an unusable link: error without any fetch
+  const db4 = newDb(); db4.products.push(shopProduct('Y1', 'u1', 'http://localhost/x'), shopProduct('Y2', 'u1', 'https://intranet/x'), shopProduct('Y3', 'u1', 'https://prisjagt.dk/'));
+  ctx = shopCtx(db4, {}); await R.run(ctx);
+  assert.deepStrictEqual(ctx.fetched, []); assert(db4.products.every((p) => p.status === 'error' && /Linket/.test(p.check_note)));
 });
 
 // ---------------------------------------------------------------- e-mail text
@@ -404,14 +619,14 @@ test('run: preferences exclude the cheapest shop; pct goal uses the computed nor
 
 test('run: errors per product do not stop the others; blocked stops further fetching', async () => {
   const db = newDb();
-  db.products.push(product('E1', 'u1', 'dyson', { source_url: 'https://evil.example.com/x' }));
+  db.products.push(product('E1', 'u1', 'dyson', { source_url: 'https://127.0.0.1/x' }));
   db.products.push(product('E2', 'u1', 'roborock', { source_url: 'https://prisjagt.dk/product.php?p=999' }));        // 404
   db.products.push(product('E3', 'u1', 'lego'));
   db.products.push(product('E4', 'u1', 'ps5'));
   const pages = {}; pages[urlOf('lego')] = pageFor('lego'); pages[urlOf('ps5')] = new PJ.PageError('blocked', 'HTTP 429');
   let ctx = ctxFor(db, pages); await R.run(ctx);
   const by = (id) => db.products.find((p) => p.id === id);
-  assert.strictEqual(by('E1').status, 'error'); assert(/prisjagt\.dk/.test(by('E1').check_note));
+  assert.strictEqual(by('E1').status, 'error'); assert(/Linket kan ikke bruges/.test(by('E1').check_note));
   assert.strictEqual(by('E2').status, 'error'); assert(/findes ikke/.test(by('E2').check_note));
   assert.strictEqual(by('E3').status, 'tracking', 'a good product is processed although others fail');
   assert.strictEqual(by('E4').status, 'error'); assert(/afviste/.test(by('E4').check_note));

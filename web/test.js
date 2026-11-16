@@ -244,6 +244,30 @@ let base;
     await p.context().close();
   }
 
+  // 3b. a single-shop product (link to one web shop)
+  {
+    const BED = "https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html";
+    const shopRow = row("test-dyson-v15", { id: "sh", name: "Mayan kuvertlagen", source_url: BED, title: "Mayan kuvertlagen 180x200 hvid", tracked_variants: ["shop"],
+      variants: [{ id: "shop", label: "Bedre Nætter", lowest: 579, offers: 1, sample: "Mayan kuvertlagen 180x200 hvid" }],
+      offers: [{ store: "Bedre Nætter", price: 579, url: BED, inStock: true, note: null, variant: "shop" }], check_note: "Siden viser flere varianter med forskellige priser. Vi følger den billigste, der er på lager." });
+    const shopPending = Object.assign({}, pendingRow, { id: "sp", source_url: BED });
+    const p = await open({ products: [row("test-dyson-v15", { id: "dy" }), shopRow, shopPending], label: "single-shop" });
+    await p.waitForSelector(".item");
+    const sp = p.locator('.item[data-status="pending"]');
+    check("single-shop pending: normal pending text", /Henter produktet … klar inden for et kvarter/.test(await sp.locator(".head").textContent()) && !/prisjagt/.test(await sp.textContent()), await sp.textContent());
+    await sp.locator(".head").click();
+    check("single-shop pending body: the normal text, nothing about prisjagt or variants", /Henter produktet … klar inden for et kvarter\./.test(await sp.locator(".body").textContent()) && !/prisjagt|variant/i.test(await sp.locator(".body").textContent()), await sp.locator(".body").textContent());
+    const it = p.locator('.item[data-status="tracking"]').nth(1);
+    await it.locator(".head").click();
+    const bt = await it.locator(".body").textContent();
+    check("single-shop detail: quiet line, shop in the table, remark about several variants", /Følger kun denne butik\. Indsæt et link fra prisjagt\.dk for at sammenligne flere butikker\./.test(bt) && /Bedre Nætter/.test(bt) && /flere varianter med forskellige priser/.test(bt) && /579 kr\./.test(bt), bt.slice(0, 300));
+    check("single-shop detail: no 'Skift variant', no 'Følger:' line", !/Skift variant/.test(bt) && !/Følger:/.test(bt) && (await it.locator('[data-act="change"]').count()) === 0);
+    const other = await p.locator('.item[data-status="tracking"]').first().locator(".body");
+    await p.locator('.item[data-status="tracking"]').first().locator(".head").click();
+    check("prisjagt product still has 'Skift variant' and no single-shop line", /Skift variant/.test(await other.textContent()) && !/Følger kun denne butik/.test(await other.textContent()));
+    await p.context().close();
+  }
+
   // 4. choose variants
   {
     const p = await open({ products: [chooseRow], label: "choose" });
@@ -264,13 +288,13 @@ let base;
   {
     const p = await open({ products: [], label: "add" });
     await p.waitForSelector("#addForm:not([hidden])");
-    check("add: empty list text and how-to line", /Ingen produkter endnu/.test(await p.textContent("#list")) && /Skriv navnet på varen/.test(await p.textContent("#fHelp")) && /indsæt selv et link/.test(await p.textContent("#fHelp")) && (await p.getAttribute("#fMain", "placeholder")) === "Produktnavn eller link fra prisjagt.dk" && (await p.locator("#fName").count()) === 0);
-    for (const bad of ["", "http://prisjagt.dk/p/1", "https://example.com/prisjagt.dk/p/1", "https://prisjagt.dk.evil.com/p/1", "https://prisjagt.dk/", "javascript:alert(1)", "www.example.com/x", "prisjagt.dk.evil.com/p/1"]) {
+    check("add: empty list text and how-to line", /Ingen produkter endnu/.test(await p.textContent("#list")) && /Et link fra prisjagt\.dk giver priser fra mange butikker/.test(await p.textContent("#fHelp")) && /link til én butik følger kun den butik/.test(await p.textContent("#fHelp")) && /et navn finder vi produktet til/.test(await p.textContent("#fHelp")) && (await p.getAttribute("#fMain", "placeholder")) === "Produktnavn eller link" && (await p.textContent('label[for="fMain"]')) === "Produktnavn eller link" && (await p.locator("#fName").count()) === 0);
+    for (const bad of ["", "http://prisjagt.dk/p/1", "http://www.bedrenaetter.dk/x.html", "ftp://shop.dk/x", "https://prisjagt.dk/", "javascript:alert(1)", "www.example.com/x", "prisjagt.dk.evil.com/p/1", "https://localhost/x", "https://intranet/x", "https://127.0.0.1/x", "https://user:pw@shop.dk/x", "https://shop.dk:8443/x"]) {
       await p.fill("#fMain", bad); await p.fill("#fVal", "1000"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
       const vis = await p.isVisible("#fMsg");
       if (!vis || (await ops(p)).length) { check("add: rejects '" + bad + "'", false, "msg visible=" + vis); }
     }
-    check("add: bad URLs rejected, no insert", (await ops(p)).length === 0 && /prisjagt\.dk/.test(await p.textContent("#fMsg")));
+    check("add: bad URLs rejected, no insert", (await ops(p)).length === 0 && /https-adresse til en produktside/.test(await p.textContent("#fMsg")));
     await p.fill("#fMain", "https://www.prisjagt.dk/produkt/sony-wh-1000xm5-p123?x=1"); await p.fill("#fVal", "0");
     await p.evaluate(() => document.getElementById("addForm").requestSubmit());
     check("add: zero goal rejected", (await ops(p)).length === 0 && /pris/.test(await p.textContent("#fMsg")));
@@ -285,21 +309,28 @@ let base;
     await p.waitForFunction(() => window.__db.writes().length === 2);
     o = (await ops(p))[1];
     check("add: link still works with % goal (placeholder name, source_url)", JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://prisjagt.dk/product.php?p=555", target_type: "pct", target_value: 20, active: true }), JSON.stringify(o.payload));
+    // a link to a single shop is accepted as it is (fragment dropped), same row shape as a prisjagt link
+    await p.fill("#fMain", " https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html#reviews "); await p.click(".unit label:has(#fTypePrice)"); await p.fill("#fVal", "450"); await p.click("#fSubmit");
+    await p.waitForFunction(() => window.__db.writes().length === 3);
+    o = (await ops(p))[2];
+    check("add: single-shop link accepted (name placeholder, source_url, no extra fields)", JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html", target_type: "price", target_value: 450, active: true }), JSON.stringify(o.payload));
+    await p.waitForFunction(() => /Henter produktet … klar inden for et kvarter/.test(document.getElementById("list").textContent));
+    check("add: shop link row shows the normal pending text", true);
     check("add: field is cleared after saving", (await p.inputValue("#fMain")) === "" && (await p.inputValue("#fVal")) === "");
     // by name: no source_url
     for (const bad of ["a", "x".repeat(141)]) {
       await p.fill("#fMain", bad); await p.fill("#fVal", "500"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
-      check("add: name of " + bad.length + " characters rejected", (await ops(p)).length === 2 && /2 og 140/.test(await p.textContent("#fMsg")) && await p.isVisible("#fMsg"));
+      check("add: name of " + bad.length + " characters rejected", (await ops(p)).length === 3 && /2 og 140/.test(await p.textContent("#fMsg")) && await p.isVisible("#fMsg"));
     }
     await p.click(".unit label:has(#fTypePrice)");
     await p.fill("#fMain", "  Sony   WH-1000XM5 sort "); await p.fill("#fVal", "1700"); await p.click("#fSubmit");
-    await p.waitForFunction(() => window.__db.writes().length === 3);
-    o = (await ops(p))[2];
+    await p.waitForFunction(() => window.__db.writes().length === 4);
+    o = (await ops(p))[3];
     check("add: name only -> {name, target_type, target_value} without source_url", JSON.stringify(o.payload) === JSON.stringify({ name: "Sony WH-1000XM5 sort", target_type: "price", target_value: 1700 }), JSON.stringify(o.payload));
     await p.waitForFunction(() => /Finder produktet … det kan tage op til en time\./.test(document.getElementById("list").textContent));
     check("add: name-only row shows 'Finder produktet …'", true);
     await p.fill("#fMain", "https://prisjagt.dk/produkt/x"); await p.fill("#fVal", "99"); await p.click(".unit label:has(#fTypePct)"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
-    check("add: % above 95 rejected", (await ops(p)).length === 3 && /95/.test(await p.textContent("#fMsg")));
+    check("add: % above 95 rejected", (await ops(p)).length === 4 && /95/.test(await p.textContent("#fMsg")));
     await p.evaluate(() => { window.__db.deny = true; });
     await p.fill("#fVal", "20"); await p.click("#fSubmit");
     await p.waitForSelector("#readonly:not([hidden])");
@@ -330,16 +361,16 @@ let base;
     const w = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
     check("name-only rows: no horizontal overflow at 400 px", w.sw <= w.cw, JSON.stringify(w));
     // invalid links: Danish error, nothing written
-    for (const bad of ["tekst", "https://example.com/product.php?p=1", "http://prisjagt.dk/product.php?p=1", "https://prisjagt.dk.evil.com/x"]) {
+    for (const bad of ["tekst", "http://prisjagt.dk/product.php?p=1", "http://shop.dk/x", "ftp://shop.dk/x", "https://localhost/x", "https://shop.dk:8443/x", "https://prisjagt.dk/"]) {
       await p.fill("#u-n1", bad); await p.click('[data-fixurl="n1"] button[type=submit]');
       const m = await p.textContent('[data-rowmsg="n1"]');
-      if (!/Linket skal være en adresse på https:\/\/prisjagt\.dk\//.test(m) || (await ops(p)).length) check("name-only: rejects '" + bad + "'", false, m);
+      if (!/Linket skal være en https-adresse til en produktside/.test(m) || (await ops(p)).length) check("name-only: rejects '" + bad + "'", false, m);
     }
-    check("name-only: invalid link -> Danish error, no write", (await ops(p)).length === 0 && /Linket skal være en adresse på https:\/\/prisjagt\.dk\//.test(await p.textContent('[data-rowmsg="n1"]')));
-    await p.fill("#u-n1", " https://www.prisjagt.dk/product.php?p=42 "); await p.click('[data-fixurl="n1"] button[type=submit]');
+    check("name-only: invalid link -> Danish error, no write", (await ops(p)).length === 0 && /Linket skal være en https-adresse til en produktside/.test(await p.textContent('[data-rowmsg="n1"]')));
+    await p.fill("#u-n1", " https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html "); await p.click('[data-fixurl="n1"] button[type=submit]');
     await p.waitForFunction(() => window.__db.writes().length === 1);
     let o = (await ops(p))[0];
-    check("name-only: valid link writes source_url only", o.table === "products" && o.op === "update" && JSON.stringify(o.payload) === '{"source_url":"https://prisjagt.dk/product.php?p=42"}' && o.filters[0][1] === "n1", JSON.stringify(o));
+    check("name-only: a link to a single shop writes source_url only (www. kept for shops)", o.table === "products" && o.op === "update" && JSON.stringify(o.payload) === '{"source_url":"https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html"}' && o.filters[0][1] === "n1", JSON.stringify(o));
     await p.waitForFunction(() => /Henter produktet … klar inden for et kvarter/.test(document.querySelector('.item[data-status="pending"] .head').textContent));
     check("name-only: row then shows the normal 'Henter produktet …'", /Dit link/.test(await p.locator('.item[data-status="pending"]').textContent()) || true);
     await p.fill("#u-n2", "https://prisjagt.dk/product.php?p=77"); await p.click('[data-fixurl="n2"] button[type=submit]');

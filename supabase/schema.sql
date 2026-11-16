@@ -28,7 +28,7 @@ create table if not exists public.products (
   user_id         uuid not null default auth.uid() references auth.users on delete cascade,
   -- written by the user
   name            text not null check (char_length(name) between 1 and 140),
-  source_url      text check (source_url is null or (char_length(source_url) <= 500 and source_url ~ '^https://(www\.)?prisjagt\.dk/')),
+  source_url      text,
   target_type     text not null check (target_type in ('price', 'pct')),
   target_value    numeric not null check (target_value > 0 and (target_type <> 'pct' or target_value < 100)),
   tracked_variants text[] check (tracked_variants is null or cardinality(tracked_variants) <= 200),
@@ -58,6 +58,13 @@ create table if not exists public.products (
 -- NOT VALID: enforced for every new/changed row without re-checking old rows.
 alter table public.products drop constraint if exists products_name_not_blank;
 alter table public.products add constraint products_name_not_blank check (btrim(name) <> '') not valid;
+
+-- source_url: a prisjagt.dk page (many shops) or the product page of a single web shop. Any https:// link whose
+-- host contains a dot (no user:password@, no port, no spaces), at most 500 characters. The job guards again before fetching.
+-- Dropped and re-added by name so the live database (which has the older prisjagt.dk-only check) is updated safely.
+alter table public.products drop constraint if exists products_source_url_check;
+alter table public.products add constraint products_source_url_check check (
+  source_url is null or (char_length(source_url) <= 500 and source_url ~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$'));
 
 create index if not exists products_user_idx on public.products (user_id);
 create index if not exists products_job_idx on public.products (status) where active;

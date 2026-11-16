@@ -12,6 +12,7 @@ if (require.main === module && !process.env.NODE_USE_ENV_PROXY && (process.env.H
 
 const P = require('./lib/pricing');
 const PJ = require('./lib/prisjagt');
+const SHOP = require('./lib/shop');
 const { composeMail, composeOwnerMail, composeApprovedMail, sendResend } = require('./lib/mail');
 const { makeClient } = require('./lib/supabase');
 
@@ -25,7 +26,17 @@ const isoNow = (d) => d.toISOString().replace(/\.\d+Z$/, 'Z');
 
 // ---------------------------------------------------------------- per-product logic (pure given a parsed page)
 
+function shopErrorNote(e) {
+  if (e.kind === 'blocked') return 'Butikken afviser automatiske opslag.';
+  if (e.kind === 'noprice') return 'Kunne ikke finde en pris på siden.';
+  if (e.kind === 'currency') return 'Prisen på siden er ikke i kroner (' + e.message.slice(0, 40) + '), så den kan ikke følges.';
+  if (e.kind === 'notfound') return 'Siden findes ikke (' + e.message + '). Tjek linket.';
+  if (e.kind === 'timeout') return 'Butikken svarede ikke i tide.';
+  return 'Siden kunne ikke hentes (' + e.message.slice(0, 80) + ').';
+}
+
 function errorNote(e) {
+  if (e instanceof PJ.PageError && e.shop) return shopErrorNote(e);
   if (e instanceof PJ.PageError) {
     if (e.kind === 'blocked') return 'Prisjagt afviste forespørgslen (' + e.message + '). Vi prøver ikke at omgå det.';
     if (e.kind === 'notfound') return 'Siden findes ikke på Prisjagt (' + e.message + '). Tjek linket.';
@@ -90,12 +101,21 @@ function trackingPatch(prod, profile, parsed, now) {
 
   const patch = Object.assign({
     status: 'tracking', title: prod.title || parsed.title || null, variants, offers, history, normal_price: normal, verdict, warning,
-    check_note: filtered.length === 0 ? 'Ingen butikker matcher dine butiksvalg.' : null, last_checked: iso,
+    check_note: filtered.length === 0 ? 'Ingen butikker matcher dine butiksvalg.' : (parsed.note || null), last_checked: iso,
   }, goal.fields);
   return {
     patch,
     hit: goal.newHit ? { productId: prod.id, userId: prod.user_id, name: prod.name, price: low.price, store: low.store, url: low.url, verdict: verdict.text, warning } : null,
   };
+}
+
+// The page kind of a source_url: {url, shop} or null when the link may not be fetched at all.
+function classify(src) {
+  let host;
+  try { host = new URL(String(src || '').trim()).hostname; } catch (e) { return null; }
+  if (SHOP.isPrisjagtHost(host)) { const u = PJ.validateProductUrl(src); return u ? { url: u, shop: false } : null; }
+  const u = SHOP.validateShopUrl(src);
+  return u ? { url: u, shop: true } : null;
 }
 
 // ---------------------------------------------------------------- access requests
@@ -154,11 +174,12 @@ async function run(ctx) {
   const log = ctx.log || console.log;
   const now = ctx.now ? ctx.now() : new Date();
   const sleep = ctx.sleep || sleepReal;
-  const getPage = ctx.getPage || ((u) => PJ.fetchPage(u, ctx.fetch));
+  // prisjagt.dk pages list many shops; every other host is a single web shop (generic structured-data parser)
+  const getPage = ctx.getPage || ((u) => (SHOP.isPrisjagtHost(new URL(u).hostname) ? PJ.fetchPage(u, ctx.fetch) : SHOP.fetchShopPage(u, ctx.fetch)));
   const fetchImpl = ctx.fetch || fetch;
   const sb = makeClient(ctx.supabaseUrl, ctx.serviceKey, fetchImpl);
   const started = Date.now();
-  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false };
+  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false };
 
   // 1. load (a failure here means Supabase is unreachable: let it throw)
   // Products added by name only (source_url null) wait for a link (from the name-lookup assistant or the user):
@@ -188,9 +209,14 @@ async function run(ctx) {
     else if (st === 'choose') todo = Array.isArray(prod.tracked_variants) && prod.tracked_variants.length ? 'track' : null;
     if (!todo) continue;
 
-    const url = PJ.validateProductUrl(prod.source_url);
-    if (!url) { results.push({ prod, patch: { status: 'error', check_note: 'Linket er ikke et gyldigt produktlink fra prisjagt.dk.', last_checked: isoNow(now) }, hit: null }); continue; }
-    if (stats.blocked) continue;                                   // blocked earlier in this run: leave the rest alone
+    const target = classify(prod.source_url);
+    if (!target) {
+      let host = ''; try { host = new URL(String(prod.source_url).trim()).hostname; } catch (e) { /* not a url */ }
+      const note = SHOP.isPrisjagtHost(host) ? 'Linket er ikke et gyldigt produktlink fra prisjagt.dk.' : 'Linket kan ikke bruges. Brug en https-adresse til en produktside hos en butik eller på prisjagt.dk.';
+      results.push({ prod, patch: { status: 'error', check_note: note, last_checked: isoNow(now) }, hit: null }); continue;
+    }
+    const url = target.url, hostKey = SHOP.registrableDomain(new URL(url).hostname);
+    if (stats.blockedHosts.indexOf(hostKey) !== -1) continue;       // refused earlier in this run: leave the rest of that host alone
     if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; continue; }
 
     try {
@@ -206,7 +232,7 @@ async function run(ctx) {
       const got = await pr;
       if (got.error) {
         stats.pageFail++;
-        if (got.error instanceof PJ.PageError && got.error.kind === 'blocked') stats.blocked = true;
+        if (got.error instanceof PJ.PageError && got.error.kind === 'blocked') { stats.blocked = true; if (stats.blockedHosts.indexOf(hostKey) === -1) stats.blockedHosts.push(hostKey); }
         const note = errorNote(got.error);
         log('  ' + (prod.name || prod.id) + ': ' + note);
         if (todo === 'initial') results.push({ prod, patch: { status: 'error', check_note: note, last_checked: isoNow(now) }, hit: null });
@@ -273,7 +299,7 @@ async function run(ctx) {
   // 6. summary (5 lines)
   const summary = [
     'Produkter: ' + stats.total + ' aktive (nye: ' + stats.pending + ', følges: ' + stats.tracking + ', venter på valg: ' + stats.choose + ', fejl: ' + stats.error + ').',
-    'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.blocked ? ' (Prisjagt afviste: resten sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
+    'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.blockedHosts.length ? ' (afvist af ' + stats.blockedHosts.join(', ') + ': resten derfra sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
     'Nye hits: ' + stats.hits + '.',
     'E-mails sendt: ' + stats.sent + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte.',
     'Skrevet til databasen: ' + stats.written + ', skrivefejl: ' + stats.writeFail + '. Tid: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s.',
@@ -282,7 +308,7 @@ async function run(ctx) {
   return { stats, summary, results };
 }
 
-module.exports = { run, initialPatch, trackingPatch, errorNote };
+module.exports = { run, initialPatch, trackingPatch, errorNote, classify };
 
 if (require.main === module) {
   const e = process.env;

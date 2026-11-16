@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Prisvagten</title>
-<meta name="description" content="Prisvagten holder øje med priser på prisjagt.dk og sender en e-mail, når målet er nået.">
+<meta name="description" content="Prisvagten holder øje med priser i danske webshops og sender en e-mail, når målet er nået.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">
@@ -30,7 +30,7 @@
 
   <!-- signed out -->
   <section id="authView" hidden>
-    <p class="lead">Hold øje med prisen på en vare fra prisjagt.dk, og få en e-mail, når den er til den pris, du vil give.</p>
+    <p class="lead">Hold øje med prisen på en vare, og få en e-mail, når den er til den pris, du vil give.</p>
     <form class="login" id="loginForm" novalidate>
       <label class="vh" for="lEmail">E-mailadresse</label>
       <input class="inp" type="email" id="lEmail" autocomplete="email" inputmode="email" required placeholder="Din e-mailadresse">
@@ -59,8 +59,8 @@
   <!-- signed in -->
   <section id="appView" hidden>
     <form class="add" id="addForm" autocomplete="off" novalidate>
-      <label class="vh" for="fMain">Produktnavn eller link fra prisjagt.dk</label>
-      <input class="inp url" type="text" id="fMain" maxlength="500" required placeholder="Produktnavn eller link fra prisjagt.dk">
+      <label class="vh" for="fMain">Produktnavn eller link</label>
+      <input class="inp url" type="text" id="fMain" maxlength="500" required placeholder="Produktnavn eller link">
       <div class="amount">
         <label class="vh" for="fVal" id="fValLabel">Højeste pris i kroner</label>
         <input class="inp n" type="number" id="fVal" min="1" step="1" required inputmode="numeric" placeholder="Højst">
@@ -72,7 +72,7 @@
       <button class="btn" id="fSubmit" type="submit">Hold øje</button>
     </form>
     <p class="msg" id="fMsg" role="alert" hidden></p>
-    <p class="hint" id="fHelp">Skriv navnet på varen, så leder vi efter den på Prisjagt (op til en time), eller indsæt selv et link til varen fra prisjagt.dk, så går det hurtigere.</p>
+    <p class="hint" id="fHelp">Et link fra prisjagt.dk giver priser fra mange butikker, et link til én butik følger kun den butik, og et navn finder vi produktet til.</p>
     <p class="hint" id="fHint">Du får besked, når varen er på lager til den pris eller under.</p>
     <p class="notice" id="readonly" hidden>Din adresse har ikke adgang til at gemme endnu. Bed ejeren om at tilføje den.</p>
 
