@@ -6,6 +6,15 @@
   var esc = function (s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
     return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); };
   var safeUrl = function (u) { return (typeof u === "string" && /^https?:\/\//i.test(u)) ? u : null; };
+  // a product picture: https only (the address comes from the database, which holds the same rule), never proxied or tracked
+  var safeImg = function (u) { return (typeof u === "string" && u.length <= 500 && /^https:\/\/[^\s\/?#@:]+\.[^\s\/?#@:]+/i.test(u)) ? u : null; };
+  var badImg = {};
+  function initialOf(name) {
+    var cs = Array.from(String(name || "").trim()), i, c;
+    for (i = 0; i < cs.length; i++) { c = cs[i]; if (c.toLowerCase() !== c.toUpperCase() || /[0-9]/.test(c)) return c.toUpperCase(); }
+    return "?";
+  }
+  var reduceMotion = function () { return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches); };
   var dFmt = new Intl.DateTimeFormat("da-DK", { day: "numeric", month: "short" });
   var dtFmt = new Intl.DateTimeFormat("da-DK", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   var DAY = 864e5;
@@ -19,7 +28,7 @@
     return window.supabase.createClient(url, key);
   }
 
-  var state = { share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
+  var state = { manage: {}, allShops: {}, pshops: {}, errOpen: false, ord: null, share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
     prefs: { always: [], exclude: [], only: false, notify: true, digest: false }, profileSound: null };
   var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
   var sb = null, user = null, channel = null, pollTimer = null, fetching = false, again = false, lastFetch = 0, fetchSeq = 0;
@@ -119,7 +128,7 @@
     var tier = topTier(fresh);
     jingle(tier); celebrate(fresh, tier);
   }
-  function syncSound() { var b = $("soundBtn"); b.textContent = muted ? "Lyd fra" : "Lyd til"; b.setAttribute("aria-pressed", String(!muted)); }
+  function syncSound() { $("soundBtn").textContent = muted ? "Lyd fra" : "Lyd til"; }
   syncSound();
   $("soundBtn").addEventListener("click", function () {
     muted = !muted; interacted = true;
@@ -175,7 +184,7 @@
       warning: r.warning || "", checkNote: r.check_note || "", lastChecked: r.last_checked || null,
       targetType: r.target_type === "pct" ? "pct" : r.target_type === "auto" ? "auto" : "price", targetValue: num(r.target_value),
       shopsAlways: r.shops_always, shopsExclude: r.shops_exclude, shopsOnly: !!r.shops_only,
-      url: r.source_url || null, createdAt: r.created_at || "", listId: r.list_id || null,
+      url: r.source_url || null, image: safeImg(r.image_url), createdAt: r.created_at || "", listId: r.list_id || null,
       boughtAt: r.bought_at || null, boughtPrice: num(r.bought_price),
       userId: r.user_id || null, boughtBy: r.bought_by || null,
       // alternatives: altOk = the database has the columns (an older database does not send them, and the feature stays hidden)
@@ -318,11 +327,17 @@
       '<circle cx="' + X(now).toFixed(1) + '" cy="' + Y(last.p).toFixed(1) + '" r="2.5" fill="var(--ink)"/></svg>';
   }
 
+  function thumbHtml(p) {
+    var u = p.image && !badImg[p.image] ? p.image : null, ch = esc(initialOf(p.name));
+    return '<span class="thumb' + (u ? "" : " ph") + '" data-ch="' + ch + '" aria-hidden="true">' +
+      (u ? '<img src="' + esc(u) + '" alt="" width="48" height="48" loading="lazy" decoding="async" referrerpolicy="no-referrer">' : ch) + '</span>';
+  }
+  // Short muted status under the name. Red is only for a real warning ("Oppustet førpris"); a product that cannot be fetched is quiet.
   function headHtml(p) {
     var b = bestOf(p), t = targetKr(p), os = offersOf(p), st;
     var anyStock = os.some(function (o) { return o.inStock !== false; });
     if (p.status === "pending") st = p.url ? "Henter produktet …" : "Finder produktet …";
-    else if (p.status === "error") st = '<span class="warn">' + esc(cmpErrText(p) || "Produktet kunne ikke hentes") + '</span>';
+    else if (p.status === "error") st = esc(cmpErrText(p) || "Produktet kunne ikke hentes");
     else if (awaitingFetch(p)) st = "Henter priser for den valgte variant …";
     else if (p.status === "choose") st = isMine(p) ? '<span class="out">Vælg variant</span>' : '<span class="out">Variant ikke valgt</span>';
     else if (p.boughtAt && p.status === "tracking") {
@@ -338,9 +353,13 @@
     if (p.status === "tracking" && p.warning && !p.boughtAt) st += ' · <span class="warn">Oppustet førpris</span>';
     var ab = addedBy(p);
     if (ab) st += " · af " + esc(ab);
-    var showPrice = p.status === "tracking" && b;
-    return '<div><h2>' + esc(p.name) + '</h2><div class="meta">' + st + '</div></div>' + (p.status === "tracking" ? sparkHtml(p) : '<span class="spark"></span>') +
-      '<div class="price n"><b>' + (showPrice ? esc(kr(b.price)) : "–") + '</b><span>' + (p.boughtAt ? "" : esc(targetText(p))) + '</span></div>';
+    var showPrice = p.status === "tracking" && b, sub = "";
+    if (!p.boughtAt && showPrice) {
+      var off = typeof p.normalPrice === "number" && p.normalPrice > 0 ? Math.round((1 - b.price / p.normalPrice) * 100) : 0;
+      sub = isHit(p) && p.targetType === "auto" && off >= 1 ? '<span class="off">−' + off + ' %</span>' : '<span>' + esc(targetText(p)) + '</span>';
+    }
+    return thumbHtml(p) + '<div class="info"><h2>' + esc(p.name) + '</h2><div class="meta">' + st + '</div></div>' + (p.status === "tracking" ? sparkHtml(p) : "") +
+      (showPrice ? '<div class="price n"><b>' + esc(kr(b.price)) + '</b>' + sub + '</div>' : "");
   }
 
   function chooserHtml(p) {
@@ -431,25 +450,97 @@
     }).join("") + '</div>';
   }
 
+  // "Indstil vare": everything about managing a tracked product, in one collapsed section (the open state is kept between renders).
+  function linkHtml(p) {
+    var link = safeUrl(p.url);
+    return link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">' + (isMine(p) ? "Dit link" : "Link") + '</a>' : "";
+  }
+  function goalEditHtml(p) {
+    var id = p._id, auto = p.targetType === "auto";
+    return '<form class="edit" data-edit="' + esc(id) + '"><label class="vh" for="et-' + esc(id) + '">Mål</label>' +
+      '<select id="et-' + esc(id) + '" data-etype>' +
+      [["auto", "Godt tilbud"], ["price", "Højst, kr."], ["pct", "Rabat i %"]].map(function (o) {
+        return '<option value="' + o[0] + '"' + (p.targetType === o[0] ? " selected" : "") + '>' + o[1] + '</option>';
+      }).join("") + '</select>' +
+      '<input class="n" type="number" id="e-' + esc(id) + '" min="1" step="1" value="' + esc(auto ? "" : p.targetValue) + '" aria-label="Målets værdi"' + (auto ? " hidden" : " required") + '>' +
+      '<button class="link" type="submit">Gem</button></form>';
+  }
+  function removeHtml(p) {
+    var id = p._id;
+    if (!mayEdit(p)) return "";
+    if (state.confirmDel === id)
+      return '<span class="edit"><span>Fjern produktet og dets historik?</span>' +
+        '<button type="button" class="link warn" data-act="del-yes" data-id="' + esc(id) + '">Ja, fjern</button>' +
+        '<button type="button" class="link" data-act="del-no">Behold</button></span>';
+    return '<button type="button" class="link warn" data-act="del" data-id="' + esc(id) + '">Fjern</button>';
+  }
+  function shopPrefsHtml(p) {
+    var id = p._id;
+    return '<details class="pshops" data-pshops="' + esc(id) + '"' + (state.pshops[id] ? " open" : "") + '><summary>Butiksvalg</summary><form class="pshop" data-shops="' + esc(id) + '">' +
+      '<label for="sa-' + esc(id) + '">Tjek altid</label>' +
+      '<input type="text" id="sa-' + esc(id) + '" maxlength="600" value="' + esc(shopList(p.shopsAlways).join(", ")) + '" placeholder="fx Proshop, hifiklubben.dk">' +
+      '<label for="se-' + esc(id) + '">Udelad</label>' +
+      '<input type="text" id="se-' + esc(id) + '" maxlength="600" value="' + esc(shopList(p.shopsExclude).join(", ")) + '">' +
+      '<label class="chk"><input type="checkbox" id="so-' + esc(id) + '"' + (p.shopsOnly ? ' checked' : '') + '> Kun butikker fra “tjek altid”</label>' +
+      '<span><button class="link" type="submit">Gem</button></span></form></details>';
+  }
+  function manageHtml(p, h, b, low30, lowAll, single) {
+    var id = p._id, parts = [];
+    var sg = suggestHtml(p, b, h, low30, lowAll);
+    if (mayEdit(p)) parts.push(sg + goalEditHtml(p));
+    var lp = listPickHtml(p);
+    if (lp) parts.push(lp);
+    var v = "";
+    if (state.change[id]) v = chooserHtml(p);
+    else if (!single && p.variants.length) {
+      v = '<div class="foot"><span>' + (p.variants.length > 1 ? "Variant: " + esc(variantLabels(p) || "alle") : "") + '</span>' +
+        (mayEdit(p) ? '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>' : '') + '</div>';
+    }
+    if (v) parts.push(v);
+    if (mayEdit(p)) parts.push(shopPrefsHtml(p));
+    var bo = boughtHtml(p);
+    if (bo) parts.push(bo);
+    var lk = linkHtml(p), rm = removeHtml(p);
+    if (lk || rm) parts.push('<div class="foot"><span>' + lk + '</span>' + rm + '</div>');
+    if (!parts.length) return "";
+    return '<details class="manage" data-manage="' + esc(id) + '"' + (state.manage[id] || state.change[id] || state.confirmDel === id ? " open" : "") + '><summary>Indstil vare</summary><div class="manage-in">' +
+      parts.map(function (x) { return '<div class="mrow">' + x + '</div>'; }).join("") + '</div></details>';
+  }
+  function shopTable(list, best) {
+    return '<div class="tablewrap"><table><tbody>' + list.map(function (o) {
+      var u = safeUrl(o.url), out = o.inStock === false;
+      return '<tr class="' + (o === best ? "best" : "") + (out ? " soldout" : "") + '"><td>' + esc(o.store || "") +
+        ((o.note || out) ? '<div class="meta">' + esc([out ? "Ikke på lager" : "", o.note || ""].filter(Boolean).join(" · ")) + '</div>' : '') +
+        '</td><td class="num n">' + esc(kr(o.price)) + '</td><td>' +
+        (u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">Se varen</a>' : '') + '</td></tr>';
+    }).join("") + '</tbody></table></div>';
+  }
+
+  // The same section for rows that are not tracking yet (fetching, choose variant, cannot be fetched): the foot actions behind "Indstil vare".
+  function looseManage(p) {
+    var f = footHtml(p);
+    if (!f) return "";
+    return '<details class="manage" data-manage="' + esc(p._id) + '"' + (state.manage[p._id] || state.confirmDel === p._id ? " open" : "") + '><summary>Indstil vare</summary><div class="manage-in"><div class="mrow">' + f + '</div></div></details>';
+  }
+
   function bodyHtml(p) {
     var id = p._id;
-    if (p.status === "pending" && !p.url) return findHtml(p) + footHtml(p);
-    if (p.status === "pending") return cmpHtml(p) + footHtml(p);
+    if (p.status === "pending" && !p.url) return findHtml(p) + looseManage(p);
+    if (p.status === "pending") return cmpHtml(p) + looseManage(p);
     if (p.status === "error" && !p.url)
-      return '<p class="verdict poor"><b>Produktet blev ikke fundet.</b> ' + esc(p.checkNote || "Find det selv på Prisjagt, og indsæt linket her.") + '</p>' + findHtml(p, true) + footHtml(p);
+      return '<p class="verdict"><b>Produktet blev ikke fundet.</b> ' + esc(p.checkNote || "Find det selv på Prisjagt, og indsæt linket her.") + '</p>' + findHtml(p, true) + looseManage(p);
     if (p.status === "error") {
       var f = mayEdit(p) ? '<form class="edit" data-fixurl="' + esc(id) + '" novalidate><label class="vh" for="u-' + esc(id) + '">Link til produktet</label>' +
         '<input class="wide" type="url" id="u-' + esc(id) + '" maxlength="500" required value="' + esc(p.url || "") + '" placeholder="Link fra prisjagt.dk eller en butik">' +
         '<button class="link" type="submit">Gem linket og prøv igen</button><span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></form>' : "";
-      return '<p class="verdict poor"><b>Produktet kunne ikke hentes.</b> ' + esc(cmpErrText(p) || "Tjek, at linket er en produktside.") + '</p>' + cmpHtml(p) + f + footHtml(p);
+      return '<p class="verdict"><b>Produktet kunne ikke hentes.</b> ' + esc(cmpErrText(p) || "Tjek, at linket er en produktside.") + '</p>' + cmpHtml(p) + f + looseManage(p);
     }
     if (awaitingFetch(p))
-      return '<div class="foot"><span>Variant: ' + esc(variantLabels(p)) + '</span>' + (mayEdit(p) && !isShopUrl(p.url) ? '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>' : '') + '</div>' + cmpHtml(p) + footHtml(p);
-    if (p.status === "choose") return (isMine(p) ? chooserHtml(p) : '<p class="note">Variant ikke valgt endnu.</p>') + cmpHtml(p) + footHtml(p);
+      return '<div class="foot"><span>Variant: ' + esc(variantLabels(p)) + '</span>' + (mayEdit(p) && !isShopUrl(p.url) ? '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>' : '') + '</div>' + cmpHtml(p) + looseManage(p);
+    if (p.status === "choose") return (isMine(p) ? chooserHtml(p) : '<p class="note">Variant ikke valgt endnu.</p>') + cmpHtml(p) + looseManage(p);
 
     var b = bestOf(p), h = histOf(p), now = Date.now(), html = "";
     if (state.note[id]) html += '<p class="note">' + esc(state.note[id]) + '</p>';
-    if (state.change[id]) html += chooserHtml(p);
     var single = isShopUrl(p.url);
     if (single && p.checkNote) html += '<p class="note">' + esc(cmpErrText(p)) + '</p>';
     var v = p.verdict;
@@ -458,20 +549,11 @@
       html += '<p class="verdict ' + esc(v.level || "") + '"><b>' + lab + '</b> ' + esc(v.text) + '</p>';
     }
     if (p.targetType === "auto" && autoReason(p) && !(v && v.text === autoReason(p))) html += '<p class="note">' + esc(autoReason(p)) + '</p>';
-    if (p.warning) html += '<p class="verdict poor"><b>Pas på førprisen.</b> ' + esc(p.warning) + '</p>';
-    if (single) {
-      html += '<p class="note">Kun denne butik. Et link fra prisjagt.dk sammenligner flere.</p>' + cmpHtml(p);
-    } else if (p.variants.length) {
-      html += '<div class="foot"><span>' + (p.variants.length > 1 ? "Variant: " + esc(variantLabels(p) || "alle") : "") + '</span>';
-      if (mayEdit(p) && !state.change[id]) html += '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>';
-      html += '</div>';
-    }
-    if (!single) html += cmpHtml(p);
+    if (p.warning) html += '<p class="verdict warn"><b>Pas på førprisen.</b> ' + esc(p.warning) + '</p>';
 
     var last30 = h.filter(function (x) { return x.t >= now - 30 * DAY; });
     var low30 = last30.length ? Math.min.apply(null, last30.map(function (x) { return x.p; })) : null;
     var lowAll = h.length ? Math.min.apply(null, h.map(function (x) { return x.p; })) : null;
-    html += suggestHtml(p, b, h, low30, lowAll);
     html += '<dl class="stats n">' +
       '<div><dt>Laveste 30 dage</dt><dd>' + esc(kr(low30)) + '</dd></div>' +
       '<div><dt>Laveste set</dt><dd>' + esc(kr(lowAll)) + '</dd></div>' +
@@ -495,29 +577,18 @@
       html += '</div>';
     }
 
+    // the three cheapest shops with the item in stock; everything else (sold out included) behind "Vis alle butikker"
     var os = offersOf(p).slice().sort(function (a, c) { return ((a.inStock === false) - (c.inStock === false)) || (a.price - c.price); });
     if (os.length) {
-      html += '<div><div class="sec-h"><h3>Butikker</h3>' +
-        '</div><div class="tablewrap"><table><tbody>' +
-        os.map(function (o) {
-          var u = safeUrl(o.url), out = o.inStock === false;
-          return '<tr class="' + (o === b ? "best" : "") + (out ? " soldout" : "") + '"><td>' + esc(o.store || "") +
-            ((o.note || out) ? '<div class="meta">' + esc([out ? "Ikke på lager" : "", o.note || ""].filter(Boolean).join(" · ")) + '</div>' : '') +
-            '</td><td class="num n">' + esc(kr(o.price)) + '</td><td>' +
-            (u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">Se varen</a>' : '') + '</td></tr>';
-        }).join("") + '</tbody></table></div></div>';
+      var inS = os.filter(function (o) { return o.inStock !== false; }), top = (inS.length ? inS : os).slice(0, 3);
+      var more = os.filter(function (o) { return top.indexOf(o) < 0; });
+      html += '<div class="shops"><div class="sec-h"><h3>Butikker</h3></div>' + shopTable(top, b) +
+        (more.length ? '<details class="allshops" data-allshops="' + esc(id) + '"' + (state.allShops[id] ? " open" : "") + '><summary>Vis alle butikker</summary>' + shopTable(more, b) + '</details>' : '') + '</div>';
     }
+    if (single) html += '<p class="note">Kun denne butik. Et link fra prisjagt.dk sammenligner flere.</p>';
+    html += cmpHtml(p);
     html += altHtml(p);
-    if (mayEdit(p)) {
-      html += '<details class="pshops"><summary>Butiksvalg</summary><form class="pshop" data-shops="' + esc(id) + '">' +
-        '<label for="sa-' + esc(id) + '">Tjek altid</label>' +
-        '<input type="text" id="sa-' + esc(id) + '" maxlength="600" value="' + esc(shopList(p.shopsAlways).join(", ")) + '" placeholder="fx Proshop, hifiklubben.dk">' +
-        '<label for="se-' + esc(id) + '">Udelad</label>' +
-        '<input type="text" id="se-' + esc(id) + '" maxlength="600" value="' + esc(shopList(p.shopsExclude).join(", ")) + '">' +
-        '<label class="chk"><input type="checkbox" id="so-' + esc(id) + '"' + (p.shopsOnly ? ' checked' : '') + '> Kun butikker fra “tjek altid”</label>' +
-        '<span><button class="link" type="submit">Gem</button></span></form></details>';
-    }
-    return html + footHtml(p);
+    return html + manageHtml(p, h, b, low30, lowAll, single);
   }
 
   // ---- alternatives: similar products and deals, answered by the AI agent within the hour ----
@@ -882,11 +953,8 @@
       (a.type === "checkbox" || a.type === "radio" ? a.checked !== a.defaultChecked : a.value !== a.defaultValue)) { renderPending = true; return; }
     renderPending = false;
     renderLists(); renderImports();
-    var rank = function (p) { return p.boughtAt ? 3 : isHit(p) ? 0 : (p.status === "choose" && !awaitingFetch(p)) ? 1 : 2; };
     var sel = curSel();
-    var ps = state.products.filter(function (p) { return inSel(p, sel); }).sort(function (x, y) {
-      return (rank(x) - rank(y)) || String(y.createdAt || "").localeCompare(String(x.createdAt || ""));
-    });
+    var ps = state.products.filter(function (p) { return inSel(p, sel); });
     if (!state.products.length) {
       list.innerHTML = '<div class="empty"><b>Ingen produkter endnu</b>' +
         (state.canWrite ? "Skriv et navn eller indsæt et link ovenfor."
@@ -898,13 +966,80 @@
         "" + '</div>';
       return;
     }
-    list.innerHTML = ps.map(function (p) {
+    var by = groupProducts(ps, sel);
+    var rowHtml = function (p) {
       var open = isOpen(p);
       return '<article class="item' + (isHit(p) ? " hit" : "") + (p.boughtAt ? " bought" : "") + '" data-status="' + esc(p.status) + '">' +
         '<button type="button" class="head" data-act="toggle" data-id="' + esc(p._id) + '" aria-expanded="' + open + '">' + headHtml(p) + '</button>' +
         (open ? '<div class="body">' + bodyHtml(p) + '</div>' : '') + '</article>';
-    }).join("");
+    };
+    var html = "";
+    if (by.hit.length) html += '<div class="grp grp-hit"><h3 class="grp-h">Tilbud nu</h3>' + by.hit.map(rowHtml).join("") + '</div>';
+    html += by.choose.concat(by.wait, by.rest).map(rowHtml).join("");
+    // products that cannot be fetched: quiet, collapsed, after the live ones
+    if (by.error.length) {
+      var n = by.error.length;
+      html += '<details class="errs" id="errGroup"' + (state.errOpen ? " open" : "") + '><summary>' + n + (n === 1 ? " vare kan ikke hentes" : " varer kan ikke hentes") + '</summary>' + by.error.map(rowHtml).join("") + '</details>';
+    }
+    html += by.bought.map(rowHtml).join("");
+    list.innerHTML = html;
     ps.forEach(function (p) { if (isOpen(p) && p.status === "tracking") drawChart(p); });
+  }
+
+  // ---- order and groups ----
+  // Groups: hit (a good deal now), choose (needs the person), wait (fetching), rest (the others, closest to the goal first), error
+  // (cannot be fetched, collapsed), bought (dimmed, last). The order is kept between renders: a full sort only on load and when another
+  // list is selected. Otherwise a row keeps its place, and only a row that is new or has changed group is put into its group (by
+  // closeness), so nothing moves under someone who is reading, and an open row stays where it is.
+  var GROUPS = ["hit", "choose", "wait", "rest", "error", "bought"];
+  function groupOf(p) {
+    if (p.boughtAt) return "bought";
+    if (p.status === "error") return "error";
+    if (isHit(p)) return "hit";
+    if (p.status === "choose" && !awaitingFetch(p)) return "choose";
+    if (p.status === "pending" || awaitingFetch(p)) return "wait";
+    return "rest";
+  }
+  // How far from the goal, as a share of the price: below 0 is past the goal. A price or % goal: price against the goal price. Goal
+  // "auto": how far the price is from 10 % under the normal price. null = unknown (sorted last). A sold-out best price counts as far away.
+  function gapOf(p) {
+    var b = bestOf(p), g, t;
+    if (p.status !== "tracking" || !b) return null;
+    if (p.targetType === "auto") {
+      if (!(typeof p.normalPrice === "number" && p.normalPrice > 0)) return null;
+      g = 0.1 - (1 - b.price / p.normalPrice);
+    } else {
+      t = targetKr(p);
+      if (t == null || !(t > 0)) return null;
+      g = (b.price - t) / t;
+    }
+    return b.inStock === false ? g + 10 : g;
+  }
+  function byGap(a, b) {
+    var x = gapOf(a), y = gapOf(b);
+    if ((x === null) !== (y === null)) return x === null ? 1 : -1;
+    if (x !== null && x !== y) return x - y;
+    return String(b.createdAt || "").localeCompare(String(a.createdAt || "")) || (a._id < b._id ? -1 : a._id > b._id ? 1 : 0);
+  }
+  function groupProducts(ps, sel) {
+    var prev = state.ord, force = !prev || prev.sel !== sel, grp = {}, out = {}, idx = {}, n = 0;
+    GROUPS.forEach(function (g) { out[g] = []; });
+    ps.forEach(function (p) { grp[p._id] = groupOf(p); out[grp[p._id]].push(p); });
+    GROUPS.forEach(function (g) {
+      var list = out[g], res;
+      if (force) res = list.slice().sort(byGap);
+      else {
+        res = list.filter(function (p) { return prev.grp[p._id] === g; }).sort(function (a, b) { return prev.idx[a._id] - prev.idx[b._id]; });
+        list.filter(function (p) { return prev.grp[p._id] !== g; }).sort(byGap).forEach(function (p) {
+          var i = 0; while (i < res.length && byGap(res[i], p) <= 0) i++;
+          res.splice(i, 0, p);
+        });
+      }
+      out[g] = res;
+      res.forEach(function (p) { idx[p._id] = n++; });
+    });
+    state.ord = { sel: sel, grp: grp, idx: idx };
+    return out;
   }
 
   // ---- chart ----
@@ -1074,7 +1209,7 @@
     }, function () {});
   }
   function startSession() {
-    state.loaded = false; state.products = []; state.canWrite = true;
+    state.loaded = false; state.products = []; state.canWrite = true; state.ord = null; state.errOpen = false;
     state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.share = null; state.confirmMember = null; state.confirmLeave = null; state.memCount = {}; state.people = {}; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null;
     $("status").textContent = "Henter listen …";
     loadSounds();
@@ -1087,7 +1222,7 @@
   function stopSession() {
     clearInterval(pollTimer); pollTimer = null;
     try { if (channel) sb.removeChannel(channel); } catch (e) {}
-    channel = null; state.products = []; state.loaded = false; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.share = null; state.confirmMember = null; state.confirmLeave = null; state.memCount = {}; state.people = {}; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null; renderImports();
+    channel = null; state.products = []; state.loaded = false; state.ord = null; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.share = null; state.confirmMember = null; state.confirmLeave = null; state.memCount = {}; state.people = {}; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null; renderImports();
     access.admin = false; access.requests = []; access.allowed = []; access.confirm = null; access.seq++; accMsg(""); renderAccess();
   }
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && user) fetchProducts(); });
@@ -1279,6 +1414,21 @@
     }, function () {});
   });
   $("list").addEventListener("focusout", function () { setTimeout(function () { if (renderPending) render(); }, 0); });
+  // the open/closed state of the sections inside the list survives the next render (toggle does not bubble: captured)
+  $("list").addEventListener("toggle", function (ev) {
+    var d = ev.target; if (!d || !d.matches) return;
+    if (d.id === "errGroup") state.errOpen = d.open;
+    else if (d.dataset.manage) state.manage[d.dataset.manage] = d.open;
+    else if (d.dataset.allshops) state.allShops[d.dataset.allshops] = d.open;
+    else if (d.dataset.pshops) state.pshops[d.dataset.pshops] = d.open;
+  }, true);
+  // a picture that does not load (error does not bubble: captured) falls back to the letter and is not tried again
+  $("list").addEventListener("error", function (ev) {
+    var im = ev.target; if (!im || im.tagName !== "IMG") return;
+    var box = im.parentNode, src = im.getAttribute("src");
+    if (src) badImg[src] = true;
+    if (box && box.classList.contains("thumb")) { box.classList.add("ph"); box.textContent = box.getAttribute("data-ch") || "?"; }
+  }, true);
 
   // ---- access section for the owner (admin): requests waiting, and who has access ----
   // admin_list_requests only succeeds for an admin. For everybody else it fails and nothing is shown, and nothing is said.
@@ -1286,6 +1436,7 @@
   function renderAccess() {
     var box = $("accessBox"), badge = $("reqBadge"), n = access.requests.length;
     box.hidden = !(user && access.admin);
+    $("accessBtn").hidden = box.hidden;
     badge.hidden = box.hidden || !n;
     badge.textContent = n + " venter på adgang";
     if (box.hidden) return;
@@ -1334,7 +1485,8 @@
       }, function () {});
     }, function () {});
   }
-  $("reqBadge").addEventListener("click", function () { try { $("accessBox").scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {} });
+  function gotoAccess() { try { $("accessBox").scrollIntoView({ behavior: reduceMotion() ? "auto" : "smooth", block: "center" }); $("accessH").focus({ preventScroll: true }); } catch (e) {} }
+  $("reqBadge").addEventListener("click", gotoAccess);
   $("accessBox").addEventListener("click", function (ev) {
     var b = ev.target.closest("[data-aact]"); if (!b || !sb || !user) return;
     var act = b.dataset.aact, email = b.dataset.email;
@@ -1362,12 +1514,25 @@
   function syncType() {
     var pct = $("fTypePct").checked, auto = $("fTypeAuto").checked;
     $("fAmount").hidden = auto; $("addForm").className = "add" + (auto ? " auto" : "");
+    syncAdd();
     $("fValLabel").textContent = pct ? "Mindste rabat i procent" : "Højeste pris i kroner";
     $("fVal").placeholder = pct ? "Mindst" : "Højst";
     $("fVal").max = pct ? "95" : "";
     $("fHint").textContent = pct ? "Regnes fra normalprisen." : "Varen skal være på lager.";
     $("fHint").hidden = auto || !state.canWrite;
   }
+  // One line: the field and the button. The goal choices ("Godt tilbud" is the default) show while the field has focus or text, or a
+  // choice other than the default is made, and while a pointer is down inside the form (so a tap on a choice is not lost to the blur).
+  var addPress = false;
+  function syncAdd() {
+    var f = $("addForm"), on = !!$("fMain").value || !$("fTypeAuto").checked || f.contains(document.activeElement) || addPress;
+    $("addMore").hidden = !on;
+  }
+  $("addForm").addEventListener("focusin", syncAdd);
+  $("addForm").addEventListener("focusout", function () { setTimeout(syncAdd, 0); });
+  $("fMain").addEventListener("input", syncAdd);
+  $("addForm").addEventListener("pointerdown", function () { addPress = true; });
+  ["pointerup", "pointercancel"].forEach(function (ev) { document.addEventListener(ev, function () { if (addPress) { addPress = false; setTimeout(syncAdd, 0); } }); });
   // A value that looks like an address (scheme, www., or a single word with a path) is a link; anything else is a name.
   function looksLikeLink(t) { return /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^(javascript|data|vbscript|file|mailto):/i.test(t) || /^www\./i.test(t) || /^\S+\.\S+\/\S*$/.test(t) || /prisjagt\.dk/i.test(t) && !/\s/.test(t); }
   // A shared wish list from Ønskeskyen (onskeskyen.dk, internationally gowish.com): /s/<code> or /wishlists/<id>, optional locale prefix.
@@ -1431,7 +1596,7 @@
         fail(r.error.code === "23514" ? (url ? "Databasen afviste linket eller målet. Tjek, at linket starter med https:// og er en produktside." : "Databasen afviste navnet eller målet. Tjek dem, og prøv igen.") : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
         return;
       }
-      $("fMain").value = ""; $("fVal").value = "";
+      $("fMain").value = ""; $("fVal").value = ""; syncAdd();
       fetchProducts();
     }, function () { btn.disabled = false; fail("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
   });
@@ -1455,10 +1620,51 @@
         fail(r.error.code === "23514" ? (/højst/.test(String(r.error.message || "")) ? String(r.error.message) : "Databasen afviste linket. Brug det delte link til ønskelisten fra Ønskeskyen.") : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
         return;
       }
-      $("fMain").value = ""; $("fVal").value = ""; state.importMsg = "";
+      $("fMain").value = ""; $("fVal").value = ""; state.importMsg = ""; syncAdd();
       fetchImports();
     }, function () { btn.disabled = false; fail("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
   }
+
+  // ---- account menu: one small button in the header (the initial in a circle) ----
+  var acctBtn = $("acctBtn"), acctPop = $("acctPop");
+  function menuItems() { return Array.prototype.filter.call($("acctMenu").querySelectorAll('[role="menuitem"]'), function (x) { return !x.hidden; }); }
+  function openMenu(which) {
+    acctPop.hidden = false; acctBtn.setAttribute("aria-expanded", "true");
+    var it = menuItems(); if (it.length) it[which === "last" ? it.length - 1 : 0].focus();
+  }
+  function closeMenu(back) {
+    if (acctPop.hidden) return;
+    acctPop.hidden = true; acctBtn.setAttribute("aria-expanded", "false");
+    if (back) acctBtn.focus();
+  }
+  acctBtn.addEventListener("click", function () { if (acctPop.hidden) openMenu(); else closeMenu(true); });
+  acctBtn.addEventListener("keydown", function (ev) {
+    if (ev.key === "ArrowDown") { ev.preventDefault(); openMenu(); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); openMenu("last"); }
+  });
+  acctPop.addEventListener("keydown", function (ev) {
+    var it = menuItems(), i = it.indexOf(document.activeElement);
+    if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); closeMenu(true); }
+    else if (ev.key === "ArrowDown") { ev.preventDefault(); it[(i + 1) % it.length].focus(); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); it[(i - 1 + it.length) % it.length].focus(); }
+    else if (ev.key === "Home") { ev.preventDefault(); it[0].focus(); }
+    else if (ev.key === "End") { ev.preventDefault(); it[it.length - 1].focus(); }
+    else if (ev.key === "Tab") closeMenu(true);          // focus goes on from the button: nothing is trapped
+  });
+  document.addEventListener("click", function (ev) { if (!acctPop.hidden && !$("acts").contains(ev.target)) closeMenu(false); });
+  $("acctMenu").addEventListener("click", function (ev) {
+    var b = ev.target.closest('[role="menuitem"]'); if (!b) return;
+    if (b.id === "logoutBtn") return;                     // its own handler closes the menu and signs out
+    closeMenu(b.id !== "settingsBtn" && b.id !== "accessBtn");
+  });
+  $("settingsBtn").addEventListener("click", function () {
+    var box = $("settingsBox"); box.hidden = false;
+    try { box.scrollIntoView({ behavior: reduceMotion() ? "auto" : "smooth", block: "nearest" }); } catch (e) {}
+    $("shAlways").focus({ preventScroll: true });
+  });
+  $("setClose").addEventListener("click", function () { $("settingsBox").hidden = true; acctBtn.focus(); });
+  $("settingsBox").addEventListener("keydown", function (ev) { if (ev.key === "Escape") { $("settingsBox").hidden = true; acctBtn.focus(); } });
+  $("accessBtn").addEventListener("click", gotoAccess);
 
   // ---- settings ----
   $("shNotify").addEventListener("change", function () { $("shDigest").disabled = !$("shNotify").checked; });
@@ -1574,18 +1780,19 @@
   });
   $("sentBack").addEventListener("click", function () { loginStore(""); sentEmail = ""; $("sentBox").hidden = true; $("loginForm").hidden = false; $("lEmail").focus(); });
   $("logoutBtn").addEventListener("click", function () {
+    closeMenu(false); $("settingsBox").hidden = true;
     sb.auth.signOut().then(function () { handleSession(null); }, function () { handleSession(null); });
   });
 
   function showAuth(errText) {
-    $("authView").hidden = false; $("appView").hidden = true; $("acts").hidden = true; $("reqBadge").hidden = true;
+    $("authView").hidden = false; $("appView").hidden = true; $("acts").hidden = true; $("reqBadge").hidden = true; closeMenu(false);
     $("status").textContent = "";
     if (errText) { $("lMsg").textContent = errText; $("lMsg").hidden = false; }
     var kept = loginStored(); if (kept && $("sentBox").hidden) showSent(kept, false);
   }
   function showApp() {
     $("authView").hidden = true; $("appView").hidden = false; $("acts").hidden = false;
-    $("who").textContent = user.email || "";
+    $("who").textContent = user.email || ""; $("acctInitial").textContent = initialOf(user.email || "");
     syncSound(); syncType();
   }
   function handleSession(session) {

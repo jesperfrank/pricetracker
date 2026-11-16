@@ -199,11 +199,24 @@ const FAKE = `
 const results = []; const pageErrors = [];
 function check(name, ok, extra) { results.push({ name, ok: !!ok, extra }); console.log((ok ? "PASS " : "FAIL ") + name + (ok ? "" : "  <- " + (extra || ""))); }
 
+// Product pictures: the page only loads https addresses, so the tests answer https://img.example.test/... themselves (no external request).
+// "broken" answers 404. Every picture request is counted per page (page.imgReqs).
+function imgSvg(slug) {
+  let h = 0; for (const c of slug) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><rect width="96" height="96" fill="hsl(' + h + ',28%,92%)"/>' +
+    '<rect x="26" y="22" width="44" height="52" rx="8" fill="hsl(' + h + ',30%,62%)"/><rect x="34" y="30" width="28" height="22" rx="4" fill="hsl(' + h + ',30%,86%)"/><circle cx="48" cy="63" r="5" fill="hsl(' + h + ',30%,88%)"/></svg>';
+}
 let browser;
 async function open(opts = {}) {
   const ctx = await browser.newContext({ viewport: { width: opts.width || 900, height: opts.height || 900 }, colorScheme: opts.scheme || "light", serviceWorkers: "block" });
   const page = await ctx.newPage();
   page.on("pageerror", e => pageErrors.push(opts.label + ": " + e.message));
+  page.imgReqs = [];
+  await page.route(/^https:\/\/img\.example\.test\//, r => {
+    const u = new URL(r.request().url()); page.imgReqs.push(r.request().url());
+    if (/broken/.test(u.pathname)) return r.fulfill({ status: 404, contentType: "text/plain", body: "no" });
+    r.fulfill({ contentType: "image/svg+xml", body: imgSvg(u.pathname) });
+  });
   page.on("console", m => { if (m.type() === "error" && !/Failed to load resource/.test(m.text())) pageErrors.push(opts.label + " console: " + m.text()); });
   await page.route(/cdn\.jsdelivr\.net/, r => r.fulfill({ contentType: "text/javascript", body: "/* test: client is injected */" }));
   await page.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
@@ -212,12 +225,23 @@ async function open(opts = {}) {
   const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, imports: opts.imports || [], noImports: !!opts.noImports, members: opts.members || [], people: opts.people || {}, noMembers: !!opts.noMembers, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [] };
   await page.addInitScript("window.__INIT = " + JSON.stringify(init) + ";");
   if (opts.fake !== false) await page.addInitScript(FAKE);
+  // The behaviour tests below work with the sections "Indstil vare", "Vis alle butikker" and the group of products that cannot be fetched opened (they are collapsed by default; the tests
+  // of that collapsing pass collapsed: true). Opening goes through the real toggle, so the page keeps it across renders.
+  if (!opts.collapsed) await page.addInitScript(() => {
+    const fix = () => document.querySelectorAll("details.manage:not([open]), details.allshops:not([open]), details.errs:not([open])").forEach(d => { d.open = true; });
+    document.addEventListener("DOMContentLoaded", () => new MutationObserver(fix).observe(document.body, { childList: true, subtree: true }));
+  });
   if (opts.storage) await page.addInitScript(s => { for (const k in s) localStorage.setItem(k, s[k]); }, opts.storage);
   await page.goto(base + "/index.html");
   return page;
 }
 const row = (id, over) => Object.assign({ id, user_id: "u1", shops_always: null, shops_exclude: null, shops_only: null }, JSON.parse(JSON.stringify(FIX[id.split("#")[0]] || {})), over || {});
 const ops = page => page.evaluate(() => window.__db.writes());
+// the account menu, the settings panel, and the collapsed sections inside the list
+const menu = async p => { if (!(await p.isVisible("#acctPop"))) await p.click("#acctBtn"); };
+const openSettings = async p => { await menu(p); await p.click("#settingsBtn"); await p.waitForSelector("#settingsBox:not([hidden])"); };
+const openAll = p => p.evaluate(() => document.querySelectorAll("details.manage, details.allshops, details.errs").forEach(d => { d.open = true; }));
+const goalPick = async (p, sel) => { await p.focus("#fMain"); await p.click(".goal label:has(" + sel + ")"); };
 
 const pendingRow = { id: "p1", user_id: "u1", name: "Nyt produkt", source_url: "https://prisjagt.dk/produkt/ny", target_type: "price", target_value: 500, status: "pending", created_at: new Date().toISOString(), tracked_variants: null, active: true };
 const chooseRow = { id: "c1", user_id: "u1", name: "Nyt produkt", title: "Sony WH-1000XM5", source_url: "https://prisjagt.dk/produkt/sony", target_type: "pct", target_value: 15, status: "choose", created_at: new Date().toISOString(), active: true, tracked_variants: null,
@@ -334,7 +358,12 @@ let base;
   {
     const p = await open({ products: all, label: "states" });
     await p.waitForSelector(".item");
-    check("signed in: email, log ud, sound toggle in header", /mor@familie\.dk/.test(await p.textContent("#who")) && await p.isVisible("#logoutBtn") && await p.isVisible("#soundBtn"));
+    check("signed in: one 'Konto' button with the initial; address, sound and log out are not shown until the menu is open",
+      await p.isVisible("#acctBtn") && (await p.getAttribute("#acctBtn", "aria-label")) === "Konto" && (await p.textContent("#acctInitial")) === "M" && !(await p.isVisible("#who")) && !(await p.isVisible("#soundBtn")) && !(await p.isVisible("#logoutBtn")));
+    await p.click("#acctBtn");
+    check("account menu: the address (muted), Lyd til, Indstillinger, Log ud; no Adgang for a non-admin",
+      /mor@familie\.dk/.test(await p.textContent("#who")) && /Lyd til/.test(await p.textContent("#soundBtn")) && await p.isVisible("#settingsBtn") && await p.isVisible("#logoutBtn") && !(await p.isVisible("#accessBtn")));
+    await p.keyboard.press("Escape");
     const st = await p.textContent("#status");
     check("status line: last updated and Black Friday, no update interval", /^Opdateret /.test(st) && !/kvarter/.test(st) && /Black Friday/.test(st), st);
     check("six rows shown", (await p.locator(".item").count()) === 6);
@@ -376,15 +405,16 @@ let base;
     check("single-shop pending: normal pending text", /Henter produktet …/.test(await sp.locator(".head").textContent()) && !/prisjagt/.test(await sp.textContent()), await sp.textContent());
     await sp.locator(".head").click();
     check("single-shop pending body: nothing about prisjagt or variants", !/prisjagt|variant|kvarter/i.test(await sp.locator(".body").textContent()), await sp.locator(".body").textContent());
-    const it = p.locator('.item[data-status="tracking"]').nth(1);
+    const it = p.locator('.item:has(.head[data-id="sh"])');
     await it.locator(".head").click();
     const bt = await it.locator(".body").textContent();
     check("single-shop detail: quiet line, shop in the table, remark about several variants", /Kun denne butik\. Et link fra prisjagt\.dk sammenligner flere\./.test(bt) && /Bedre Nætter/.test(bt) && /flere varianter med forskellige priser/.test(bt) && /579 kr\./.test(bt), bt.slice(0, 300));
     check("single-shop detail: no 'Skift variant', no 'Variant:' line", !/Skift variant/.test(bt) && !/Variant:/.test(bt) && (await it.locator('[data-act="change"]').count()) === 0);
     check("single-shop with archive points (fixture history): the short gaps note", /Ældre priser kan være upræcise og have huller\./.test(bt), bt.slice(0, 300));
-    const other = await p.locator('.item[data-status="tracking"]').first().locator(".body");
-    await p.locator('.item[data-status="tracking"]').first().locator(".head").click();
-    check("prisjagt product still has 'Skift variant' and no single-shop line", /Skift variant/.test(await other.textContent()) && !/Kun denne butik/.test(await other.textContent()));
+    const other = p.locator('.item:has(.head[data-id="dy"]) .body');
+    await p.locator('.head[data-id="dy"]').click();
+    await openAll(p);
+    check("prisjagt product still has 'Skift variant' (under Indstil vare) and no single-shop line", /Skift variant/.test(await other.textContent()) && !/Kun denne butik/.test(await other.textContent()));
     await p.context().close();
     // a single-shop product without archive points: no note about older prices
     const plainRow = Object.assign({}, shopRow, { id: "pl", history: [{ d: "2026-11-10", p: 599, s: "Bedre Nætter", src: "check" }, { d: "2026-11-16", p: 579, s: "Bedre Nætter", src: "check" }] });
@@ -416,7 +446,7 @@ let base;
   {
     const p = await open({ products: [], label: "add" });
     await p.waitForSelector("#addForm:not([hidden])");
-    await p.click(".goal label:has(#fTypePrice)");
+    await goalPick(p, "#fTypePrice");
     check("footer: tip rules sit in a collapsed details next to Indstillinger", !(await p.evaluate(() => document.getElementById("howBox").open)) && /Sådan vurderer vi tilbud/.test(await p.textContent("#howBox summary")) && !(await p.isVisible("#howBox p")) && /laveste pris de seneste 30 dage/.test(await p.textContent("#howBox")) && !/hvert kvarter/.test(await p.innerText("#appView .access, #tryRow")) );
     check("add: empty list text, placeholder names all three inputs, no explanatory paragraphs", /Ingen produkter endnu/.test(await p.textContent("#list")) && (await p.getAttribute("#fMain", "placeholder")) === "Produktnavn, link eller ønskeliste" && (await p.textContent('label[for="fMain"]')) === "Produktnavn, link eller ønskeliste" && (await p.locator("#fHelp").count()) === 0 && (await p.locator("#fName").count()) === 0);
     for (const bad of ["", "http://prisjagt.dk/p/1", "http://www.bedrenaetter.dk/x.html", "ftp://shop.dk/x", "https://prisjagt.dk/", "javascript:alert(1)", "www.example.com/x", "prisjagt.dk.evil.com/p/1", "https://localhost/x", "https://intranet/x", "https://127.0.0.1/x", "https://user:pw@shop.dk/x", "https://shop.dk:8443/x"]) {
@@ -435,12 +465,12 @@ let base;
       o.table === "products" && o.op === "insert" && JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://prisjagt.dk/produkt/sony-wh-1000xm5-p123?x=1", target_type: "price", target_value: 1500, active: true }), JSON.stringify(o.payload));
     await p.waitForSelector('.item[data-status="pending"]');
     check("add: new row appears as pending", true);
-    await p.fill("#fMain", "https://prisjagt.dk/product.php?p=555"); await p.click(".goal label:has(#fTypePct)"); await p.fill("#fVal", "20"); await p.click("#fSubmit");
+    await p.fill("#fMain", "https://prisjagt.dk/product.php?p=555"); await goalPick(p, "#fTypePct"); await p.fill("#fVal", "20"); await p.click("#fSubmit");
     await p.waitForFunction(() => window.__db.writes().length === 2);
     o = (await ops(p))[1];
     check("add: link still works with % goal (placeholder name, source_url)", JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://prisjagt.dk/product.php?p=555", target_type: "pct", target_value: 20, active: true }), JSON.stringify(o.payload));
     // a link to a single shop is accepted as it is (fragment dropped), same row shape as a prisjagt link
-    await p.fill("#fMain", " https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html#reviews "); await p.click(".goal label:has(#fTypePrice)"); await p.fill("#fVal", "450"); await p.click("#fSubmit");
+    await p.fill("#fMain", " https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html#reviews "); await goalPick(p, "#fTypePrice"); await p.fill("#fVal", "450"); await p.click("#fSubmit");
     await p.waitForFunction(() => window.__db.writes().length === 3);
     o = (await ops(p))[2];
     check("add: single-shop link accepted (name placeholder, source_url, no extra fields)", JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html", target_type: "price", target_value: 450, active: true }), JSON.stringify(o.payload));
@@ -452,14 +482,14 @@ let base;
       await p.fill("#fMain", bad); await p.fill("#fVal", "500"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
       check("add: name of " + bad.length + " characters rejected", (await ops(p)).length === 3 && /2 og 140/.test(await p.textContent("#fMsg")) && await p.isVisible("#fMsg"));
     }
-    await p.click(".goal label:has(#fTypePrice)");
+    await goalPick(p, "#fTypePrice");
     await p.fill("#fMain", "  Sony   WH-1000XM5 sort "); await p.fill("#fVal", "1700"); await p.click("#fSubmit");
     await p.waitForFunction(() => window.__db.writes().length === 4);
     o = (await ops(p))[3];
     check("add: name only -> {name, target_type, target_value} without source_url", JSON.stringify(o.payload) === JSON.stringify({ name: "Sony WH-1000XM5 sort", target_type: "price", target_value: 1700 }), JSON.stringify(o.payload));
     await p.waitForFunction(() => /Finder produktet …/.test(document.getElementById("list").textContent));
     check("add: name-only row shows 'Finder produktet …'", true);
-    await p.fill("#fMain", "https://prisjagt.dk/produkt/x"); await p.fill("#fVal", "99"); await p.click(".goal label:has(#fTypePct)"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
+    await p.fill("#fMain", "https://prisjagt.dk/produkt/x"); await p.fill("#fVal", "99"); await goalPick(p, "#fTypePct"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
     check("add: % above 95 rejected", (await ops(p)).length === 4 && /95/.test(await p.textContent("#fMsg")));
     await p.evaluate(() => { window.__db.deny = true; });
     await p.fill("#fVal", "20"); await p.click("#fSubmit");
@@ -524,11 +554,11 @@ let base;
     await p.waitForFunction(() => window.__db.writes().length === 2);
     o = (await ops(p))[1];
     check("add auto: link -> placeholder name, source_url, auto goal", JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://prisjagt.dk/product.php?p=555", target_type: "auto", target_value: null, active: true }), JSON.stringify(o.payload));
-    await p.click(".goal label:has(#fTypePct)");
+    await goalPick(p, "#fTypePct");
     check("add auto: choosing % shows the amount field", await p.isVisible("#fAmount") && /rabat/i.test(await p.textContent("#fValLabel")));
     await p.fill("#fMain", "https://prisjagt.dk/product.php?p=556"); await p.click("#fSubmit");
     check("add auto: % without a value is still refused", (await ops(p)).length === 2 && await p.isVisible("#fMsg"));
-    await p.click(".goal label:has(#fTypeAuto)");
+    await goalPick(p, "#fTypeAuto");
     check("add auto: back to auto hides the amount again", !(await p.isVisible("#fAmount")));
     await p.context().close();
   }
@@ -541,8 +571,9 @@ let base;
     await p.waitForSelector(".item");
     const it = p.locator('.item:has(.head[data-id="dy"])');
     const head = await it.locator(".head").textContent();
-    check("auto goal: head says 'godt tilbud' and the deal is shown as a hit", /godt tilbud/.test(head) && /Godt tilbud/.test(head) && !/mål \d/.test(head) && (await it.getAttribute("class")).indexOf("hit") >= 0, head);
+    check("auto goal: head says 'Godt tilbud', shows the saving instead of a goal, and the deal is shown as a hit", /Godt tilbud/.test(head) && /\u221213 %/.test(head) && !/mål \d/.test(head) && (await it.getAttribute("class")).indexOf("hit") >= 0, head);
     await p.locator('.head[data-id="dy"]').click();
+    await openAll(p);
     const body = await p.locator('.item:has(.head[data-id="dy"]) .body').textContent();
     check("auto goal: the verdict says why, not repeated in a second line", /3\.999 kr\. er 13 % under normalprisen/.test(body) && !/Derfor giver vi besked/.test(body) && body.split("er 13 % under normalprisen").length === 2, body.slice(0, 300));
     check("auto goal: edit form has the three choices, auto selected, no number field",
@@ -565,7 +596,7 @@ let base;
     await p.waitForFunction(() => window.__db.writes().length === 2);
     o = (await ops(p))[1];
     check("edit: to auto -> {target_type auto, target_value null}", JSON.stringify(o.payload) === '{"target_type":"auto","target_value":null}', JSON.stringify(o.payload));
-    await p.waitForFunction(() => /godt tilbud/.test(document.querySelector('.head[data-id="dy"]').textContent));
+    await p.waitForFunction(() => /Godt tilbud/.test(document.querySelector('.head[data-id="dy"]').textContent));
     await p.selectOption("#et-dy", "pct");
     check("edit: choosing % shows the number field", await p.isVisible("#e-dy"));
     await p.fill("#e-dy", "20"); await p.click('[data-edit="dy"] button[type=submit]');
@@ -594,7 +625,7 @@ let base;
   {
     const p = await open({ products: [row("test-sony-xm5", { id: "x5", target_value: 1700 }), row("test-lego-falcon", { id: "lg" })], label: "edit" });
     await p.waitForSelector(".item");
-    await p.locator('.head[data-id="x5"]').click();
+    await p.locator('.head[data-id="x5"]').click(); await openAll(p);
     await p.fill('#e-x5', "1900"); await p.click('[data-edit="x5"] button[type=submit]');
     await p.waitForFunction(() => window.__db.writes().length === 1);
     let o = (await ops(p))[0];
@@ -612,7 +643,7 @@ let base;
     check("delete: confirmed -> delete op, row gone", o.op === "delete" && o.filters[0][1] === "x5" && (await p.locator(".item").count()) === 1);
 
     // per-product prefs
-    await p.locator('.head[data-id="lg"]').click();
+    await p.locator('.head[data-id="lg"]').click(); await openAll(p);
     await p.locator("details.pshops summary").click();
     await p.fill("#sa-lg", "Proshop, hifiklubben.dk"); await p.fill("#se-lg", "CDON"); await p.check("#so-lg");
     await p.click('[data-shops="lg"] button[type=submit]');
@@ -621,7 +652,7 @@ let base;
     check("product shop prefs saved as arrays", o.op === "update" && JSON.stringify(o.payload) === '{"shops_always":["Proshop","hifiklubben.dk"],"shops_exclude":["CDON"],"shops_only":true}', JSON.stringify(o.payload));
 
     // general prefs + notify
-    await p.locator("#settingsBox summary").click();
+    await openSettings(p);
     check("settings: profile row created on first login", await p.evaluate(() => window.__db.profiles.length === 1 && window.__db.profiles[0].user_id === "u1"));
     await p.fill("#shAlways", "Magasin"); await p.fill("#shExclude", "Coolshop, Power"); await p.check("#shOnly"); await p.uncheck("#shNotify");
     await p.click('#shopForm button[type=submit]');
@@ -632,7 +663,7 @@ let base;
     await p.click('#shopForm button[type=submit]');
     await p.waitForFunction(() => window.__db.profiles[0].notify_email === true);
     check("settings: notify toggles back on", true);
-    await p.click("#logoutBtn");
+    await menu(p); await p.click("#logoutBtn");
     await p.waitForSelector("#authView:not([hidden])");
     check("log out returns to login screen", !(await p.isVisible("#appView")));
     await p.context().close();
@@ -677,7 +708,7 @@ let base;
     const m = await open({ products: [row("test-sony-xm5", { id: "x5", target_value: 2100 })], label: "muted", storage: { "pv-muted": "1" } });
     await m.waitForSelector(".item.hit"); await m.click("h1");
     check("muted: no celebration", (await m.evaluate(() => (window.__pvCelebrations || []).length)) === 0 && /Lyd fra/.test(await m.textContent("#soundBtn")));
-    await m.click("#soundBtn");
+    await menu(m); await m.click("#soundBtn");
     check("sound toggle remembered in localStorage", (await m.evaluate(() => localStorage.getItem("pv-muted"))) === "0" && /Lyd til/.test(await m.textContent("#soundBtn")));
     await m.click("#tryBtn");
     check("'Prøv lyden' plays", (await m.evaluate(() => window.__audio.starts)) > 0);
@@ -1211,7 +1242,7 @@ let base;
     for (const [typed, stored] of yes) {
       const p = await open({ products: [], label: "wish-yes" });
       await p.waitForSelector("#addForm:not([hidden])");
-      await p.click(".goal label:has(#fTypePct)");            // a goal with no amount: irrelevant for a wish list
+      await goalPick(p, "#fTypePct");            // a goal with no amount: irrelevant for a wish list
       await send(p, typed);
       const w = await writesOf(p);
       check("wish link '" + typed.trim().slice(0, 50) + "' -> one import with the clean https address, no product", w.length === 1 && w[0].table === "imports" && w[0].op === "insert" && w[0].payload.url === stored && Object.keys(w[0].payload).join() === "url", JSON.stringify(w));
@@ -1226,7 +1257,7 @@ let base;
     for (const [typed, table] of no) {
       const p = await open({ products: [], label: "wish-no" });
       await p.waitForSelector("#addForm:not([hidden])");
-      await p.click(".goal label:has(#fTypePrice)"); await p.fill("#fVal", "100");
+      await goalPick(p, "#fTypePrice"); await p.fill("#fVal", "100");
       await send(p, typed);
       const w = await writesOf(p);
       check("'" + typed.slice(0, 50) + "' is not an import", w.length === 1 && w[0].table === table, JSON.stringify(w));
@@ -1422,11 +1453,11 @@ let base;
       const p = await open({ products: [], label: "wish-hint" });
       await p.waitForSelector("#addForm:not([hidden])");
       const none = !(await p.isVisible("#fHint"));
-      await p.click(".goal label:has(#fTypePrice)");
+      await goalPick(p, "#fTypePrice");
       const price = await p.isVisible("#fHint") && (await p.textContent("#fHint")) === "Varen skal være på lager.";
-      await p.click(".goal label:has(#fTypePct)");
+      await goalPick(p, "#fTypePct");
       const pct = (await p.textContent("#fHint")) === "Regnes fra normalprisen.";
-      await p.click(".goal label:has(#fTypeAuto)");
+      await goalPick(p, "#fTypeAuto");
       check("hint under the add field: none for the default, one short line for price and percent", none && price && pct && !(await p.isVisible("#fHint")));
       await p.context().close();
     }
@@ -1649,7 +1680,7 @@ let base;
       check("bought: one click, no question: bought_at = now and bought_price = the lowest in-stock price", o.table === "products" && o.op === "update" && o.filters[0][1] === "dy" && Object.keys(o.payload).sort().join() === "bought_at,bought_price" && o.payload.bought_price === 3999 && Math.abs(Date.parse(o.payload.bought_at) - Date.now()) < 60000, JSON.stringify(o));
       await p.waitForFunction(() => /Købt for 3\.999 kr\./.test(document.body.textContent));
       const it = p.locator(".item", { has: p.locator('.head[data-id="dy"]') });
-      check("bought: the line says 'Købt for 3.999 kr.', no goal text, no highlight, no 'Mål nået'", (await it.locator(".meta").first().textContent()) === "Købt for 3.999 kr." && (await it.getAttribute("class")).indexOf("hit") < 0 && !/Mål nået|Godt tilbud/.test(await it.locator(".head").textContent()) && (await it.locator(".price span").textContent()) === "");
+      check("bought: the line says 'Købt for 3.999 kr.', no goal text, no highlight, no 'Mål nået'", (await it.locator(".meta").first().textContent()) === "Købt for 3.999 kr." && (await it.getAttribute("class")).indexOf("hit") < 0 && !/Mål nået|Godt tilbud/.test(await it.locator(".head").textContent()) && (await it.locator(".price span").count()) === 0);
       check("bought: dimmed, and at the bottom of the list", (await it.getAttribute("class")).indexOf("bought") >= 0 && +(await it.evaluate(e => getComputedStyle(e).opacity)) < 1 && (await p.locator(".item").last().getAttribute("class")).indexOf("bought") >= 0 && (await p.locator(".item").first().getAttribute("class")).indexOf("bought") < 0);
       const cel = await p.evaluate(() => (window.__pvCelebrations || []).length);
       await p.evaluate(() => window.__tick()); await p.waitForTimeout(200);
@@ -1708,7 +1739,7 @@ let base;
     {
       const p = await open({ products: [], label: "digest" });
       await p.waitForSelector("#addForm:not([hidden])");
-      await p.locator("#settingsBox summary").click();
+      await openSettings(p);
       check("digest: the setting 'Saml tilbud i én morgenmail', off by default", /^\s*Saml tilbud i én morgenmail\s*$/.test(await p.textContent('label.chk:has(#shDigest)')) && !(await p.isChecked("#shDigest")) && !(await p.isDisabled("#shDigest")));
       await p.check("#shDigest"); await p.click('#shopForm button[type=submit]');
       await p.waitForFunction(() => window.__db.profiles[0] && window.__db.profiles[0].mail_digest === true);
@@ -1724,7 +1755,7 @@ let base;
       await p.context().close();
       const q = await open({ products: [], label: "digest-on", profiles: [{ user_id: "u1", notify_email: true, mail_digest: true, shops_always: [], shops_exclude: [], shops_only: false }] });
       await q.waitForSelector("#addForm:not([hidden])");
-      await q.locator("#settingsBox summary").click();
+      await openSettings(q);
       await q.waitForFunction(() => document.getElementById("shDigest").checked);
       check("digest: shown on when the profile has it on", true);
       await q.context().close();
@@ -1831,6 +1862,334 @@ let base;
     }
   }
 
+  // 5d. the add form is one line; the goal choices appear while the field is in use
+  {
+    const p = await open({ products: [], label: "add-line" });
+    await p.waitForSelector("#addForm:not([hidden])");
+    const bf = await p.locator("#fMain").boundingBox(), bb = await p.locator("#fSubmit").boundingBox();
+    check("add line: the field and the button are in one row, the button inside the same bar", Math.abs((bf.y + bf.height / 2) - (bb.y + bb.height / 2)) < 3 && bb.x > bf.x && (await p.locator(".addrow #fSubmit").count()) === 1 && (await p.locator(".addrow #fMain").count()) === 1);
+    check("add line: the button is still called 'Hold øje'", (await p.getByRole("button", { name: "Hold øje" }).count()) === 1 && bb.height >= 44);
+    check("add line: the goal choices are hidden until the field is used (not just invisible: not in the accessibility tree either)",
+      !(await p.isVisible("#addMore")) && !(await p.isVisible(".goal")) && (await p.getByRole("radio").count()) === 0 && await p.evaluate(() => document.getElementById("addMore").hidden));
+    await p.focus("#fMain");
+    check("add line: on focus the three choices appear below the field, 'Godt tilbud' is the default", await p.isVisible(".goal") && (await p.getByRole("radio").count()) === 3 && await p.isChecked("#fTypeAuto") && !(await p.isVisible("#fAmount")));
+    const gb = await p.locator(".goal").boundingBox();
+    check("add line: ... below the field", gb.y >= bf.y + bf.height - 1);
+    check("add line: the choices are a labelled radiogroup", (await p.getAttribute(".goal", "role")) === "radiogroup" && /Hvornår/.test(await p.getAttribute(".goal", "aria-label")) && (await p.getByRole("radiogroup").count()) === 1);
+    await p.click("h1");
+    await p.waitForTimeout(50);
+    check("add line: leaving the empty field hides them again", !(await p.isVisible(".goal")));
+    await p.fill("#fMain", "Sony"); await p.click("h1"); await p.waitForTimeout(50);
+    check("add line: text in the field keeps them", await p.isVisible(".goal"));
+    await p.fill("#fMain", ""); await p.click("h1"); await p.waitForTimeout(50);
+    check("add line: emptied and left: hidden", !(await p.isVisible(".goal")));
+    await p.focus("#fMain"); await p.click(".goal label:has(#fTypePrice)");
+    check("add line: a tap on a choice is not lost to the blur, and the amount field shows", await p.isChecked("#fTypePrice") && await p.isVisible("#fAmount"));
+    await p.click("h1"); await p.waitForTimeout(50);
+    check("add line: a choice other than the default stays visible", await p.isVisible(".goal") && await p.isVisible("#fAmount"));
+    await p.click(".goal label:has(#fTypeAuto)"); await p.click("h1"); await p.waitForTimeout(50);
+    check("add line: back to the default and left: hidden again", !(await p.isVisible(".goal")));
+    // keyboard: Tab goes field -> button -> the choices -> on, never trapped; arrows move in the radiogroup; Enter submits
+    await p.focus("#fMain"); await p.keyboard.press("Tab");
+    check("add line: Tab from the field reaches the button", await p.evaluate(() => document.activeElement.id) === "fSubmit");
+    await p.keyboard.press("Tab");
+    check("add line: the next Tab lands on the checked radio", await p.evaluate(() => document.activeElement.id) === "fTypeAuto");
+    await p.keyboard.press("ArrowRight");
+    check("add line: an arrow key moves the choice", await p.isChecked("#fTypePrice") && await p.isVisible("#fAmount"));
+    let left = false;
+    for (let i = 0; i < 8 && !left; i++) { await p.keyboard.press("Tab"); left = await p.evaluate(() => !document.getElementById("addForm").contains(document.activeElement)); }
+    check("add line: focus is not trapped: Tab leaves the form", left);
+    await p.keyboard.press("Shift+Tab"); await p.keyboard.press("Shift+Tab"); await p.keyboard.press("Shift+Tab");
+    await p.click(".goal label:has(#fTypeAuto)");
+    await p.fill("#fMain", "Sony WH-1000XM5 sort"); await p.focus("#fMain"); await p.keyboard.press("Enter");
+    await p.waitForFunction(() => window.__db.writes().length === 1);
+    check("add line: Enter in the field submits (name only, goal auto)", JSON.stringify((await ops(p))[0].payload) === JSON.stringify({ name: "Sony WH-1000XM5 sort", target_type: "auto", target_value: null }));
+    await p.context().close();
+    // narrow: a compact button that keeps its name
+    for (const w of [360, 400]) {
+      const n = await open({ products: [], width: w, label: "add-narrow" + w });
+      await n.waitForSelector("#addForm:not([hidden])");
+      const b = await n.locator("#fSubmit").boundingBox(), f = await n.locator("#fMain").boundingBox(), r = await n.locator(".addrow").boundingBox();
+      check("add line at " + w + " px: compact square button (at least 44 px), same row, inside the bar", b.width >= 44 && b.width <= 52 && b.height >= 44 && Math.abs((f.y + f.height / 2) - (b.y + b.height / 2)) < 3 && b.x + b.width <= r.x + r.width);
+      check("add line at " + w + " px: the compact button keeps its accessible name", (await n.getByRole("button", { name: "Hold øje" }).count()) === 1 && (await n.locator("#fSubmit svg").getAttribute("aria-hidden")) === "true");
+      check("add line at " + w + " px: field wide enough to read (at least 220 px)", f.width >= 220, String(f.width));
+      await n.context().close();
+    }
+  }
+
+  // 5e. product pictures
+  {
+    const mk = (id, over) => row("test-sony-xm5", Object.assign({ id, name: "Vare " + id, target_value: 1700 }, over));
+    const rows = [mk("im1", { name: "Alfa", image_url: "https://img.example.test/alfa.svg" }), mk("im2", { name: "øl-kasse", image_url: null }), mk("im3", { name: "Gamma", image_url: "https://img.example.test/broken.svg" }),
+      mk("im4", { name: "Delta", image_url: "http://img.example.test/http.svg" }), mk("im5", { name: "Epsilon", image_url: "javascript:alert(1)" }), mk("im6", { name: "Zeta", image_url: 'https://img.example.test/a"onerror="window.__x=1.svg' })];
+    const p = await open({ products: rows, label: "images" });
+    const hosts = new Set(); p.on("request", r => hosts.add(new URL(r.url()).hostname));
+    await p.reload(); await p.waitForSelector(".item"); await p.waitForTimeout(600);
+    const th = id => p.locator('.head[data-id="' + id + '"] .thumb');
+    const attrs = await p.locator('.head[data-id="im1"] .thumb img').evaluate(i => ({ loading: i.getAttribute("loading"), decoding: i.getAttribute("decoding"), rp: i.getAttribute("referrerpolicy"), alt: i.getAttribute("alt"), w: i.getAttribute("width"), h: i.getAttribute("height"), src: i.getAttribute("src"), fit: getComputedStyle(i).objectFit, ok: i.complete && i.naturalWidth > 0 }));
+    check("images: a thumbnail with loading=lazy, decoding=async, referrerpolicy=no-referrer, empty alt, fixed width and height, object-fit cover, loaded",
+      attrs.loading === "lazy" && attrs.decoding === "async" && attrs.rp === "no-referrer" && attrs.alt === "" && attrs.w === "48" && attrs.h === "48" && attrs.fit === "cover" && attrs.ok, JSON.stringify(attrs));
+    check("images: the address is used exactly as stored (nothing added to it)", attrs.src === "https://img.example.test/alfa.svg" && p.imgReqs.every(u => !/[?&]/.test(u)));
+    const box = await th("im1").boundingBox(), rad = await th("im1").evaluate(e => getComputedStyle(e).borderRadius);
+    check("images: about 48 px square with rounded corners, at the start of the row, before the name", Math.abs(box.width - 48) < 1 && Math.abs(box.height - 48) < 1 && parseFloat(rad) >= 6 && box.x < (await p.locator('.head[data-id="im1"] h2').boundingBox()).x);
+    const xs = await p.$$eval(".head .thumb", els => els.map(e => Math.round(e.getBoundingClientRect().left)));
+    check("images: all thumbnails and placeholders are aligned in one column", xs.length === 6 && new Set(xs).size === 1, JSON.stringify(xs));
+    check("images: no picture, a placeholder block with the first letter (upper case), hidden from screen readers",
+      (await th("im2").evaluate(e => e.classList.contains("ph") && e.textContent === "Ø" && e.getAttribute("aria-hidden") === "true")) && (await th("im2").locator("img").count()) === 0);
+    check("images: a picture that fails to load falls back to the placeholder letter", (await th("im3").evaluate(e => e.classList.contains("ph") && e.textContent === "G")) && (await th("im3").locator("img").count()) === 0);
+    check("images: http and javascript: addresses are never put in an img (placeholder instead)", (await th("im4").locator("img").count()) === 0 && (await th("im5").locator("img").count()) === 0 && (await th("im4").textContent()) === "D" && (await th("im5").textContent()) === "E");
+    check("images: an address with a quote cannot break out of the attribute", (await p.evaluate(() => window.__x)) === undefined && (await p.locator('.head[data-id="im6"] .thumb img').count()) <= 1);
+    const brokenBefore = p.imgReqs.filter(u => /broken/.test(u)).length;
+    await p.evaluate(() => window.__tick()); await p.waitForTimeout(400);
+    check("images: a failed picture is not tried again at every poll, and the others are not reloaded into a placeholder", p.imgReqs.filter(u => /broken/.test(u)).length === brokenBefore && (await th("im3").evaluate(e => e.classList.contains("ph"))) && (await th("im1").locator("img").count()) === 1);
+    check("images: the only hosts the page talked to are the local server and the (stubbed) picture host, fonts and the library stub", [...hosts].every(h => /^(127\.0\.0\.1|img\.example\.test|fonts\.googleapis\.com|fonts\.gstatic\.com|cdn\.jsdelivr\.net)$/.test(h)), [...hosts].join());
+    const idx = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+    check("images: index.html has no Content-Security-Policy that would block pictures from other hosts", !/Content-Security-Policy/i.test(idx));
+    const sw = require("./sw.js");
+    check("images: the service worker leaves cross-origin picture requests alone (and handles only same-origin GET)", sw.shouldHandle("GET", "https://img.example.test/a.svg", base) === false && sw.shouldHandle("GET", base + "/app.js", base) === true);
+    const css = fs.readFileSync(path.join(ROOT, "app.js"), "utf8");
+    check("images: the page never rewrites or proxies picture addresses (no tracking parameters added)", !/image_url[^;]*\+\s*["']\?/.test(css) && !/utm_|ref=/.test(css.slice(css.indexOf("function thumbHtml"), css.indexOf("function headHtml"))));
+    await p.context().close();
+  }
+
+  // 5f. order and groups: "Tilbud nu" first, then closest to the goal, waiting, a quiet group for the ones that cannot be fetched, bought last
+  {
+    const mk = (id, over) => row("test-sony-xm5", Object.assign({ id, name: "Vare " + id, target_value: 1700 }, over));
+    const names = p => p.$$eval(".item h2", els => els.map(e => e.textContent));
+    const tick = async p => { await p.evaluate(() => window.__tick()); await p.waitForTimeout(250); };
+    // best price 2.049: target 1900 is 7.8 % away, 1700 is 20 %, 1500 is 37 %
+    const A = mk("ga", { name: "Nær", target_value: 1900 }), B = mk("gb", { name: "Midt", target_value: 1700 }), C = mk("gc", { name: "Langt", target_value: 1500 });
+    const LISTS = [{ id: "l1", user_id: "u1", name: "Alle tre" }, { id: "l2", user_id: "u1", name: "Tom" }];
+    const p = await open({ products: [C, B, A].map(r => Object.assign({}, r, { list_id: "l1" })), lists: LISTS, label: "order" });
+    await p.waitForSelector(".item");
+    check("order: no 'Tilbud nu' label without a hit", (await p.locator(".grp-h").count()) === 0 && (await p.locator(".item.hit").count()) === 0);
+    check("order: the rest is ordered by how close each is to its goal", JSON.stringify(await names(p)) === '["Nær","Midt","Langt"]', JSON.stringify(await names(p)));
+    // prices move so that a new sort would put 'Langt' first: nothing moves between polls
+    await p.evaluate(() => { var r = window.__db.products.filter(x => x.id === "gc")[0]; r.target_value = 2000; });
+    await tick(p);
+    check("order: stable between polls (a changed distance does not move a row)", JSON.stringify(await names(p)) === '["Nær","Midt","Langt"]', JSON.stringify(await names(p)));
+    await p.locator('.head[data-id="gb"]').click();
+    await p.evaluate(() => { var r = window.__db.products.filter(x => x.id === "ga")[0]; r.target_value = 1000; });
+    await tick(p);
+    check("order: an open row stays where it is", JSON.stringify(await names(p)) === '["Nær","Midt","Langt"]' && (await p.locator('.head[data-id="gb"]').getAttribute("aria-expanded")) === "true");
+    await p.locator('.head[data-id="gb"]').click();
+    // a row that becomes a hit moves up under the label, nothing else moves
+    await p.evaluate(() => { var r = window.__db.products.filter(x => x.id === "gb")[0]; r.target_value = 2100; });
+    await tick(p);
+    check("order: a row that becomes a hit goes first under the quiet label 'Tilbud nu'", JSON.stringify(await names(p)) === '["Midt","Nær","Langt"]' && (await p.locator(".grp-h").count()) === 1 && (await p.textContent(".grp-h")) === "Tilbud nu" && (await p.locator(".grp-hit .item.hit").count()) === 1, JSON.stringify(await names(p)));
+    const gy = await p.locator(".grp-h").boundingBox(), hy = await p.locator(".item.hit").boundingBox(), ny = await p.locator('.head[data-id="ga"]').boundingBox();
+    check("order: the label sits above the hit, the others below it", gy.y < hy.y && ny.y > hy.y);
+    await p.evaluate(() => { var r = window.__db.products.filter(x => x.id === "gb")[0]; r.target_value = 1700; });
+    await tick(p);
+    check("order: when the hit ends the row returns to the rest (by closeness) and the label goes", JSON.stringify(await names(p)) === '["Nær","Midt","Langt"]' || JSON.stringify(await names(p)) === '["Midt","Nær","Langt"]');
+    // a new product that is still being fetched is shown before the priced ones; bought ones go last, dimmed
+    await p.evaluate(() => { window.__db.products.push({ id: "gn", user_id: "u1", name: "Ny vare", source_url: "https://prisjagt.dk/product.php?p=1", target_type: "auto", target_value: null, status: "pending", created_at: new Date().toISOString(), tracked_variants: null, active: true, list_id: "l1" }); });
+    await tick(p);
+    const n1 = await names(p);
+    check("order: a new row that is being fetched shows at once, before the priced ones", n1[0] === "Ny vare" && n1.length === 4, JSON.stringify(n1));
+    await p.evaluate(() => { var r = window.__db.products.filter(x => x.id === "gb")[0]; r.bought_at = "2026-11-16T10:00:00Z"; r.bought_price = 2049; r.bought_by = "u1"; });
+    await tick(p);
+    const n2 = await names(p);
+    check("order: a bought product goes last and is dimmed", n2[n2.length - 1] === "Midt" && +(await p.locator('.item:has(.head[data-id="gb"])').evaluate(e => getComputedStyle(e).opacity)) < 1, JSON.stringify(n2));
+    // the order is a fresh sort on load and when another list is chosen
+    await p.evaluate(() => { var r = window.__db.products.filter(x => x.id === "gc")[0]; r.target_value = 2040; });
+    await tick(p);
+    check("order: still the old order after another poll", (await names(p)).indexOf("Langt") > (await names(p)).indexOf("Nær"));
+    await p.click('#chips [data-lsel="l2"]'); await p.click('#chips [data-lsel="l1"]');
+    const n3 = await names(p);
+    check("order: choosing a list sorts again (now 'Langt' is the closest)", n3.indexOf("Langt") < n3.indexOf("Nær"), JSON.stringify(n3));
+    await p.reload(); await p.waitForSelector(".item");
+    check("order: a fresh sort after a reload", true);
+    await p.context().close();
+    // choose-variant rows are not hidden away; waiting rows stay in the main list
+    const q = await open({ products: [Object.assign({}, chooseRow), Object.assign({}, pendingRow), A, C], label: "order-wait" });
+    await q.waitForSelector(".item");
+    const nq = await names(q);
+    check("order: a row that needs the person ('Vælg variant') comes before the priced ones and is visible", nq[0] === "Sony WH-1000XM5" && /Vælg variant/.test(await q.locator('.item[data-status="choose"] .head .meta').first().textContent()) && await q.locator('.item[data-status="choose"] .head').isVisible(), JSON.stringify(nq));
+    check("order: all rows with a goal come after them, closest first", JSON.stringify(nq.slice(2)) === '["Nær","Langt"]', JSON.stringify(nq));
+    await q.context().close();
+    // goal auto: by how far under the normal price; unknown last
+    const au = (id, name, price, norm) => mk(id, { name, target_type: "auto", target_value: null, normal_price: norm, verdict: { level: "ok", text: "Almindelig pris." }, offers: [{ store: "Shop", price, url: "https://shop.dk/x", inStock: true, note: null, variant: "v1" }] });
+    const r = await open({ products: [au("a1", "Lidt", 1900, 2000), au("a2", "Meget", 1700, 2000), au("a3", "Ukendt", 1700, null), au("a4", "Over", 2100, 2000)], label: "order-auto" });
+    await r.waitForSelector(".item");
+    check("order: goal 'auto' is ordered by how far under the normal price, unknown last", JSON.stringify(await names(r)) === '["Meget","Lidt","Over","Ukendt"]', JSON.stringify(await names(r)));
+    await r.context().close();
+  }
+
+  // 5g. products that cannot be fetched: quiet, collapsed, counted
+  {
+    const e1 = Object.assign({}, errorRow, { id: "e1" }), e2 = Object.assign({}, errorRow, { id: "e2", name: "Anden fejl", check_note: "Siden svarer ikke." });
+    const x5 = row("test-sony-xm5", { id: "x5", target_value: 1700, warning: "Førprisen er pustet op." });
+    const p = await open({ products: [e1, e2, x5, pendingRow, chooseRow], collapsed: true, label: "errors" });
+    await p.waitForSelector(".item");
+    const sum = (await p.textContent("#errGroup > summary")).trim();
+    check("errors: a collapsed group at the bottom, '2 varer kan ikke hentes' (plural)", sum === "2 varer kan ikke hentes" && !(await p.evaluate(() => document.getElementById("errGroup").open)) && !(await p.isVisible('.item[data-status="error"]')));
+    const yg = (await p.locator("#errGroup").boundingBox()).y, ys = await p.$$eval("#list > .item", els => els.map(e => e.getBoundingClientRect().top));
+    check("errors: the group comes after every live row", ys.every(y => y < yg));
+    check("errors: waiting rows (fetching, choose variant) stay in the main list with their short status; 'Vælg variant' is visible",
+      await p.locator('#list > .item[data-status="pending"]').isVisible() && /Henter produktet/.test(await p.locator('#list > .item[data-status="pending"] .head .meta').textContent()) && await p.locator('#list > .item[data-status="choose"] .head .meta').isVisible() && /Vælg variant/.test(await p.textContent('#list > .item[data-status="choose"] .head .meta')));
+    const redText = await p.evaluate(() => { var red = "rgb(179, 48, 45)", bad = []; document.querySelectorAll("#list > .item *, #errGroup > summary").forEach(function (e) { if (e.children.length === 0 && e.textContent.trim() && getComputedStyle(e).color === red) bad.push(e.textContent.trim()); }); return bad; });
+    check("errors: no red text anywhere in the main list but the real warning 'Oppustet førpris' (and the destructive 'Fjern')", redText.every(t => t === "Oppustet førpris" || t === "Fjern") && redText.indexOf("Oppustet førpris") >= 0, JSON.stringify(redText));
+    await p.click("#errGroup > summary");
+    check("errors: opened, each row shows its short reason in muted text", await p.locator('.item[data-status="error"]').first().isVisible() && /findes ikke længere/.test(await p.textContent('.head[data-id="e1"] .meta')) && /Siden svarer ikke\./.test(await p.textContent('.head[data-id="e2"] .meta')));
+    check("errors: ... and the reason is not red and not a warning", await p.evaluate(() => { var m = document.querySelector('.head[data-id="e1"] .meta'), c = getComputedStyle(m).color; return c !== "rgb(179, 48, 45)" && !m.querySelector(".warn"); }));
+    await p.locator('.head[data-id="e1"]').click();
+    check("errors: a row keeps its actions: the change-link form is in the detail, 'Indstil vare' holds remove", await p.locator('[data-fixurl="e1"]').isVisible() && !(await p.locator('[data-act="del"][data-id="e1"]').isVisible()) && (await p.locator('.item:has(.head[data-id="e1"]) details.manage [data-act="del"]').count()) === 1 && !(await p.evaluate(() => /poor/.test(document.querySelector('.item[data-status="error"] .body .verdict').className))));
+    await p.locator('.item:has(.head[data-id="e1"]) details.manage > summary').click();
+    check("errors: ... and remove is reachable there", await p.locator('[data-act="del"][data-id="e1"]').isVisible());
+    await p.evaluate(() => window.__tick()); await p.waitForTimeout(250);
+    check("errors: the open group stays open across a poll", await p.evaluate(() => document.getElementById("errGroup").open) && await p.locator('[data-fixurl="e1"]').isVisible());
+    await p.click('[data-act="del"][data-id="e1"]'); await p.click('[data-act="del-yes"]');
+    await p.waitForFunction(() => document.querySelectorAll(".item[data-status=error]").length === 1);
+    check("errors: one left: '1 vare kan ikke hentes' (singular)", (await p.textContent("#errGroup > summary")).trim() === "1 vare kan ikke hentes");
+    await p.evaluate(() => { window.__db.products = window.__db.products.filter(x => x.status !== "error"); window.__tick(); }); await p.waitForTimeout(250);
+    check("errors: none left: no group at all", (await p.locator("#errGroup").count()) === 0);
+    await p.context().close();
+  }
+
+  // 5h. the detail view: verdict, chart with the stats, three shops, "Vis alle butikker", alternatives, then "Indstil vare"
+  {
+    const x5 = row("test-sony-xm5", { id: "x5", target_value: 1700, alt_requested_at: null, alt_done_at: null, alternatives: null, alt_note: null });
+    const LISTS = [{ id: "l1", user_id: "u1", name: "Elektronik" }];
+    const p = await open({ products: [Object.assign({}, x5, { list_id: "l1" })], lists: LISTS, collapsed: true, label: "detail" });
+    await p.waitForSelector(".item"); await p.locator('.head[data-id="x5"]').click();
+    const body = p.locator(".item .body");
+    const pos = async sel => body.locator(sel).first().evaluate(e => { var r = e.getBoundingClientRect(); return r.top + window.scrollY; });
+    const o = [await pos(".verdict"), await pos(".stats"), await pos(".chart"), await pos(".shops"), await pos(".alts"), await pos("details.manage")];
+    check("detail: order is verdict, stats, chart, shops, alternatives, then 'Indstil vare'", o.every((y, i) => i === 0 || y > o[i - 1]), JSON.stringify(o));
+    const rowsTop = await body.locator(".shops > .tablewrap tr").allInnerTexts();
+    check("detail: the three cheapest shops with the item in stock, each with 'Se varen'", rowsTop.length === 3 && /Geekd/.test(rowsTop[0]) && /CDON/.test(rowsTop[1]) && /Komplett/.test(rowsTop[2]) && rowsTop.every(t => /Se varen/.test(t)) && !rowsTop.some(t => /Ikke på lager/.test(t)), JSON.stringify(rowsTop));
+    check("detail: one link 'Vis alle butikker', collapsed, the rest (sold out included) hidden", (await body.locator("details.allshops > summary").textContent()).trim() === "Vis alle butikker" && !(await body.locator("details.allshops").evaluate(e => e.open)) && !(await p.isVisible("text=punkt1")) && !(await p.isVisible("text=Proshop")));
+    await body.locator("details.allshops > summary").click();
+    const more = await body.locator("details.allshops tr").allInnerTexts();
+    check("detail: 'Vis alle butikker' shows the other four, sold-out shops included, each with 'Se varen'", more.length === 4 && more.some(t => /punkt1/.test(t)) && more.filter(t => /Ikke på lager/.test(t)).length === 3 && more.every(t => /Se varen/.test(t)), JSON.stringify(more));
+    await p.evaluate(() => window.__tick()); await p.waitForTimeout(250);
+    check("detail: ... and it stays open across a poll", await body.locator("details.allshops").evaluate(e => e.open));
+    // fewer than four shops: no link; nothing in stock: the three cheapest overall
+    const few = row("test-sony-xm5", { id: "f1", offers: [{ store: "A", price: 100, url: "https://a.dk/x", inStock: true, variant: "v1" }, { store: "B", price: 120, url: "https://b.dk/x", inStock: true, variant: "v1" }] });
+    const none = row("test-sony-xm5", { id: "f2", offers: [1, 2, 3, 4].map(i => ({ store: "S" + i, price: 100 * i, url: "https://s" + i + ".dk/x", inStock: false, variant: "v1" })) });
+    const q = await open({ products: [few, none], collapsed: true, label: "detail-few" });
+    await q.waitForSelector(".item"); await q.locator('.head[data-id="f1"]').click(); await q.locator('.head[data-id="f2"]').click();
+    check("detail: two shops: no 'Vis alle butikker'", (await q.locator('.item:has(.head[data-id="f1"]) .allshops').count()) === 0 && (await q.locator('.item:has(.head[data-id="f1"]) .shops tr').count()) === 2);
+    check("detail: nothing in stock: the three cheapest are shown, the fourth is behind the link", (await q.locator('.item:has(.head[data-id="f2"]) .shops > .tablewrap tr').count()) === 3 && (await q.locator('.item:has(.head[data-id="f2"]) .allshops').count()) === 1);
+    await q.context().close();
+    await p.context().close();
+  }
+
+  // 5i. "Indstil vare": everything about managing the product in one collapsed section, nothing removed
+  {
+    const x5 = row("test-sony-xm5", { id: "x5", target_value: 1700 });
+    const LISTS = [{ id: "l1", user_id: "u1", name: "Elektronik" }];
+    const p = await open({ products: [Object.assign({}, x5, { list_id: "l1" })], lists: LISTS, collapsed: true, label: "manage" });
+    await p.waitForSelector(".item"); await p.locator('.head[data-id="x5"]').click();
+    const m = p.locator("details.manage");
+    check("manage: one collapsed section 'Indstil vare'", (await m.count()) === 1 && (await m.locator("> summary").textContent()).trim() === "Indstil vare" && !(await m.evaluate(e => e.open)));
+    const all = ['[data-edit="x5"]', ".sugg .chip", "#lp-x5", '[data-act="change"]', ".pshops", '[data-act="buy"]', "a[href]", '[data-act="del"]'];
+    const hidden = [];
+    for (const sel of all) { if (await m.locator(sel).first().isVisible()) hidden.push(sel); }
+    check("manage: goal editor, suggested goals, list, variant, shop choices, købt, the link and remove are all inside it and not shown while it is closed", (await Promise.all(all.map(sel => m.locator(sel).count()))).every(n => n >= 1) && hidden.length === 0, hidden.join());
+    check("manage: nothing of that is outside the section", (await p.locator('.item .body').evaluate(b => { var out = b.cloneNode(true); out.querySelectorAll("details.manage").forEach(d => d.remove()); return !out.querySelector("[data-edit], [data-listpick], [data-act=change], [data-act=buy], [data-act=del], [data-shops], .sugg"); })));
+    await m.locator("> summary").click();
+    const vis = []; for (const sel of all) vis.push(await m.locator(sel).first().isVisible());
+    check("manage: opened, each of them is shown", vis.every(Boolean), JSON.stringify(vis));
+    await p.evaluate(() => window.__tick()); await p.waitForTimeout(250);
+    check("manage: stays open across a poll", await p.locator("details.manage").evaluate(e => e.open));
+    await p.locator("details.manage > summary").click();
+    await p.evaluate(() => window.__tick()); await p.waitForTimeout(250);
+    check("manage: and stays closed when closed", !(await p.locator("details.manage").evaluate(e => e.open)));
+    await p.context().close();
+  }
+
+  // 6. the account menu
+  {
+    const p = await open({ products: [], admin: true, requests: [{ email: "ny@x.dk", name: "Ny", created_at: new Date().toISOString() }], label: "menu" });
+    await p.waitForSelector("#addForm:not([hidden])");
+    const st = () => p.evaluate(() => ({ exp: document.getElementById("acctBtn").getAttribute("aria-expanded"), open: !document.getElementById("acctPop").hidden, act: document.activeElement.id }));
+    check("menu: a button with the initial in a circle, named 'Konto', closed, with aria-haspopup=menu", (await p.getAttribute("#acctBtn", "aria-haspopup")) === "menu" && (await p.getAttribute("#acctBtn", "aria-label")) === "Konto" && (await st()).exp === "false" && !(await st()).open && (await p.locator("#acctBtn").evaluate(e => getComputedStyle(e.firstElementChild).borderRadius)) === "50%");
+    check("menu: the old links are gone from the header and the footer", !(await p.isVisible("#logoutBtn")) && (await p.locator("#settingsBox summary").count()) === 0 && (await p.locator("footer, .fine").filter({ hasText: /^Indstillinger$/ }).count()) === 0);
+    await p.click("#acctBtn");
+    let s = await st();
+    check("menu: click opens it, aria-expanded true, focus on the first item", s.exp === "true" && s.open && s.act === "soundBtn");
+    check("menu: a menu with menuitems: Lyd til, Indstillinger, Adgang (admin), Log ud; the address on top, muted",
+      (await p.getByRole("menu").count()) === 1 && JSON.stringify(await p.getByRole("menuitem").allTextContents()) === '["Lyd til","Indstillinger","Adgang","Log ud"]' && /mor@familie\.dk/.test(await p.textContent("#acctPop .who")) &&
+      await p.locator("#who").evaluate(e => getComputedStyle(e).color) !== await p.locator("#soundBtn").evaluate(e => getComputedStyle(e).color));
+    await p.keyboard.press("ArrowDown"); check("menu: ArrowDown moves to the next item", (await st()).act === "settingsBtn");
+    await p.keyboard.press("End"); check("menu: End goes to the last item", (await st()).act === "logoutBtn");
+    await p.keyboard.press("ArrowDown"); check("menu: ArrowDown wraps to the first", (await st()).act === "soundBtn");
+    await p.keyboard.press("ArrowUp"); check("menu: ArrowUp wraps to the last", (await st()).act === "logoutBtn");
+    await p.keyboard.press("Home"); check("menu: Home goes to the first", (await st()).act === "soundBtn");
+    await p.keyboard.press("Escape"); s = await st();
+    check("menu: Escape closes it and focus returns to the button", s.exp === "false" && !s.open && s.act === "acctBtn");
+    await p.keyboard.press("Enter"); s = await st();
+    check("menu: Enter on the button opens it with focus in the menu", s.exp === "true" && s.open && s.act === "soundBtn");
+    await p.keyboard.press("Tab"); s = await st();
+    check("menu: Tab closes it and does not trap focus (it moves on from the button)", !s.open && s.exp === "false" && s.act !== "soundBtn" && s.act !== "settingsBtn" && s.act !== "logoutBtn");
+    await p.focus("#acctBtn"); await p.keyboard.press("ArrowDown"); s = await st();
+    check("menu: ArrowDown on the button opens it too", s.open && s.act === "soundBtn");
+    await p.focus("#acctBtn"); await p.keyboard.press("Escape");
+    await p.click("#acctBtn"); await p.click("h1"); s = await st();
+    check("menu: a click outside closes it", !s.open && s.exp === "false");
+    await p.click("#acctBtn"); await p.click("#acctBtn"); s = await st();
+    check("menu: the button toggles it, focus on the button when it closes", !s.open && s.act === "acctBtn");
+    // items
+    await p.click("#acctBtn"); await p.click("#soundBtn"); s = await st();
+    check("menu: Lyd toggles ('Lyd fra'), the menu closes, focus back on the button", !s.open && s.act === "acctBtn" && /Lyd fra/.test(await p.textContent("#soundBtn")) && (await p.evaluate(() => localStorage.getItem("pv-muted"))) === "1");
+    await p.click("#acctBtn"); await p.click("#settingsBtn"); s = await st();
+    check("menu: 'Indstillinger' opens the existing settings, the menu closes, focus goes into the settings", !s.open && await p.isVisible("#settingsBox") && s.act === "shAlways" && await p.isVisible("#shopForm"));
+    await p.keyboard.press("Escape");
+    check("menu: Escape in the settings closes them, focus back on the button", !(await p.isVisible("#settingsBox")) && (await st()).act === "acctBtn");
+    await p.click("#acctBtn"); await p.click("#settingsBtn"); await p.click("#setClose");
+    check("menu: 'Luk' in the settings closes them", !(await p.isVisible("#settingsBox")) && (await st()).act === "acctBtn");
+    await p.click("#acctBtn"); await p.click("#accessBtn"); s = await st();
+    check("menu: 'Adgang' goes to the access section for the owner", !s.open && await p.isVisible("#accessBox") && await p.evaluate(() => { var r = document.getElementById("accessBox").getBoundingClientRect(); return r.top < window.innerHeight && r.bottom > 0; }));
+    await p.click("#acctBtn"); await p.click("#logoutBtn");
+    await p.waitForSelector("#authView:not([hidden])");
+    check("menu: Log ud signs out and the menu is gone", !(await p.isVisible("#acctPop")) && !(await p.isVisible("#acctBtn")));
+    await p.context().close();
+  }
+
+  // 6b. phone: 360 and 400 px, no sideways scroll, tap targets of at least 44 px, safe areas
+  {
+    const LISTS = [{ id: "l1", user_id: "u1", name: "Elektronik" }, { id: "l2", user_id: "u1", name: "Bastian" }];
+    const prods = all.concat([row("test-lego-falcon", { id: "lg", list_id: "l2" }), Object.assign({}, errorRow, { id: "e9" })])
+      .map(r => r.id === "x5" ? Object.assign({}, r, { list_id: "l1" }) : r.id === "dy" ? Object.assign({}, r, { target_type: "auto", target_value: null, alt_requested_at: null, alt_done_at: null, alternatives: null, alt_note: null }) : r);
+    for (const w of [360, 400]) {
+      const p = await open({ products: prods, lists: LISTS, width: w, admin: true, requests: [{ email: "ny@x.dk", name: "Ny", created_at: new Date().toISOString() }], label: "phone" + w });
+      await p.waitForSelector(".item");
+      for (const id of ["x5", "ps", "dy", "lg", "p1", "e1"]) await p.locator('.head[data-id="' + id + '"]').click();
+      await p.locator("#chips .lchip.plus").click();
+      await p.click("#acctBtn"); await p.waitForTimeout(100);
+      const pr = await p.locator("#acctPop").boundingBox();
+      check("phone " + w + ": the account menu fits inside the screen", pr.x >= 0 && pr.x + pr.width <= w, JSON.stringify(pr));
+      await p.click("#settingsBtn"); await p.waitForTimeout(150);
+      const sw = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth, bw: document.body.scrollWidth }));
+      check("phone " + w + ": no horizontal scroll with everything open (rows, settings, menu, list form, access)", sw.sw <= sw.cw && sw.bw <= sw.cw, JSON.stringify(sw));
+      const small = await p.evaluate(() => {
+        var bad = [], seen = new Set();
+        document.querySelectorAll("button, a[href], summary, select, input, textarea").forEach(function (e) {
+          if (e.type === "hidden" || e.closest("[hidden]") || e.closest("details:not([open]) > :not(summary)")) return;
+          var t = e;
+          if (e.type === "radio" || e.type === "checkbox") t = e.closest("label") || e;
+          if (e.closest("p.note, p.verdict, .meta, .impl > span, .alt-name, .alt-why")) return;      // a link inside a sentence
+          if (e.tagName === "A" && e.closest("p.fine, .sent")) return;
+          var r = t.getBoundingClientRect(), cs = getComputedStyle(t);
+          if (t.classList.contains("lchip")) { var ah = parseFloat(getComputedStyle(t, "::after").height); if (ah > r.height) r = { width: r.width, height: ah }; }      // the hit area reaches past the pill
+          if (cs.visibility === "hidden" || cs.display === "none" || r.width === 0 || r.height === 0) return;
+          if (seen.has(t)) return; seen.add(t);
+          if (r.height < 43.5) bad.push((t.id || t.getAttribute("data-act") || t.getAttribute("data-lact") || t.className || t.tagName) + ":" + Math.round(r.height) + " " + (t.textContent || "").trim().slice(0, 20));
+        });
+        return bad;
+      });
+      check("phone " + w + ": tap targets are at least 44 px high", small.length === 0, small.join(" | "));
+      const hscroll = await p.evaluate(() => Array.prototype.filter.call(document.querySelectorAll(".item .body, .item .head"), e => e.scrollWidth > e.clientWidth + 1).map(e => e.className + ":" + e.scrollWidth + ">" + e.clientWidth));
+      check("phone " + w + ": no row or detail is wider than the screen", hscroll.length === 0, hscroll.join());
+      await p.context().close();
+    }
+    const css = fs.readFileSync(path.join(ROOT, "styles.css"), "utf8");
+    check("phone: safe-area insets are still used on all sides that matter (left, right, top, bottom)", /safe-area-inset-left/.test(css) && /safe-area-inset-right/.test(css) && /safe-area-inset-top/.test(css) && /safe-area-inset-bottom/.test(css) && /viewport-fit=cover/.test(fs.readFileSync(path.join(ROOT, "index.html"), "utf8")));
+    check("phone: motion is short and switched off for people who ask for less", /prefers-reduced-motion: reduce\) \{ \* \{ transition: none !important; animation: none !important/.test(css) && !/(transition|animation)[^;{}]*\b(\d*\.?\d+)s\b/.test(css.replace(/\.1\d?s|\.2s|\.15s|\.16s/g, "")));
+  }
+
   // 11. layout at 400px, 12. screenshots
   {
     const LISTS = [{ id: "l1", user_id: "u1", name: "Elektronik" }, { id: "l2", user_id: "u1", name: "Bastian" }, { id: "l3", user_id: "u1", name: "Hjemmet" }];
@@ -1839,18 +2198,25 @@ let base;
     const p = await open({ products: states, width: 400, height: 900, lists: LISTS, label: "mobile" });
     await p.waitForSelector(".item");
     for (const id of ["x5", "ps", "dy", "lg", "so", "p1", "e1"]) await p.locator('.head[data-id="' + id + '"]').click();
-    await p.locator("#settingsBox summary").click();
+    await openSettings(p);
     await p.waitForTimeout(300);
     const w = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth, bw: document.body.scrollWidth }));
     check("no horizontal overflow at 400 px (all rows open)", w.sw <= w.cw && w.bw <= w.cw, JSON.stringify(w));
-    await p.screenshot({ path: path.join(ROOT, "screenshot-mobile.png"), fullPage: true });
+    // the picture of the phone view: the default look (sections collapsed), one product open, at 400 px
+    const ms = await open({ products: states, width: 400, height: 900, lists: LISTS, collapsed: true, label: "mobile-shot" });
+    await ms.waitForSelector(".item");
+    await ms.locator('.head[data-id="x5"]').click();
+    await ms.waitForSelector("canvas.confetti", { state: "detached", timeout: 8000 }).catch(() => {});
+    await ms.waitForTimeout(400);
+    await ms.screenshot({ path: path.join(ROOT, "screenshot-mobile.png"), fullPage: true });
+    await ms.context().close();
     const q = await open({ products: states.concat([]), width: 400, session: false, label: "mobile-out" });
     const w2 = await q.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
     check("no horizontal overflow signed out at 400 px", w2);
     await p.context().close(); await q.context().close();
 
     for (const scheme of ["light", "dark"]) {
-      const d = await open({ products: states, scheme, lists: LISTS, label: "shot-" + scheme });
+      const d = await open({ products: states, scheme, lists: LISTS, collapsed: true, label: "shot-" + scheme });
       await d.waitForSelector(".item");
       await d.locator('.head[data-id="x5"]').click();
       await d.locator('.head[data-id="x5"]').scrollIntoViewIfNeeded();

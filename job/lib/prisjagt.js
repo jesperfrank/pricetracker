@@ -238,14 +238,50 @@ function buildVariants(rows, ld, title) {
 
 // ---------------------------------------------------------------- page
 
-// returns {title, rows, variants, history}; throws on an unrecognised layout
+// returns {title, rows, variants, history, image}; throws on an unrecognised layout
 function parsePage(html) {
   const s = decodeNextChunks(html);
   const rows = parseRows(s);
   const title = parseTitle(s, html);
   let history = [];
   try { history = parsePrisjagtHistory(html); } catch (e) { /* history is optional */ }
-  return { title, rows, variants: buildVariants(rows, ldVariants(s), title), history };
+  return { title, rows, variants: buildVariants(rows, ldVariants(s), title), history, image: metaImage(html, 'https://prisjagt.dk/') };
+}
+
+// ---------------------------------------------------------------- product picture
+
+// The address of a product picture to store (products.image_url), or null. Only https, the same rule as the database check
+// (a host with a dot, no user:password@ or port, no spaces, at most 500 characters). A relative or protocol-relative address is
+// resolved against the page it came from. The picture itself is never fetched or stored by the job.
+const IMAGE_RULE = /^https:\/\/[^/?#@:\s]+\.[^/?#@:\s]+([/?#][^\s]*)?$/;
+function cleanImageUrl(u, base) {
+  if (typeof u !== 'string') return null;
+  const raw = u.trim();
+  if (!raw || raw.length > 2000 || /\s/.test(raw)) return null;
+  let x;
+  try { x = new URL(raw, base || undefined); } catch (e) { return null; }
+  if (x.protocol !== 'https:' || x.username || x.password || x.port) return null;
+  const h = x.hostname.toLowerCase();
+  if (/^[\d.]+$/.test(h) || h.charAt(0) === '[') return null;
+  x.hash = '';
+  const out = x.toString();
+  return out.length <= 500 && IMAGE_RULE.test(out) ? out : null;
+}
+// <meta property="og:image" content="..."> (or twitter:image) of an html page, as a clean https address, or null
+function metaImage(html, base) {
+  const re = /<meta\b[^>]*>/gi;
+  const found = {};
+  let m;
+  while ((m = re.exec(String(html || '')))) {
+    const tag = m[0];
+    const key = /\b(?:property|name)\s*=\s*["']?\s*([a-z:_]+)/i.exec(tag);
+    const val = /\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(tag);
+    if (!key || !val) continue;
+    const k = key[1].toLowerCase();
+    if ((k === 'og:image' || k === 'og:image:secure_url' || k === 'twitter:image') && !(k in found)) found[k] = (val[1] !== undefined ? val[1] : val[2]).replace(/&amp;/g, '&');
+  }
+  for (const k of ['og:image:secure_url', 'og:image', 'twitter:image']) { const c = cleanImageUrl(found[k], base); if (c) return c; }
+  return null;
 }
 
 // ---------------------------------------------------------------- url + fetching
@@ -286,4 +322,4 @@ async function fetchPage(url, fetchImpl) {
   }
 }
 
-module.exports = { UA, decodeNextChunks, extractJsonArrayAfter, listingKey, parsePrisjagtHistory, parseRows, parseTitle, buildVariants, parsePage, validateProductUrl, PageError, fetchPage, normShop };
+module.exports = { cleanImageUrl, metaImage, UA, decodeNextChunks, extractJsonArrayAfter, listingKey, parsePrisjagtHistory, parseRows, parseTitle, buildVariants, parsePage, validateProductUrl, PageError, fetchPage, normShop };

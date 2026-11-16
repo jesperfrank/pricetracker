@@ -58,6 +58,13 @@ function variantsOut(parsed) {
   return parsed.variants.map((v) => ({ id: v.id, label: v.label, lowest: v.lowest, offers: v.offers, sample: v.sample }));
 }
 
+// The product picture's address from the page just read (no extra request): stored when the row has the column (an older database does not
+// send it) and the address is new or changed. Only the address; the picture is never fetched or kept here.
+function addImage(patch, prod, parsed) {
+  if (!Object.prototype.hasOwnProperty.call(prod, 'image_url')) return;
+  if (parsed && parsed.image && parsed.image !== prod.image_url) patch.image_url = parsed.image;
+}
+
 // First fetch of a product: title, variants, page history. Returns {patch, track} where track says
 // the product has exactly one variant and can go straight to tracking.
 function initialPatch(prod, parsed, now) {
@@ -69,6 +76,7 @@ function initialPatch(prod, parsed, now) {
     history: P.mergePageHistory(prod.history, parsed.history, today),
     status: 'choose', check_note: null, last_checked: iso,
   };
+  addImage(patch, prod, parsed);
   if (parsed.variants.length === 1) { patch.tracked_variants = [parsed.variants[0].id]; return { patch, track: true }; }
   return { patch, track: false };
 }
@@ -117,6 +125,7 @@ function trackingPatch(prod, profile, parsed, now) {
     status: 'tracking', title: prod.title || parsed.title || null, variants, offers, history, normal_price: normal, verdict, warning,
     check_note: filtered.length === 0 ? 'Ingen butikker matcher dine butiksvalg.' : (parsed.note || null), last_checked: iso,
   }, goal.fields);
+  addImage(patch, prod, parsed);
   // One morning mail: a new hit of a person who wants it is collected (price and time) instead of mailed at once. A collected hit
   // that is no longer a hit, or a product that has been bought, is forgotten. Only where the database has the columns.
   if (Object.prototype.hasOwnProperty.call(prod, 'digest_price')) {

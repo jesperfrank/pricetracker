@@ -1181,7 +1181,7 @@ const ONSKE = require('./lib/onskeskyen');
 const { makeClient } = require('./lib/supabase');
 // the real answer of the public page for the test list (12 wishes); our own smaller query returns the same wish fields
 const WISHES = JSON.parse(fs.readFileSync(path.join(FIX, 'onskeskyen-wishes.json'), 'utf8')).data.wishlist.wishes.data
-  .map((w) => ({ id: w.id, title: w.title, price: w.price, currency: w.currency, url: w.url }));
+  .map((w) => ({ id: w.id, title: w.title, price: w.price, currency: w.currency, url: w.url, photos: w.photos }));
 const LIST_ID = '4seSLtIddxXUVB2Z';
 const HASH_URL = 'https://api.gowish.com/graphql/aa669a674603b59c80ba4bf22e4c64db';
 const jsonResp = (status, obj) => resp(status, typeof obj === 'string' ? obj : JSON.stringify(obj));
@@ -1419,8 +1419,132 @@ test('onskeskyen: the rows are inserted in one request, as a browser would have 
   const bodies = []; const f = makeFake(db);
   await ONSKE.runImports({ sb: makeClient('https://x.supabase.test', SERVICE_KEY, async (u, o) => { if (o && o.method === 'POST' && /\/products$/.test(u)) bodies.push(JSON.parse(o.body)); return f(u, o); }), fetch: f, now: () => NOW, sleep: async () => {}, log: () => {} });
   assert.strictEqual(bodies.length, 1); assert.strictEqual(bodies[0].length, 12);
-  assert.deepStrictEqual(Object.keys(bodies[0][0]).sort(), ['active', 'compare_state', 'list_id', 'name', 'source_url', 'status', 'target_type', 'target_value', 'user_id']);
+  assert.deepStrictEqual(Object.keys(bodies[0][0]).sort(), ['active', 'compare_state', 'image_url', 'list_id', 'name', 'source_url', 'status', 'target_type', 'target_value', 'user_id']);
 });
+
+test('onskeskyen: the query asks for photos; the first https photo of each wish becomes image_url, nothing else is fetched', async () => {
+  const web = onskeWeb(), db = importsDb(web); impRow(db, SHARE);
+  await runImp(db);
+  const q = JSON.parse(web.posts()[0].body).query;
+  assert(/data \{[^}]*\bphotos\b[^}]*\}/.test(q), 'photos is part of the wish fields: ' + q);
+  const rows = db.inserted.filter((x) => x.table === 'products').map((x) => x.row);
+  assert.strictEqual(rows.length, 12);
+  const first = WISHES[0];
+  assert(Array.isArray(first.photos) && /^https:\/\//.test(first.photos[0]));
+  assert.strictEqual(rows[0].image_url, first.photos[0], 'the first photo of the first wish');
+  WISHES.forEach((w, i) => {
+    const want = (w.photos || []).filter((x) => /^https:\/\//.test(x))[0] || null;
+    assert.strictEqual(rows[i].image_url, want, 'wish ' + i);
+  });
+  assert.deepStrictEqual(web.gets().map((c) => new URL(c.url).hostname).filter((h) => /^img\./.test(h)), [], 'no picture is downloaded');
+  assert.deepStrictEqual(web.foreign, []);
+});
+
+test('onskeskyen: only https photos are kept (http, other schemes, relative, spaces, a port, over 500 characters, no list, a bare string)', async () => {
+  const bad = ['http://img.example.dk/a.jpg', 'javascript:alert(1)', 'data:image/png;base64,AAAA', '/a.jpg', 'https://img.example.dk:8443/a.jpg', 'https://u:p@img.example.dk/a.jpg', 'https://img.example.dk/a b.jpg', 'https://img.example.dk/' + 'a'.repeat(500), 'https://localhost/a.jpg', 42, null];
+  const wishes = bad.map((p, i) => ({ id: 'b' + i, title: 'Vare ' + i, url: 'https://shop' + i + '.dk/x', photos: [p] }));
+  wishes.push({ id: 'ok1', title: 'Andet valg', url: 'https://shopx.dk/x', photos: ['http://img.example.dk/a.jpg', 'https://img.example.dk/ok.jpg?w=200', 'https://img.example.dk/two.jpg'] });
+  wishes.push({ id: 'ok2', title: 'Uden billeder', url: 'https://shopy.dk/x' });
+  wishes.push({ id: 'ok3', title: 'Streng', url: 'https://shopz.dk/x', photos: 'https://img.example.dk/s.jpg' });
+  const web = onskeWeb({ lists: { [LIST_ID]: { title: 'Billeder', accessLevel: 'Public', wishes } } }), db = importsDb(web); impRow(db, SHARE);
+  await runImp(db);
+  const rows = db.inserted.filter((x) => x.table === 'products').map((x) => x.row);
+  assert.deepStrictEqual(rows.slice(0, bad.length).map((r) => r.image_url), bad.map(() => null));
+  assert.strictEqual(rows[bad.length].image_url, 'https://img.example.dk/ok.jpg?w=200', 'the first usable one, not the first one');
+  assert.strictEqual(rows[bad.length + 1].image_url, null);
+  assert.strictEqual(rows[bad.length + 2].image_url, 'https://img.example.dk/s.jpg');
+});
+
+test('onskeskyen: a database without image_url still gets the products (the column is left out and the insert is repeated)', async () => {
+  const web = onskeWeb(), db = importsDb(web); impRow(db, SHARE);
+  const f = makeFake(db), seen = [];
+  const sb = makeClient('https://x.supabase.test', SERVICE_KEY, async (u, o) => {
+    if (o && o.method === 'POST' && /\/products$/.test(u)) {
+      const b = JSON.parse(o.body); seen.push(Object.keys(b[0]));
+      if (b.some((r) => 'image_url' in r)) return resp(400, JSON.stringify({ code: 'PGRST204', message: "Could not find the 'image_url' column of 'products' in the schema cache" }));
+    }
+    return f(u, o);
+  });
+  await ONSKE.runImports({ sb, fetch: f, now: () => NOW, sleep: async () => {}, log: () => {} });
+  assert.strictEqual(seen.length, 2); assert(seen[0].indexOf('image_url') >= 0 && seen[1].indexOf('image_url') < 0 && seen[1].indexOf('compare_state') >= 0);
+  assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(mine(db).length, 12);
+});
+
+// ---------------------------------------------------------------- product pictures (only the address, from pages the job reads anyway)
+
+test('images: every saved Prisjagt page gives its og:image as an https address', () => {
+  const want = { dyson: 'https://cdn.pji.nu/product/standard/800/5745115.jpg', lego: 'https://cdn.pji.nu/product/standard/800/13113529.jpg', ps5: 'https://cdn.pji.nu/product/standard/800/13395263.jpg',
+    roborock: 'https://cdn.pji.nu/product/standard/800/16373878.jpg', sonicare: 'https://cdn.pji.nu/product/standard/800/7253209.jpg', sony: 'https://cdn.pji.nu/product/standard/800/6219512.jpg' };
+  Object.keys(want).forEach((n) => assert.strictEqual(fixturePage(n).image, want[n], n));
+  assert.strictEqual(PJ.parsePage(fixtureHtml('sony').replace(/<meta property="og:image"[^>]*>/, '')).image, 'https://cdn.pji.nu/product/standard/800/6219512.jpg', 'twitter:image or nothing; the payload copy is not a meta tag of the page head');
+});
+
+test('images: cleanImageUrl keeps only https pictures that the database would accept', () => {
+  const c = PJ.cleanImageUrl;
+  assert.strictEqual(c('https://img.example.dk/a.jpg'), 'https://img.example.dk/a.jpg');
+  assert.strictEqual(c('  https://img.example.dk/a.jpg?w=1#x '), 'https://img.example.dk/a.jpg?w=1', 'fragment dropped, nothing added');
+  assert.strictEqual(c('//cdn.example.dk/a.jpg', 'https://shop.dk/p'), 'https://cdn.example.dk/a.jpg');
+  assert.strictEqual(c('/img/a.jpg', 'https://shop.dk/p/1'), 'https://shop.dk/img/a.jpg');
+  assert.strictEqual(c('/img/a.jpg'), null, 'relative without a page');
+  assert.strictEqual(c('/img/a.jpg', 'http://shop.dk/p'), null, 'a page that is not https');
+  [null, undefined, 3, '', 'http://img.example.dk/a.jpg', 'ftp://img.example.dk/a.jpg', 'data:image/gif;base64,R0lG', 'javascript:alert(1)', 'https://img.example.dk:444/a.jpg', 'https://a:b@img.example.dk/a.jpg', 'https://img.example.dk/a b.jpg',
+    'https://localhost/a.jpg', 'https://127.0.0.1/a.jpg', 'https://[::1]/a.jpg', 'https://img.example.dk/' + 'a'.repeat(490)].forEach((u) => assert.strictEqual(c(u, 'https://shop.dk/p'), null, String(u)));
+});
+
+test('images: a single-shop page gives its JSON-LD image (string, list, ImageObject, relative) or else og:image', () => {
+  const base = shopHtml('shop-jsonld-single');
+  assert.strictEqual(shopParse('shop-jsonld-single', BED_URL).image, null, 'the saved page has no picture');
+  const withLd = (img) => base.replace(/"@type"\s*:\s*"Product"/, '"@type":"Product","image":' + JSON.stringify(img));
+  assert(/"image":/.test(withLd('x')), 'the fixture has a Product node to put it in');
+  const img = (h) => SHOP.parseShopPage(h, BED_URL).image;
+  assert.strictEqual(img(withLd('https://cdn.example.dk/a.jpg')), 'https://cdn.example.dk/a.jpg');
+  assert.strictEqual(img(withLd(['http://cdn.example.dk/no.jpg', 'https://cdn.example.dk/b.jpg'])), 'https://cdn.example.dk/b.jpg');
+  assert.strictEqual(img(withLd({ '@type': 'ImageObject', url: 'https://cdn.example.dk/c.jpg' })), 'https://cdn.example.dk/c.jpg');
+  assert.strictEqual(img(withLd([{ '@type': 'ImageObject', contentUrl: 'https://cdn.example.dk/d.jpg' }])), 'https://cdn.example.dk/d.jpg');
+  assert.strictEqual(img(withLd('/media/e.jpg')), 'https://www.bedrenaetter.dk/media/e.jpg');
+  assert.strictEqual(img(withLd('http://cdn.example.dk/f.jpg')), null);
+  // og:image when the JSON-LD has none, and when the JSON-LD one is unusable
+  const og = base.replace('</head>', '<meta property="og:image" content="https://cdn.example.dk/og.jpg?a=1&amp;b=2"></head>');
+  assert.strictEqual(img(og), 'https://cdn.example.dk/og.jpg?a=1&b=2');
+  assert.strictEqual(img(og.replace(/"@type"\s*:\s*"Product"/, '"@type":"Product","image":"http://cdn.example.dk/x.jpg"')), 'https://cdn.example.dk/og.jpg?a=1&b=2');
+  assert.strictEqual(img(withLd('https://cdn.example.dk/ld.jpg').replace('</head>', '<meta property="og:image" content="https://cdn.example.dk/og.jpg"></head>')), 'https://cdn.example.dk/ld.jpg', 'the product\'s own image first');
+  // microdata and meta-tag pages
+  const meta = shopHtml('shop-meta').replace('</head>', '<meta property="og:image" content="//cdn.example.dk/m.jpg"></head>');
+  assert.strictEqual(SHOP.parseShopPage(meta, 'https://www.example.dk/x').image, 'https://cdn.example.dk/m.jpg');
+  assert.strictEqual(shopParse('shop-meta').image, null);
+  assert.strictEqual(shopParse('shop-microdata').image, null);
+});
+
+test('images: the run stores the address from the page it reads (first fetch and tracking), only when it is new, and only where the column exists', async () => {
+  const URL1 = urlOf('sony');
+  const db = newDb();
+  db.products.push(product('I1', 'u1', 'sony', { image_url: null, target_type: 'auto', target_value: null }), product('I2', 'u1', 'sony', { source_url: urlOf('dyson'), image_url: null }), product('I3', 'u1', 'sony', { source_url: urlOf('lego') }));
+  const pages = { [URL1]: pageFor('sony'), [urlOf('dyson')]: pageFor('dyson'), [urlOf('lego')]: pageFor('lego') };
+  await R.run(ctxFor(db, pages));
+  const by = (id) => db.products.find((p) => p.id === id);
+  assert.strictEqual(by('I1').image_url, 'https://cdn.pji.nu/product/standard/800/6219512.jpg');
+  assert.strictEqual(by('I2').image_url, 'https://cdn.pji.nu/product/standard/800/5745115.jpg');
+  assert(!('image_url' in by('I3')), 'a database without the column is left alone');
+  // already stored: not written again; a changed address is replaced
+  const before = db.patches.length;
+  db.products.forEach((p) => { if (p.id === 'I1' || p.id === 'I2') { p.status = 'tracking'; } });
+  await R.run(ctxFor(db, pages));
+  assert(db.patches.length > before && db.patches.slice(before).every((x) => !('image_url' in x.body)), 'no second write of the same address');
+  by('I1').image_url = 'https://old.example.dk/x.jpg'; by('I1').status = 'tracking';
+  await R.run(ctxFor(db, pages));
+  assert.strictEqual(by('I1').image_url, 'https://cdn.pji.nu/product/standard/800/6219512.jpg');
+});
+
+test('images: a single-shop product gets its picture from the shop page, and no request is made for it', async () => {
+  const withImg = shopHtml('shop-jsonld-single').replace('</head>', '<meta property="og:image" content="https://cdn.example.dk/shop.jpg"></head>');
+  const db = newDb();
+  db.products.push(shopProduct('S1', 'u1', BED_URL, { image_url: null }));
+  const ctx = shopCtx(db, { [BED_URL]: withImg });
+  await R.run(ctx);
+  assert.strictEqual(db.products[0].image_url, 'https://cdn.example.dk/shop.jpg');
+  assert.deepStrictEqual(ctx.fetched, [BED_URL], 'only the product page was fetched');
+});
+
 
 test('onskeskyen: list choice (given list, reuse by name, 30-list cap, other people\'s lists, long and empty titles)', async () => {
   const one = (title) => ({ [LIST_ID]: { title, accessLevel: 'Public', wishes: WISHES.slice(0, 2) } });

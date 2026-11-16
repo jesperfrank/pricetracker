@@ -9,7 +9,7 @@
 // Only DKK is accepted (currency "DKK", or no currency at all AND a .dk host). Prices that only exist after
 // JavaScript has run are not seen: this is a plain HTTP client, no headless browser.
 
-const { UA, PageError } = require('./prisjagt');
+const { UA, PageError, cleanImageUrl, metaImage } = require('./prisjagt');
 
 const TIMEOUT_MS = 30000;
 const MAX_HTML = 4000000;
@@ -301,7 +301,10 @@ function fromJsonLd(html, ctx) {
   const cands = g.cands.map((c) => Object.assign({}, c, { url: c.url || c.productUrl }));
   const pick = pickCandidate(cands, ctx);
   const name = pick.cand.productName || (typeof g.p.name === 'string' ? g.p.name : null);
-  return { price: pick.cand.price, currency: pick.cand.currency, inStock: pick.cand.inStock, note: pick.note, title: name ? cleanText(name, 200) : null, source: 'json-ld' };
+  const asImg = (x) => (Array.isArray(x) ? x : [x]).map((i) => { const r = resolveRef(i, byId); return typeof r === 'string' ? r : (r && typeof r === 'object' ? (r.url || r.contentUrl) : null); });
+  let image = null;
+  [g.p].concat(asList(g.p.hasVariant)).forEach((n) => { if (!image && n.image) image = asImg(n.image).map((u) => cleanImageUrl(u, ctx.pageUrl)).filter(Boolean)[0] || null; });
+  return { price: pick.cand.price, currency: pick.cand.currency, inStock: pick.cand.inStock, note: pick.note, title: name ? cleanText(name, 200) : null, image, source: 'json-ld' };
 }
 
 // ---------------------------------------------------------------- 2. microdata / RDFa
@@ -353,7 +356,7 @@ function shopNameFor(host, metas) {
   return n ? n.charAt(0).toUpperCase() + n.slice(1) : 'Butikken';
 }
 
-// returns {title, rows, variants, history, note, shop, source}; throws PageError('noprice' | 'currency')
+// returns {title, rows, variants, history, note, shop, source, image}; throws PageError('noprice' | 'currency')
 function parseShopPage(html, pageUrl) {
   html = String(html || '');
   let host = '';
@@ -368,7 +371,9 @@ function parseShopPage(html, pageUrl) {
   const store = shopNameFor(host, metas);
   const row = { key: pageUrl, variant: SHOP_ID, store, price: found.price, url: pageUrl, inStock: found.inStock, stock: found.inStock ? 'InStock' : 'OutOfStock', note: null, name: title || store, saleKnown: false, sale: false };
   const variants = [{ id: SHOP_ID, label: store, lowest: found.inStock ? found.price : null, offers: 1, sample: title ? cleanText(title, 100) : null }];
-  return { title, rows: [row], variants, history: [], note: found.note || null, shop: true, source: found.source };
+  // the picture: the product's own in the JSON-LD, else the page's og:image (never fetched, only the address is kept)
+  const image = found.image || metaImage(html, pageUrl);
+  return { title, rows: [row], variants, history: [], note: found.note || null, shop: true, source: found.source, image };
 }
 
 // ---------------------------------------------------------------- fetching

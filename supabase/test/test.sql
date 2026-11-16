@@ -921,13 +921,13 @@ reset role;
 -- a donor row that differs from a-gave in every column but the bought ones, used to try every column
 insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
   status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id,
-  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url)
+  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url)
 values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
   'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01',
-  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original');
+  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg');
 update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
   variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04',
-  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave'
+  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg'
  where name = 'a-gave';
 create table t.donor as select * from public.products where name = 'donor';
 create table t.snap as select id, to_jsonb(p) as j from public.products p where name = 'a-gave';
@@ -1851,6 +1851,43 @@ select t.tok(null);
 delete from public.products where name ~ '^cmp-';
 delete from public.lists where name = 'Cmp';
 select set_config('request.jwt.claims', '', false);
+
+-- 11e. image_url: a small picture of the product, written by the job only
+delete from public.products;
+select t.chk('image: the column exists and is null on an ordinary product',
+  (select count(*) = 1 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name = 'image_url' and is_nullable = 'YES')
+  and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_image_url_check'));
+-- the job (not restricted) writes it; the check is the same rule as for source_url
+insert into public.products (id, user_id, name, source_url, target_type, status, image_url)
+values ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000a1', 'img-a', 'https://shop.example.dk/img-a', 'auto', 'tracking', 'https://cdn.example.dk/a.jpg');
+select t.chk('image: the job may store an https address',
+  (select image_url = 'https://cdn.example.dk/a.jpg' from public.products where name = 'img-a'));
+select t.chk('image: the check rejects http, other schemes, a port, user:password@, spaces, no dot in the host and over 500 characters',
+  t.err($$update public.products set image_url = 'http://cdn.example.dk/a.jpg' where name = 'img-a'$$) like '%products_image_url_check%'
+  and t.err($$update public.products set image_url = 'javascript:alert(1)' where name = 'img-a'$$) like '%products_image_url_check%'
+  and t.err($$update public.products set image_url = 'data:image/png;base64,AAAA' where name = 'img-a'$$) like '%products_image_url_check%'
+  and t.err($$update public.products set image_url = 'https://cdn.example.dk:8443/a.jpg' where name = 'img-a'$$) like '%products_image_url_check%'
+  and t.err($$update public.products set image_url = 'https://u:p@cdn.example.dk/a.jpg' where name = 'img-a'$$) like '%products_image_url_check%'
+  and t.err($$update public.products set image_url = 'https://cdn.example.dk/a b.jpg' where name = 'img-a'$$) like '%products_image_url_check%'
+  and t.err($$update public.products set image_url = 'https://localhost/a.jpg' where name = 'img-a'$$) like '%products_image_url_check%'
+  and t.err($$update public.products set image_url = 'https://cdn.example.dk/' || repeat('a', 480) where name = 'img-a'$$) like '%products_image_url_check%'
+  and t.err($$update public.products set image_url = 'https://cdn.example.dk/' || repeat('a', 470) where name = 'img-a'$$) = 'ok1'
+  and t.err($$update public.products set image_url = null where name = 'img-a'$$) = 'ok1');
+update public.products set image_url = 'https://cdn.example.dk/a.jpg' where name = 'img-a';
+set role authenticated; select t.asA();
+select t.chk('image: a new product from the browser cannot preset it',
+  t.err($$insert into public.products (name, source_url, target_type, image_url) values ('img-ny', 'https://shop.example.dk/ny', 'auto', 'https://evil.example.com/x.jpg')$$) = 'ok1'
+  and t.q($$select (image_url is null)::text from public.products where name = 'img-ny'$$) = 'true');
+select t.chk('image: the owner cannot change it with an update that goes through otherwise (the rest of the update is kept)',
+  t.err($$update public.products set image_url = 'https://evil.example.com/x.jpg', name = 'img-a2' where name = 'img-a'$$) = 'ok1'
+  and t.q($$select (image_url = 'https://cdn.example.dk/a.jpg' and name = 'img-a2')::text from public.products where id = '00000000-0000-0000-0000-0000000000e1'$$) = 'true'
+  and t.err($$update public.products set image_url = null where id = '00000000-0000-0000-0000-0000000000e1'$$) = 'ok1'
+  and t.q($$select (image_url = 'https://cdn.example.dk/a.jpg')::text from public.products where id = '00000000-0000-0000-0000-0000000000e1'$$) = 'true');
+select t.chk('image: a new link starts the product over without the old picture',
+  t.err($$update public.products set source_url = 'https://shop.example.dk/anden' where id = '00000000-0000-0000-0000-0000000000e1'$$) = 'ok1'
+  and t.q($$select (image_url is null and status = 'pending')::text from public.products where id = '00000000-0000-0000-0000-0000000000e1'$$) = 'true');
+reset role;
+delete from public.products where name ~ '^img-';
 
 -- 12. final whole-file run on the populated database
 \o /dev/null

@@ -29,7 +29,7 @@ const API_URL = 'https://api.gowish.com/graphql';
 
 // Our own small query (title, access level and the fields we use); the server accepts it as well as the page's own query.
 const QUERY = 'query getWishlistWishes($id: ID!, $input: PaginationInput) { wishlist(id: $id) { id title accessLevel ' +
-  'wishes(input: $input) { data { id title price currency url } totalCount nextCursor } } }';
+  'wishes(input: $input) { data { id title price currency url photos } totalCount nextCursor } } }';
 
 const NOTE = {
   private: 'Ønskelisten er ikke offentlig eller findes ikke. Bed ejeren om at dele den offentligt.',
@@ -161,7 +161,14 @@ function wishId(v) {
   return typeof v === 'string' && v.length > 0 && v.length <= 100 ? v : null;
 }
 
-// {title, wishes: [{id, title, url}], total, truncated}. Up to MAX_WISHES wishes, PAGE_SIZE per request.
+// The first usable picture of a wish (an https address, the same rule as products.image_url), or null. Only the address is kept.
+function firstPhoto(photos) {
+  const list = Array.isArray(photos) ? photos : (typeof photos === 'string' ? [photos] : []);
+  for (const p of list.slice(0, 5)) { const c = PJ.cleanImageUrl(typeof p === 'string' ? p : null); if (c) return c; }
+  return null;
+}
+
+// {title, wishes: [{id, title, url, image}], total, truncated}. Up to MAX_WISHES wishes, PAGE_SIZE per request.
 async function fetchWishList(id, http) {
   const state = { endpoint: API_URL };
   let cursor = 0, title = null, total = null;
@@ -178,7 +185,7 @@ async function fetchWishList(id, http) {
     if (!w || !Array.isArray(w.data)) throw new ImportError('unavailable', 'unexpected answer');
     if (title === null && typeof wl.title === 'string') title = wl.title;
     if (typeof w.totalCount === 'number') total = w.totalCount;
-    w.data.forEach((x) => { if (x && typeof x === 'object') wishes.push({ id: wishId(x.id), title: x.title, url: x.url }); });
+    w.data.forEach((x) => { if (x && typeof x === 'object') wishes.push({ id: wishId(x.id), title: x.title, url: x.url, image: firstPhoto(x.photos) }); });
     const next = w.nextCursor;
     if (typeof next !== 'number' || next <= cursor || !w.data.length) break;
     cursor = next;
@@ -266,7 +273,7 @@ function pickCandidates(wishList, have) {
     if (!name) { noTitle++; return; }
     const url = cleanWishUrl(w.url), key = url ? urlKey(url) : null;
     if (key) { if (have.has(key)) { dup++; return; } have.add(key); }
-    cands.push({ id: w.id, name, source_url: url });
+    cands.push({ id: w.id, name, source_url: url, image: w.image || null });
   });
   return { cands, dup, noTitle };
 }
@@ -276,12 +283,17 @@ async function addProducts(sb, imp, take, title, log) {
   // status exactly as a product added in the browser: 'pending' (the job fetches the first price), goal 'auto'
   // A wish with one shop's link only follows that shop: the AI agent is asked to look for the product on Prisjagt (compare_state
   // 'wanted'). A prisjagt.dk link is already the comparison; a wish without a link is found by name first.
-  const rows = take.map((c) => ({ user_id: imp.user_id, name: c.name, source_url: c.source_url, target_type: 'auto', target_value: null, list_id: pl.listId, active: true, status: 'pending', compare_state: wantsCompare(c.source_url) ? 'wanted' : null }));
-  try { await sb.insert('products', rows, false); }
-  catch (e) {
-    // the database has not been given the compare columns yet (the script is applied on push): add the products without them
-    if (!/compare_state/i.test(String(e && (e.body || e.message) || ''))) throw e;
-    await sb.insert('products', rows.map((r) => { const o = Object.assign({}, r); delete o.compare_state; return o; }), false);
+  // image_url: the wish's first photo (the address only), from the answer the job already has
+  let rows = take.map((c) => ({ user_id: imp.user_id, name: c.name, source_url: c.source_url, target_type: 'auto', target_value: null, list_id: pl.listId, active: true, status: 'pending', compare_state: wantsCompare(c.source_url) ? 'wanted' : null, image_url: c.image || null }));
+  // the database has not been given the newer columns yet (the script is applied on push): add the products without them
+  for (let tries = 0; tries < 3; tries++) {
+    try { await sb.insert('products', rows, false); return pl; }
+    catch (e) {
+      const msg = String(e && (e.body || e.message) || '');
+      const col = /image_url/i.test(msg) ? 'image_url' : /compare_state/i.test(msg) ? 'compare_state' : null;
+      if (!col || tries === 2) throw e;
+      rows = rows.map((r) => { const o = Object.assign({}, r); delete o[col]; return o; });
+    }
   }
   return pl;
 }

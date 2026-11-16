@@ -24,11 +24,18 @@
     <div class="top">
       <h1>Prisvagten</h1>
       <button type="button" class="badge" id="reqBadge" hidden></button>
-      <span class="acts" id="acts" hidden>
-        <button type="button" class="link sound" id="soundBtn" aria-pressed="true">Lyd til</button>
-        <span class="who" id="who"></span>
-        <button type="button" class="link sound" id="logoutBtn">Log ud</button>
-      </span>
+      <div class="acct" id="acts" hidden>
+        <button type="button" class="avatar" id="acctBtn" aria-label="Konto" aria-haspopup="menu" aria-expanded="false" aria-controls="acctMenu"><span id="acctInitial" aria-hidden="true"></span></button>
+        <div class="pop" id="acctPop" hidden>
+          <p class="who" id="who"></p>
+          <div role="menu" id="acctMenu" aria-label="Konto">
+            <button type="button" role="menuitem" id="soundBtn">Lyd til</button>
+            <button type="button" role="menuitem" id="settingsBtn">Indstillinger</button>
+            <button type="button" role="menuitem" id="accessBtn" hidden>Adgang</button>
+            <button type="button" role="menuitem" id="logoutBtn">Log ud</button>
+          </div>
+        </div>
+      </div>
     </div>
     <p class="status" id="status"></p>
   </header>
@@ -72,19 +79,36 @@
 
   <!-- signed in -->
   <section id="appView" hidden>
+    <section class="settings" id="settingsBox" aria-labelledby="setH" hidden>
+      <div class="set-h"><h3 id="setH">Indstillinger</h3><button type="button" class="link" id="setClose">Luk</button></div>
+      <form id="shopForm">
+        <label for="shAlways">Tjek altid</label>
+        <input type="text" id="shAlways" maxlength="600" placeholder="fx Proshop, hifiklubben.dk, Magasin">
+        <label for="shExclude">Udelad</label>
+        <input type="text" id="shExclude" maxlength="600" placeholder="fx Elgiganten">
+        <label class="chk"><input type="checkbox" id="shOnly"> Kun butikker fra “tjek altid”</label>
+        <label class="chk"><input type="checkbox" id="shNotify" checked> Send e-mail, når et mål er nået</label>
+        <label class="chk"><input type="checkbox" id="shDigest"> Saml tilbud i én morgenmail</label>
+        <span><button class="link" type="submit">Gem</button> <span id="shMsg" role="status"></span></span>
+      </form>
+    </section>
     <form class="add auto" id="addForm" autocomplete="off" novalidate>
-      <label class="vh" for="fMain">Produktnavn, link eller ønskeliste</label>
-      <input class="inp url" type="text" id="fMain" maxlength="500" required placeholder="Produktnavn, link eller ønskeliste">
-      <div class="goal" role="radiogroup" aria-label="Hvornår vil du have besked?">
-        <label><input type="radio" name="fType" id="fTypeAuto" value="auto" checked><span>Godt tilbud</span></label>
-        <label><input type="radio" name="fType" id="fTypePrice" value="price"><span>Pris under … kr.</span></label>
-        <label><input type="radio" name="fType" id="fTypePct" value="pct"><span>Rabat på mindst … %</span></label>
+      <div class="addrow">
+        <label class="vh" for="fMain">Produktnavn, link eller ønskeliste</label>
+        <input type="text" id="fMain" maxlength="500" required placeholder="Produktnavn, link eller ønskeliste">
+        <button class="btn" id="fSubmit" type="submit"><span class="bl">Hold øje</span><svg class="bi" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false"><path d="M10 4v12M4 10h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
       </div>
-      <div class="amount" id="fAmount" hidden>
-        <label class="vh" for="fVal" id="fValLabel">Højeste pris i kroner</label>
-        <input class="inp n" type="number" id="fVal" min="1" step="1" inputmode="numeric" placeholder="Højst">
+      <div class="addmore" id="addMore" hidden>
+        <div class="goal" role="radiogroup" aria-label="Hvornår vil du have besked?">
+          <label><input type="radio" name="fType" id="fTypeAuto" value="auto" checked><span>Godt tilbud</span></label>
+          <label><input type="radio" name="fType" id="fTypePrice" value="price"><span>Pris under … kr.</span></label>
+          <label><input type="radio" name="fType" id="fTypePct" value="pct"><span>Rabat på mindst … %</span></label>
+        </div>
+        <div class="amount" id="fAmount" hidden>
+          <label class="vh" for="fVal" id="fValLabel">Højeste pris i kroner</label>
+          <input class="inp n" type="number" id="fVal" min="1" step="1" inputmode="numeric" placeholder="Højst">
+        </div>
       </div>
-      <button class="btn" id="fSubmit" type="submit">Hold øje</button>
     </form>
     <p class="msg" id="fMsg" role="alert" hidden></p>
     <p class="hint" id="fHint" hidden></p>
@@ -121,21 +145,8 @@
       <summary>Sådan vurderer vi tilbud</summary>
       <p>Et tilbud vurderes mod den laveste pris de seneste 30 dage og mod normalprisen, ikke mod butikkens egen førpris. Er der for lidt historik, skal prisen være mindst 10 % under den første pris, vi har set. Fragt er ikke med, medmindre det står ved butikken. Priserne hentes hvert kvarter, og dine lister er private, medmindre du deler en.</p>
     </details>
-    <details class="fine" id="settingsBox">
-      <summary>Indstillinger</summary>
-      <form id="shopForm">
-        <label for="shAlways">Tjek altid</label>
-        <input type="text" id="shAlways" maxlength="600" placeholder="fx Proshop, hifiklubben.dk, Magasin">
-        <label for="shExclude">Udelad</label>
-        <input type="text" id="shExclude" maxlength="600" placeholder="fx Elgiganten">
-        <label class="chk"><input type="checkbox" id="shOnly"> Kun butikker fra “tjek altid”</label>
-        <label class="chk"><input type="checkbox" id="shNotify" checked> Send e-mail, når et mål er nået</label>
-        <label class="chk"><input type="checkbox" id="shDigest"> Saml tilbud i én morgenmail</label>
-        <span><button class="link" type="submit">Gem</button> <span id="shMsg" role="status"></span></span>
-      </form>
-    </details>
     <section class="fine access" id="accessBox" hidden>
-      <h3>Adgang</h3>
+      <h3 id="accessH" tabindex="-1">Adgang</h3>
       <p class="info" id="accMsg" role="status" hidden></p>
       <div id="reqList"></div>
       <details id="allowedBox">

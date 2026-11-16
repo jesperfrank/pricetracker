@@ -104,6 +104,13 @@ alter table public.products drop constraint if exists products_shop_url_check;
 alter table public.products add constraint products_shop_url_check check (
   shop_url is null or (char_length(shop_url) <= 500 and shop_url ~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$'));
 
+-- A small picture of the product (https only, same rule as source_url). Written by the job only (taken from a page or a wish list the
+-- job reads anyway; the picture itself is never downloaded or stored here). products_guard keeps the browser's hands off it.
+alter table public.products add column if not exists image_url text;
+alter table public.products drop constraint if exists products_image_url_check;
+alter table public.products add constraint products_image_url_check check (
+  image_url is null or (char_length(image_url) <= 500 and image_url ~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$'));
+
 -- A product may be added by name only (source_url null); the name must then not be blank.
 -- NOT VALID: enforced for every new/changed row without re-checking old rows.
 alter table public.products drop constraint if exists products_name_not_blank;
@@ -212,7 +219,7 @@ begin
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     new.digest_price := null; new.digest_at := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
-    new.compare_state := null; new.compare_at := null; new.shop_url := null;
+    new.compare_state := null; new.compare_at := null; new.shop_url := null; new.image_url := null;
     -- bought_at / bought_price are the person's own, but the time is the server's and the person is who is signed in
     new.bought_by := null;
     if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; end if;
@@ -233,6 +240,7 @@ begin
   new.check_note := old.check_note; new.last_checked := old.last_checked;
   new.notified_price := old.notified_price; new.notified_at := old.notified_at; new.backfill_state := old.backfill_state;
   new.digest_price := old.digest_price; new.digest_at := old.digest_at;
+  new.image_url := old.image_url;
   -- alternatives: the answer is the AI agent's. A request is a change of alt_requested_at (only the product's own person gets this
   -- far: a list member changing it fails the whole-row check above). Whatever value the browser sends, the time is the server's;
   -- null is ignored. Refused while a request is pending (unless it is over 6 hours old: the page calls that failed), and after 5
@@ -283,7 +291,7 @@ begin
     new.title := null; new.variants := null; new.offers := null; new.history := null;
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
-    new.digest_price := null; new.digest_at := null;
+    new.digest_price := null; new.digest_at := null; new.image_url := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
     -- A new link is the person's own choice: the comparison starts over, except for going back to the original shop link after a
     -- switch to Prisjagt (exactly shop_url): that is 'none' from now on, so the product is not switched again.
