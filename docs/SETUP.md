@@ -1,0 +1,66 @@
+# Opsætning af Prisvagten
+
+Du skal bruge: en GitHub-konto med repoet, en gratis Supabase-konto og en gratis Resend-konto. Tag det i denne rækkefølge.
+
+## 1. Supabase-projekt
+
+1. Opret et projekt på supabase.com (region EU, f.eks. Frankfurt). Gem database-adgangskoden.
+2. Åbn **SQL Editor** > **New query**, indsæt hele indholdet af `supabase/schema.sql` og tryk **Run**. Filen kan køres igen uden skade.
+3. Åbn **Table Editor** > `allowed_emails` og tilføj en række pr. person, der må bruge siden: `email` med **små bogstaver**, evt. en `note`. Husk din egen adresse. (Kun du kan se og redigere tabellen; almindelige brugere har ingen adgang.)
+
+## 2. Log ind med e-mail (magic link)
+
+1. **Authentication** > **Providers** > **Email**: slå *Enable Email provider* til. Slå *Confirm email* til, og lad *Magic link* være slået til. (Adgangskode-login bruges ikke.)
+2. **Authentication** > **URL Configuration**:
+   - *Site URL*: adressen på din GitHub Pages-side, f.eks. `https://DITBRUGERNAVN.github.io/prisvagten/`
+   - *Redirect URLs*: tilføj den samme adresse (med `/*` til sidst, hvis Supabase kræver det).
+3. Sæt **Authentication** > **Sign In / Providers** (eller *Settings*) så *Allow new users to sign up* er slået **til** (de inviterede skal kunne oprette sig første gang; hooket i trin 3 afviser alle andre).
+4. Supabases indbyggede mailserver må kun sende få mails i timen. Til 10-20 personer er det normalt nok, men vil du være sikker, så tilføj Resend som egen SMTP under **Authentication** > **SMTP Settings** (host `smtp.resend.com`, port `465`, bruger `resend`, adgangskode = din Resend API-nøgle, afsender = din verificerede adresse).
+
+## 3. Afvis ikke-inviterede ved tilmelding (hook)
+
+Funktionen `public.hook_before_user_created` er allerede oprettet af `schema.sql`.
+
+1. **Authentication** > **Hooks** (nogle gange under *Auth Hooks*) > **Before User Created**.
+2. Vælg type **Postgres function**, schema `public`, funktion `hook_before_user_created`, og gem/bekræft.
+
+Jeg har ikke kunnet afprøve hooket mod et rigtigt Supabase-projekt, og dashboardets menunavne og hook-formatet (input `event.user.email`, svar `{}` = tillad, `{"error": {...}}` = afvis) kan have ændret sig. Det gør ikke noget for sikkerheden: **den egentlige beskyttelse er Row Level Security**. Står en e-mail ikke i `allowed_emails`, kan personen højst logge ind, men hverken læse eller skrive noget. Virker hooket ikke, så slå det fra og lad RLS gøre arbejdet.
+
+Fjerner du en e-mail fra `allowed_emails`, mister personen straks adgang til sine produkter (de slettes ikke).
+
+## 4. Nøgler
+
+I Supabase: **Project Settings** > **API** (eller *API Keys*). Noter:
+- **Project URL** (`https://xxxx.supabase.co`)
+- **anon / publishable key** (offentlig; bruges af siden i `web/`)
+- **service_role / secret key** (HEMMELIG; bruges kun af prisjobbet. Må aldrig stå i `web/` eller i koden.)
+
+## 5. Resend (e-mails om fald i pris)
+
+1. Opret konto på resend.com. Under **Domains** kan du verificere dit eget domæne og sende fra f.eks. `pris@dit-domæne.dk`. Uden eget domæne kan du til test kun sende fra `onboarding@resend.dev` til din egen adresse.
+2. **API Keys** > opret en nøgle med rettigheden *Sending access*.
+
+## 6. GitHub: hemmeligheder og tidsplan
+
+1. Repoet > **Settings** > **Secrets and variables** > **Actions** > **New repository secret**. Opret disse fem:
+
+| Navn | Værdi |
+|---|---|
+| `SUPABASE_URL` | Project URL fra trin 4 |
+| `SUPABASE_SERVICE_KEY` | service_role-nøglen fra trin 4 |
+| `RESEND_API_KEY` | nøglen fra trin 5 (kan udelades; så sendes ingen e-mails) |
+| `MAIL_FROM` | f.eks. `Prisvagten <pris@dit-domæne.dk>` |
+| `SITE_URL` | adressen på siden, f.eks. `https://DITBRUGERNAVN.github.io/prisvagten/` |
+
+2. **Actions**-fanen > **Priser** > **Run workflow** for at prøve det af. Se loggen: den slutter med fem linjer (produkter, sider hentet, hits, e-mails, skrevet).
+3. Jobbet kører derefter automatisk hvert 15. minut. GitHub kan forsinke planlagte kørsler lidt, og GitHub slår planlagte workflows fra i et offentligt repo, hvis der ikke har været aktivitet i 60 dage. Dukker priserne ikke længere op, så tryk *Enable workflow* under Actions.
+
+## 7. Siden (GitHub Pages)
+
+Frontenden ligger i `web/` og udgives af workflowet `pages.yml`. Slå Pages til: repoet > **Settings** > **Pages** > *Source*: **GitHub Actions**. Frontenden skal have Project URL og anon-nøglen fra trin 4 (se `web/`).
+
+## Hverdagen
+
+- Ny person: tilføj e-mailen i `allowed_emails` og send dem linket til siden.
+- Jobbet henter hver produktside højst én gang pr. kørsel, med 1,5 sekunds pause, og forsøger aldrig at omgå en blokering. Svarer Prisjagt med 403/429, springer jobbet resten over i den kørsel, og produktet får en note.
+- Et produkt i fejl-tilstand prøves igen efter 6 timer. Skifter nogen linket, starter produktet forfra.
