@@ -213,7 +213,7 @@
     if (v && v.level === "good" && v.text) return v.text;
     if (v && v.level === "unknown" && p.normalPrice == null) {
       var h = histOf(p).filter(function (x) { return x.p > 0; });
-      if (h.length && b.price * 10 <= h[0].p * 9) return kr(b.price) + " er " + Math.round((1 - b.price / h[0].p) * 100) + " % under den første pris, vi har set (" + kr(h[0].p) + ").";
+      if (h.length && b.price * 10 <= h[0].p * 9) return kr(b.price) + " er " + Math.round((1 - b.price / h[0].p) * 100) + " % under første pris (" + kr(h[0].p) + ").";
     }
     return null;
   }
@@ -261,7 +261,7 @@
     if (!state.loaded) { $("status").textContent = "Henter listen …"; return; }
     var newest = 0;
     state.products.forEach(function (p) { var t = Date.parse(p.lastChecked); if (isFinite(t) && t > newest) newest = t; });
-    var parts = [newest ? "Priserne er opdateret " + dtFmt.format(new Date(newest)) : "Ingen priser hentet endnu", "opdateres hvert kvarter"];
+    var parts = [newest ? "Opdateret " + dtFmt.format(new Date(newest)) : "Ingen priser endnu"];
     if (bfDays > 0) parts.push(bfDays + (bfDays === 1 ? " dag" : " dage") + " til Black Friday");
     $("status").textContent = parts.join(" · ");
   }
@@ -286,10 +286,10 @@
   function headHtml(p) {
     var b = bestOf(p), t = targetKr(p), os = offersOf(p), st;
     var anyStock = os.some(function (o) { return o.inStock !== false; });
-    if (p.status === "pending") st = p.url ? "Henter produktet … klar inden for et kvarter" : "Finder produktet … det kan tage op til en time.";
+    if (p.status === "pending") st = p.url ? "Henter produktet …" : "Finder produktet …";
     else if (p.status === "error") st = '<span class="warn">' + esc(p.checkNote || "Produktet kunne ikke hentes") + '</span>';
     else if (awaitingFetch(p)) st = "Henter priser for den valgte variant …";
-    else if (p.status === "choose") st = '<span class="out">Vælg, hvilken variant du vil følge</span>';
+    else if (p.status === "choose") st = '<span class="out">Vælg variant</span>';
     else if (isHit(p)) st = '<span class="ok">' + (p.targetType === "auto" ? "Godt tilbud" : "Mål nået") + '</span> · på lager hos ' + esc(b.store || "en butik");
     else if (!p.lastChecked) st = "Venter på første tjek";
     else if (!b) st = esc(p.checkNote || "Ingen pris fundet");
@@ -304,14 +304,14 @@
   function chooserHtml(p) {
     var id = p._id, sel = state.pick[id];
     if (!sel) sel = p.tracked && p.tracked.length ? p.tracked : (p.variants.length === 1 ? [String(p.variants[0].id)] : []);
-    if (!p.variants.length) return '<p class="verdict">Der er ingen varianter at vælge mellem endnu. Prøv igen om lidt.</p>';
-    return '<form class="choose" data-choose="' + esc(id) + '"><fieldset class="variants"><legend>Hvilke varianter vil du følge?</legend>' +
+    if (!p.variants.length) return '<p class="verdict">Ingen varianter endnu.</p>';
+    return '<form class="choose" data-choose="' + esc(id) + '"><fieldset class="variants"><legend class="vh">Hvilke varianter vil du følge?</legend>' +
       p.variants.map(function (v, i) {
         var vid = String(v.id), n = Array.isArray(v.offers) ? v.offers.length : num(v.offers);
         return '<label class="var"><input type="checkbox" data-var="' + esc(vid) + '"' + (sel.indexOf(vid) >= 0 ? " checked" : "") + '>' +
           '<span>' + esc(v.label || ("Variant " + (i + 1))) + '</span>' +
           '<span class="vp n">' + (num(v.lowest) != null ? "fra " + esc(kr(num(v.lowest))) : "") + '</span>' +
-          '<span class="meta">' + (n != null ? esc(n + (n === 1 ? " tilbud" : " tilbud")) : "") + '</span></label>';
+          '<span class="meta">' + (n != null ? esc(n + " tilbud") : "") + '</span></label>';
       }).join("") + '</fieldset><div class="choose-act"><button class="btn small" type="submit">Følg valgte</button>' +
       (p.status === "tracking" ? '<button type="button" class="link" data-act="change-no" data-id="' + esc(id) + '">Fortryd</button>' : '') +
       '<span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></div></form>';
@@ -351,11 +351,11 @@
 
   // Name-only product: link to prisjagt.dk's own search (opens in a new tab) and a form to paste the link found there.
   function findHtml(p, afterError) {
-    var id = p._id, a = '<a href="https://prisjagt.dk/search?search=' + esc(encodeURIComponent(p.name)) + '" target="_blank" rel="noopener noreferrer">Søg på Prisjagt</a>';
+    var id = p._id, a = '<a href="https://prisjagt.dk/search?search=' + esc(encodeURIComponent(p.name)) + '" target="_blank" rel="noopener noreferrer">Søg selv på Prisjagt</a>';
     var f = state.canWrite ? '<form class="edit" data-fixurl="' + esc(id) + '" novalidate><label for="u-' + esc(id) + '">Indsæt linket her</label>' +
       '<input class="wide" type="url" id="u-' + esc(id) + '" maxlength="500" required placeholder="https://…">' +
       '<button class="link" type="submit">Gem linket</button><span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></form>' : "";
-    return '<p class="verdict">' + (afterError ? "Find det selv" : "Har du travlt? Find det selv") + ': ' + a + '</p>' + f;
+    return '<p class="verdict">' + a + '</p>' + f;
   }
 
   // One-click goals from the product's own history: a price in whole kroner each (shown value = saved value).
@@ -372,7 +372,7 @@
     if (!state.canWrite || !h.length) return "";
     var l = suggestions(p, b, low30, lowAll);
     if (!l.length) return "";
-    return '<div class="sugg"><span class="meta">Sæt målet med ét klik:</span>' + l.map(function (x) {
+    return '<div class="sugg" role="group" aria-label="Sæt mål">' + l.map(function (x) {
       var on = p.targetType === "price" && p.targetValue === x.v;
       return '<button type="button" class="chip" data-act="goal" data-id="' + esc(p._id) + '" data-v="' + x.v + '" aria-pressed="' + on + '">' + esc(x.label + ": " + kr(x.v)) + '</button>';
     }).join("") + '</div>';
@@ -380,12 +380,8 @@
 
   function bodyHtml(p) {
     var id = p._id;
-    if (p.status === "pending" && !p.url)
-      return '<p class="verdict">Finder produktet … det kan tage op til en time.</p>' + findHtml(p) + footHtml(p);
-    if (p.status === "pending" && isShopUrl(p.url))
-      return '<p class="verdict">Henter produktet … klar inden for et kvarter.</p>' + footHtml(p);
-    if (p.status === "pending")
-      return '<p class="verdict">Henter produktet fra prisjagt.dk. Det er klar inden for et kvarter, og så kan du vælge variant.</p>' + footHtml(p);
+    if (p.status === "pending" && !p.url) return findHtml(p) + footHtml(p);
+    if (p.status === "pending") return footHtml(p);
     if (p.status === "error" && !p.url)
       return '<p class="verdict poor"><b>Produktet blev ikke fundet.</b> ' + esc(p.checkNote || "Find det selv på Prisjagt, og indsæt linket her.") + '</p>' + findHtml(p, true) + footHtml(p);
     if (p.status === "error") {
@@ -395,8 +391,7 @@
       return '<p class="verdict poor"><b>Produktet kunne ikke hentes.</b> ' + esc(p.checkNote || "Tjek, at linket er en produktside.") + '</p>' + f + footHtml(p);
     }
     if (awaitingFetch(p))
-      return '<p class="verdict">Varianten er valgt. Priserne hentes ved næste kørsel, inden for et kvarter.</p>' +
-        '<div class="foot"><span>Følger: ' + esc(variantLabels(p)) + '</span>' + (state.canWrite && !isShopUrl(p.url) ? '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>' : '') + '</div>' + footHtml(p);
+      return '<div class="foot"><span>Variant: ' + esc(variantLabels(p)) + '</span>' + (state.canWrite && !isShopUrl(p.url) ? '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>' : '') + '</div>' + footHtml(p);
     if (p.status === "choose") return chooserHtml(p) + footHtml(p);
 
     var b = bestOf(p), h = histOf(p), now = Date.now(), html = "";
@@ -408,16 +403,14 @@
     if (v && v.text) {
       var lab = { good: "Godt tilbud.", ok: "Almindelig pris.", poor: "Ikke et godt tilbud.", unknown: "For tidligt at sige." }[v.level] || "";
       html += '<p class="verdict ' + esc(v.level || "") + '"><b>' + lab + '</b> ' + esc(v.text) + '</p>';
-    } else if (!p.lastChecked) {
-      html += '<p class="verdict">Ved næste kørsel hentes priserne, butikkerne og normalprisen.</p>';
     }
-    if (p.targetType === "auto" && autoReason(p)) html += '<p class="note">Derfor giver vi besked: ' + esc(autoReason(p)) + '</p>';
+    if (p.targetType === "auto" && autoReason(p) && !(v && v.text === autoReason(p))) html += '<p class="note">' + esc(autoReason(p)) + '</p>';
     if (p.warning) html += '<p class="verdict poor"><b>Pas på førprisen.</b> ' + esc(p.warning) + '</p>';
     if (single) {
-      html += '<p class="note">Følger kun denne butik. Indsæt et link fra prisjagt.dk for at sammenligne flere butikker.</p>';
-    } else if (p.variants.length > 1 || variantLabels(p)) {
-      html += '<div class="foot"><span>Følger: ' + esc(variantLabels(p) || "alle varianter") + '</span>';
-      if (state.canWrite && p.variants.length && !state.change[id]) html += '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>';
+      html += '<p class="note">Kun denne butik. Et link fra prisjagt.dk sammenligner flere.</p>';
+    } else if (p.variants.length) {
+      html += '<div class="foot"><span>' + (p.variants.length > 1 ? "Variant: " + esc(variantLabels(p) || "alle") : "") + '</span>';
+      if (state.canWrite && !state.change[id]) html += '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>';
       html += '</div>';
     }
 
@@ -426,7 +419,6 @@
     var lowAll = h.length ? Math.min.apply(null, h.map(function (x) { return x.p; })) : null;
     html += suggestHtml(p, b, h, low30, lowAll);
     html += '<dl class="stats n">' +
-      '<div><dt>Laveste nu</dt><dd>' + esc(b ? kr(b.price) : "–") + '</dd></div>' +
       '<div><dt>Laveste 30 dage</dt><dd>' + esc(kr(low30)) + '</dd></div>' +
       '<div><dt>Laveste set</dt><dd>' + esc(kr(lowAll)) + '</dd></div>' +
       '<div><dt>Normalpris</dt><dd>' + esc(kr(p.normalPrice)) + '</dd></div></dl>';
@@ -437,9 +429,9 @@
         [[30, "1 md."], [90, "3 mdr."], [365, "1 år"]].map(function (x) {
           return '<button type="button" data-act="range" data-id="' + esc(id) + '" data-r="' + x[0] + '" aria-pressed="' + (r === x[0]) + '">' + x[1] + '</button>';
         }).join("") + '</div></div><div class="chart" data-chart="' + esc(id) + '"></div>';
-      if (h.length < 2) html += '<p class="note">Første måling er i hus. Grafen fylder sig ud dag for dag.</p>';
-      else if (h.some(function (x) { return x.src === "backfill"; })) html += single ? '<p class="note">Ældre priser stammer fra Internet Archive og kan have huller.</p>' : '<p class="note">Priser fra før produktet blev tilføjet stammer fra offentlige prisoversigter og kan være mindre præcise.</p>';
-      if (h.length > 1 && h[0].t > now - r * DAY) html += '<p class="note">Historikken begynder ' + esc(dFmt.format(new Date(h[0].t))) + ' ' + new Date(h[0].t).getFullYear() + ', så der er ikke ældre priser at vise.</p>';
+      if (h.length < 2) html += '<p class="note">Første måling er gemt.</p>';
+      else if (h.some(function (x) { return x.src === "backfill"; })) html += '<p class="note">Ældre priser kan være upræcise og have huller.</p>';
+      if (h.length > 1 && h[0].t > now - r * DAY) html += '<p class="note">Historik fra ' + esc(dFmt.format(new Date(h[0].t))) + ' ' + new Date(h[0].t).getFullYear() + '.</p>';
       if (h.length > 1) {
         html += '<details><summary>Vis som tabel</summary><div class="tablewrap"><table class="n"><tbody>' +
           h.slice().reverse().map(function (x) {
@@ -452,7 +444,6 @@
     var os = offersOf(p).slice().sort(function (a, c) { return ((a.inStock === false) - (c.inStock === false)) || (a.price - c.price); });
     if (os.length) {
       html += '<div><div class="sec-h"><h3>Butikker</h3>' +
-        (p.lastChecked && isFinite(Date.parse(p.lastChecked)) ? '<span class="meta">tjekket ' + esc(dtFmt.format(new Date(p.lastChecked))) + '</span>' : '') +
         '</div><div class="tablewrap"><table><tbody>' +
         os.map(function (o) {
           var u = safeUrl(o.url), out = o.inStock === false;
@@ -463,12 +454,12 @@
         }).join("") + '</tbody></table></div></div>';
     }
     if (state.canWrite) {
-      html += '<details class="pshops"><summary>Butikker for dette produkt</summary><form class="pshop" data-shops="' + esc(id) + '">' +
-        '<label for="sa-' + esc(id) + '">Tjek altid disse butikker eller sider</label>' +
+      html += '<details class="pshops"><summary>Butiksvalg</summary><form class="pshop" data-shops="' + esc(id) + '">' +
+        '<label for="sa-' + esc(id) + '">Tjek altid</label>' +
         '<input type="text" id="sa-' + esc(id) + '" maxlength="600" value="' + esc(shopList(p.shopsAlways).join(", ")) + '" placeholder="fx Proshop, hifiklubben.dk">' +
-        '<label for="se-' + esc(id) + '">Udelad disse butikker</label>' +
+        '<label for="se-' + esc(id) + '">Udelad</label>' +
         '<input type="text" id="se-' + esc(id) + '" maxlength="600" value="' + esc(shopList(p.shopsExclude).join(", ")) + '">' +
-        '<label class="chk"><input type="checkbox" id="so-' + esc(id) + '"' + (p.shopsOnly ? ' checked' : '') + '> Kun butikkerne på listen tæller for dette produkt</label>' +
+        '<label class="chk"><input type="checkbox" id="so-' + esc(id) + '"' + (p.shopsOnly ? ' checked' : '') + '> Kun butikker fra “tjek altid”</label>' +
         '<span><button class="link" type="submit">Gem</button></span></form></details>';
     }
     return html + footHtml(p);
@@ -513,7 +504,7 @@
           '<button type="button" class="link warn" data-lact="del-yes">Ja, slet listen</button>' +
           '<button type="button" class="link" data-lact="del-no">Behold</button></span>';
       } else {
-        act = '<span class="meta">Nye produkter lægges på denne liste.</span> <button type="button" class="link" data-lact="rename">Omdøb</button>' +
+        act = '<button type="button" class="link" data-lact="rename">Omdøb</button>' +
           '<button type="button" class="link warn" data-lact="del">Slet liste</button>';
       }
     }
@@ -584,12 +575,12 @@
 
   // ---- imports: a shared wish list from Ønskeskyen is read by the price job; a quiet status line per import ----
   // The imports table only exists once schema.sql has been run again. Until then nothing is shown and nothing breaks.
-  var IMPORT_PENDING = "Henter ønsker fra Ønskeskyen. De er klar inden for et kvarter.";
+  var IMPORT_PENDING = "Henter ønsker fra Ønskeskyen …";
   function importLine(im) {
     var txt;
     if (im.status === "pending") txt = IMPORT_PENDING;
     else if (im.status === "done") { var n = im.added || 0; txt = nf.format(n) + (n === 1 ? " ønske" : " ønsker") + " tilføjet fra Ønskeskyen." + (im.note ? " " + im.note : ""); }
-    else txt = im.note || "Ønskerne kunne ikke hentes fra Ønskeskyen.";
+    else txt = im.note || "Ønskelisten kunne ikke hentes.";
     return '<p class="impl' + (im.status === "error" ? " bad" : "") + '" data-istatus="' + esc(im.status) + '"><span>' + esc(txt) + '</span>' +
       (im.status !== "pending" && state.canWrite ? ' <button type="button" class="link" data-iact="hide" data-id="' + esc(im.id) + '">Skjul</button>' : "") + '</p>';
   }
@@ -637,13 +628,13 @@
     });
     if (!state.products.length) {
       list.innerHTML = '<div class="empty"><b>Ingen produkter endnu</b>' +
-        (state.canWrite ? "Skriv navnet på en vare eller indsæt et link til den ovenfor. Så finder og henter vi produktet, du vælger variant, og derefter ser du laveste pris, butikkerne og prisen dag for dag."
-          : "Når der er tilføjet produkter, ser du laveste pris, butikker og prisudvikling her.") + '</div>';
+        (state.canWrite ? "Skriv et navn eller indsæt et link ovenfor."
+          : "Når der er tilføjet produkter, ser du dem her.") + '</div>';
       return;
     }
     if (!ps.length) {
       list.innerHTML = '<div class="empty"><b>' + (sel === "none" ? "Alle produkter er på en liste" : "Ingen produkter på denne liste endnu") + '</b>' +
-        (sel === "none" ? "Her vises de produkter, som ikke er sat på nogen liste." : (state.canWrite ? "Tilføj et produkt ovenfor, så kommer det på listen. Du kan også flytte et eksisterende produkt hertil fra dets egen visning." : "")) + '</div>';
+        "" + '</div>';
       return;
     }
     list.innerHTML = ps.map(function (p) {
@@ -741,7 +732,7 @@
   function isDenied(e) { return !!e && (e.code === "42501" || /row-level security|permission denied|not allowed/i.test(String(e.message || ""))); }
   function applyAccess() {
     $("readonly").hidden = state.canWrite;
-    $("addForm").hidden = !state.canWrite; $("fHelp").hidden = !state.canWrite; $("fHint").hidden = !state.canWrite;
+    $("addForm").hidden = !state.canWrite; $("fHint").hidden = !state.canWrite || $("fTypeAuto").checked;
     render();
   }
   function onWriteError(e) { if (isDenied(e)) { state.canWrite = false; applyAccess(); } }
@@ -888,7 +879,7 @@
         var p = prod(cid); if (p) p.tracked = ids;
         var wasTracking = p && p.status === "tracking";
         delete state.change[cid]; delete state.pick[cid]; state.rowMsg[cid] = "";
-        if (wasTracking) state.note[cid] = "Gemt. Priserne for de valgte varianter opdateres inden for et kvarter.";
+        if (wasTracking) state.note[cid] = "Gemt. Priserne opdateres inden for et kvarter.";
         render(); fetchProducts();
       }, function () { setRowMsg(cid, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
       return;
@@ -958,8 +949,8 @@
           '<button type="button" class="link warn" data-aact="reject" data-email="' + e + '">Afvis</button>';
       var when = Date.parse(r.created_at);
       return '<div class="req"><div><b>' + esc(r.name || "Uden navn") + '</b><div class="meta">' + e +
-        (isFinite(when) ? " · bad om adgang " + esc(dtFmt.format(new Date(when))) : "") + '</div></div><div class="acts2">' + act + '</div></div>';
-    }).join("") : '<p class="meta">Ingen venter på svar.</p>';
+        (isFinite(when) ? " · " + esc(dtFmt.format(new Date(when))) : "") + '</div></div><div class="acts2">' + act + '</div></div>';
+    }).join("") : '<p class="meta">Ingen anmodninger.</p>';
     $("allowedSum").textContent = "Hvem har adgang" + (access.allowed.length ? " (" + access.allowed.length + ")" : "");
     $("allowedList").innerHTML = access.allowed.map(function (a) {
       var e = esc(a.email), act = "";
@@ -1000,9 +991,9 @@
     if (act === "remove") { access.confirm = { kind: "remove", email: email }; renderAccess(); return; }
     if (act === "cancel") { access.confirm = null; renderAccess(); return; }
     var rpcName, args, okText;
-    if (act === "approve") { rpcName = "admin_decide"; args = { p_email: email, p_approve: true }; okText = "Godkendt. " + email + " får en mail inden for et kvarter."; }
+    if (act === "approve") { rpcName = "admin_decide"; args = { p_email: email, p_approve: true }; okText = "Godkendt. " + email + " får en mail."; }
     else if (act === "reject-yes") { rpcName = "admin_decide"; args = { p_email: email, p_approve: false }; okText = "Afvist. " + email + " får ingen besked."; }
-    else if (act === "remove-yes") { rpcName = "admin_remove_allowed"; args = { p_email: email }; okText = "Adgang fjernet for " + email + ". Produkterne ligger stadig i databasen."; }
+    else if (act === "remove-yes") { rpcName = "admin_remove_allowed"; args = { p_email: email }; okText = "Adgang fjernet for " + email + "."; }
     else return;
     b.disabled = true;
     sb.rpc(rpcName, args).then(function (r) {
@@ -1023,11 +1014,8 @@
     $("fValLabel").textContent = pct ? "Mindste rabat i procent" : "Højeste pris i kroner";
     $("fVal").placeholder = pct ? "Mindst" : "Højst";
     $("fVal").max = pct ? "95" : "";
-    $("fHint").textContent = auto
-      ? "Du får besked, når prisen er et godt tilbud: klart under normalprisen og den laveste i 30 dage. Er der for lidt historik, når prisen mindst 10 % under den første pris, vi har set."
-      : pct
-      ? "Rabatten regnes fra normalprisen, som findes ved første hentning, ikke fra butikkens egen førpris."
-      : "Du får besked, når varen er på lager til den pris eller under.";
+    $("fHint").textContent = pct ? "Regnes fra normalprisen." : "Varen skal være på lager.";
+    $("fHint").hidden = auto || !state.canWrite;
   }
   // A value that looks like an address (scheme, www., or a single word with a path) is a link; anything else is a name.
   function looksLikeLink(t) { return /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^(javascript|data|vbscript|file|mailto):/i.test(t) || /^www\./i.test(t) || /^\S+\.\S+\/\S*$/.test(t) || /prisjagt\.dk/i.test(t) && !/\s/.test(t); }
@@ -1131,7 +1119,7 @@
     sb.from("profiles").upsert(data).then(function (r) {
       if (r && r.error) { msg.textContent = isDenied(r.error) ? "Din adresse har ikke adgang til at gemme endnu." : "Kunne ikke gemme lige nu. Prøv igen om lidt."; onWriteError(r.error); return; }
       setPrefs({ shops_always: data.shops_always, shops_exclude: data.shops_exclude, shops_only: data.shops_only, notify_email: data.notify_email });
-      msg.textContent = "Gemt. Gælder fra næste kørsel.";
+      msg.textContent = "Gemt.";
     }, function () { msg.textContent = "Kunne ikke gemme lige nu. Prøv igen om lidt."; });
   });
 
@@ -1166,11 +1154,11 @@
   // ---- ask for access (signed out) ----
   var ASK_TEXT = {
     requested: "Tak. Du får en mail, når du er godkendt.",
-    pending: "Du har allerede bedt om adgang. Vent på, at ejeren svarer. Du får en mail, når du er godkendt.",
-    allowed: "Du har allerede adgang. Brug login-formularen ovenfor, og få et login-link på mail.",
-    full: "Der er mange anmodninger i kø lige nu, så vi kan ikke tage flere imod. Prøv igen om nogle dage.",
+    pending: "Du har allerede bedt om adgang. Du får en mail, når du er godkendt.",
+    allowed: "Du har allerede adgang. Brug login-formularen ovenfor.",
+    full: "Der er for mange anmodninger lige nu. Prøv igen om nogle dage.",
     invalid: "Det ligner ikke en gyldig e-mailadresse. Skriv den som navn@eksempel.dk.",
-    rejected: "Ejeren har ikke givet adgang til den adresse. Kender du ejeren, så spørg vedkommende direkte."
+    rejected: "Adressen fik ikke adgang. Spørg ejeren direkte."
   };
   function askMsg(t) { var el = $("aMsg"); el.textContent = t || ""; el.hidden = !t; }
   function openAsk(email, focusName) {

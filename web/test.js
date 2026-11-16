@@ -242,10 +242,10 @@ let base;
     await p.waitForSelector(".item");
     check("signed in: email, log ud, sound toggle in header", /mor@familie\.dk/.test(await p.textContent("#who")) && await p.isVisible("#logoutBtn") && await p.isVisible("#soundBtn"));
     const st = await p.textContent("#status");
-    check("status line: last updated, every quarter, Black Friday", /opdateret/.test(st) && /hvert kvarter/.test(st) && /Black Friday/.test(st), st);
+    check("status line: last updated and Black Friday, no update interval", /^Opdateret /.test(st) && !/kvarter/.test(st) && /Black Friday/.test(st), st);
     check("six rows shown", (await p.locator(".item").count()) === 6);
     const pend = await p.locator('.item[data-status="pending"]').textContent();
-    check("pending row text", /Henter produktet … klar inden for et kvarter/.test(pend), pend);
+    check("pending row text", /Henter produktet …/.test(pend) && !/kvarter/.test(pend), pend);
     check("pending row uses placeholder name until title", /Nyt produkt/.test(pend));
     const ch = p.locator('.item[data-status="choose"]');
     check("choose row opens by itself with 3 variants and prices", (await ch.locator('input[data-var]').count()) === 3 && /fra 2\.049 kr\./.test(await ch.textContent()) && /8 tilbud/.test(await ch.textContent()));
@@ -257,7 +257,7 @@ let base;
     const tr = p.locator('.item[data-status="tracking"]').first();
     await p.locator('.item[data-status="tracking"] .head').first().click();
     const tt = await p.locator('.item[data-status="tracking"] .body').first().textContent();
-    check("tracking row: verdict, stats, chart, shops table, goal edit, prefs, change variant", /Laveste nu/.test(tt) && /Normalpris/.test(tt) && /Butikker/.test(tt) && /Skift variant/.test(tt) && /Butikker for dette produkt/.test(tt) && await p.locator(".chart svg").first().isVisible(), tt.slice(0, 200));
+    check("tracking row: verdict, stats, chart, shops table, goal edit, prefs, change variant", /Laveste 30 dage/.test(tt) && /Normalpris/.test(tt) && /Butikker/.test(tt) && /Skift variant/.test(tt) && /Butiksvalg/.test(tt) && await p.locator(".chart svg").first().isVisible(), tt.slice(0, 200));
     // chart interactions
     await p.locator(".chart svg").first().scrollIntoViewIfNeeded();
     const box = await p.locator(".chart svg").first().boundingBox();
@@ -279,18 +279,18 @@ let base;
     const p = await open({ products: [row("test-dyson-v15", { id: "dy" }), shopRow, shopPending], label: "single-shop" });
     await p.waitForSelector(".item");
     const sp = p.locator('.item[data-status="pending"]');
-    check("single-shop pending: normal pending text", /Henter produktet … klar inden for et kvarter/.test(await sp.locator(".head").textContent()) && !/prisjagt/.test(await sp.textContent()), await sp.textContent());
+    check("single-shop pending: normal pending text", /Henter produktet …/.test(await sp.locator(".head").textContent()) && !/prisjagt/.test(await sp.textContent()), await sp.textContent());
     await sp.locator(".head").click();
-    check("single-shop pending body: the normal text, nothing about prisjagt or variants", /Henter produktet … klar inden for et kvarter\./.test(await sp.locator(".body").textContent()) && !/prisjagt|variant/i.test(await sp.locator(".body").textContent()), await sp.locator(".body").textContent());
+    check("single-shop pending body: nothing about prisjagt or variants", !/prisjagt|variant|kvarter/i.test(await sp.locator(".body").textContent()), await sp.locator(".body").textContent());
     const it = p.locator('.item[data-status="tracking"]').nth(1);
     await it.locator(".head").click();
     const bt = await it.locator(".body").textContent();
-    check("single-shop detail: quiet line, shop in the table, remark about several variants", /Følger kun denne butik\. Indsæt et link fra prisjagt\.dk for at sammenligne flere butikker\./.test(bt) && /Bedre Nætter/.test(bt) && /flere varianter med forskellige priser/.test(bt) && /579 kr\./.test(bt), bt.slice(0, 300));
-    check("single-shop detail: no 'Skift variant', no 'Følger:' line", !/Skift variant/.test(bt) && !/Følger:/.test(bt) && (await it.locator('[data-act="change"]').count()) === 0);
-    check("single-shop with archive points (fixture history): the Internet Archive note, not the prisjagt wording", /Ældre priser stammer fra Internet Archive og kan have huller\./.test(bt) && !/offentlige prisoversigter/.test(bt), bt.slice(0, 300));
+    check("single-shop detail: quiet line, shop in the table, remark about several variants", /Kun denne butik\. Et link fra prisjagt\.dk sammenligner flere\./.test(bt) && /Bedre Nætter/.test(bt) && /flere varianter med forskellige priser/.test(bt) && /579 kr\./.test(bt), bt.slice(0, 300));
+    check("single-shop detail: no 'Skift variant', no 'Variant:' line", !/Skift variant/.test(bt) && !/Variant:/.test(bt) && (await it.locator('[data-act="change"]').count()) === 0);
+    check("single-shop with archive points (fixture history): the short gaps note", /Ældre priser kan være upræcise og have huller\./.test(bt), bt.slice(0, 300));
     const other = await p.locator('.item[data-status="tracking"]').first().locator(".body");
     await p.locator('.item[data-status="tracking"]').first().locator(".head").click();
-    check("prisjagt product still has 'Skift variant' and no single-shop line", /Skift variant/.test(await other.textContent()) && !/Følger kun denne butik/.test(await other.textContent()));
+    check("prisjagt product still has 'Skift variant' and no single-shop line", /Skift variant/.test(await other.textContent()) && !/Kun denne butik/.test(await other.textContent()));
     await p.context().close();
     // a single-shop product without archive points: no note about older prices
     const plainRow = Object.assign({}, shopRow, { id: "pl", history: [{ d: "2026-11-10", p: 599, s: "Bedre Nætter", src: "check" }, { d: "2026-11-16", p: 579, s: "Bedre Nætter", src: "check" }] });
@@ -313,7 +313,7 @@ let base;
     await p.waitForFunction(() => window.__db.writes().length > 0);
     const o = (await ops(p))[0];
     check("choose: writes tracked_variants", o.table === "products" && o.op === "update" && JSON.stringify(o.payload) === '{"tracked_variants":["va","vc"]}' && o.filters[0][1] === "c1", JSON.stringify(o));
-    await p.waitForFunction(() => /Varianten er valgt/.test(document.body.textContent));
+    await p.waitForFunction(() => /valgte variant/.test(document.body.textContent));
     check("choose: row waits for next fetch afterwards", true);
     await p.context().close();
   }
@@ -323,7 +323,8 @@ let base;
     const p = await open({ products: [], label: "add" });
     await p.waitForSelector("#addForm:not([hidden])");
     await p.click(".goal label:has(#fTypePrice)");
-    check("add: empty list text and how-to line", /Ingen produkter endnu/.test(await p.textContent("#list")) && /Et link fra prisjagt\.dk giver priser fra mange butikker/.test(await p.textContent("#fHelp")) && /link til én butik følger kun den butik/.test(await p.textContent("#fHelp")) && /et navn finder vi produktet til/.test(await p.textContent("#fHelp")) && (await p.getAttribute("#fMain", "placeholder")) === "Produktnavn eller link" && (await p.textContent('label[for="fMain"]')) === "Produktnavn eller link" && (await p.locator("#fName").count()) === 0);
+    check("footer: tip rules sit in a collapsed details next to Indstillinger", !(await p.evaluate(() => document.getElementById("howBox").open)) && /Sådan vurderer vi tilbud/.test(await p.textContent("#howBox summary")) && !(await p.isVisible("#howBox p")) && /laveste pris de seneste 30 dage/.test(await p.textContent("#howBox")) && !/hvert kvarter/.test(await p.innerText("#appView .access, #tryRow")) );
+    check("add: empty list text, placeholder names all three inputs, no explanatory paragraphs", /Ingen produkter endnu/.test(await p.textContent("#list")) && (await p.getAttribute("#fMain", "placeholder")) === "Produktnavn, link eller ønskeliste" && (await p.textContent('label[for="fMain"]')) === "Produktnavn, link eller ønskeliste" && (await p.locator("#fHelp").count()) === 0 && (await p.locator("#fName").count()) === 0);
     for (const bad of ["", "http://prisjagt.dk/p/1", "http://www.bedrenaetter.dk/x.html", "ftp://shop.dk/x", "https://prisjagt.dk/", "javascript:alert(1)", "www.example.com/x", "prisjagt.dk.evil.com/p/1", "https://localhost/x", "https://intranet/x", "https://127.0.0.1/x", "https://user:pw@shop.dk/x", "https://shop.dk:8443/x"]) {
       await p.fill("#fMain", bad); await p.fill("#fVal", "1000"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
       const vis = await p.isVisible("#fMsg");
@@ -349,7 +350,7 @@ let base;
     await p.waitForFunction(() => window.__db.writes().length === 3);
     o = (await ops(p))[2];
     check("add: single-shop link accepted (name placeholder, source_url, no extra fields)", JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html", target_type: "price", target_value: 450, active: true }), JSON.stringify(o.payload));
-    await p.waitForFunction(() => /Henter produktet … klar inden for et kvarter/.test(document.getElementById("list").textContent));
+    await p.waitForFunction(() => /Henter produktet …/.test(document.getElementById("list").textContent));
     check("add: shop link row shows the normal pending text", true);
     check("add: field is cleared after saving", (await p.inputValue("#fMain")) === "" && (await p.inputValue("#fVal")) === "");
     // by name: no source_url
@@ -362,7 +363,7 @@ let base;
     await p.waitForFunction(() => window.__db.writes().length === 4);
     o = (await ops(p))[3];
     check("add: name only -> {name, target_type, target_value} without source_url", JSON.stringify(o.payload) === JSON.stringify({ name: "Sony WH-1000XM5 sort", target_type: "price", target_value: 1700 }), JSON.stringify(o.payload));
-    await p.waitForFunction(() => /Finder produktet … det kan tage op til en time\./.test(document.getElementById("list").textContent));
+    await p.waitForFunction(() => /Finder produktet …/.test(document.getElementById("list").textContent));
     check("add: name-only row shows 'Finder produktet …'", true);
     await p.fill("#fMain", "https://prisjagt.dk/produkt/x"); await p.fill("#fVal", "99"); await p.click(".goal label:has(#fTypePct)"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
     check("add: % above 95 rejected", (await ops(p)).length === 4 && /95/.test(await p.textContent("#fMsg")));
@@ -380,13 +381,13 @@ let base;
     const p = await open({ products: [nameRow, nameErr], width: 400, label: "name-only" });
     await p.waitForSelector(".item");
     const pend = p.locator('.item[data-status="pending"]'), er = p.locator('.item[data-status="error"]');
-    check("name-only pending: head text", /Finder produktet … det kan tage op til en time\./.test(await pend.locator(".head").textContent()) && !/klar inden for et kvarter/.test(await pend.textContent()));
+    check("name-only pending: head text", /Finder produktet …/.test(await pend.locator(".head").textContent()) && !/kvarter|time/.test(await pend.textContent()));
     await pend.locator(".head").click(); await er.locator(".head").click();
     const pt = await pend.locator(".body").textContent();
-    check("name-only pending: 'Har du travlt? Find det selv:' and paste form", /Har du travlt\? Find det selv:/.test(pt) && /Indsæt linket her/.test(pt) && await pend.locator("[data-fixurl]").isVisible());
+    check("name-only pending: search link and paste form, no filler", /Søg selv på Prisjagt/.test(pt) && !/Har du travlt/.test(pt) && /Indsæt linket her/.test(pt) && await pend.locator("[data-fixurl]").isVisible());
     const lk = pend.locator(".body a");
-    check("name-only pending: 'Søg på Prisjagt' link with encoded name, new tab, noopener",
-      (await lk.count()) === 1 && (await lk.textContent()) === "Søg på Prisjagt" && (await lk.getAttribute("href")) === "https://prisjagt.dk/search?search=" + encodeURIComponent(nameRow.name) && (await lk.getAttribute("target")) === "_blank" && /noopener/.test(await lk.getAttribute("rel")), await lk.getAttribute("href"));
+    check("name-only pending: 'Søg selv på Prisjagt' link with encoded name, new tab, noopener",
+      (await lk.count()) === 1 && (await lk.textContent()) === "Søg selv på Prisjagt" && (await lk.getAttribute("href")) === "https://prisjagt.dk/search?search=" + encodeURIComponent(nameRow.name) && (await lk.getAttribute("target")) === "_blank" && /noopener/.test(await lk.getAttribute("rel")), await lk.getAttribute("href"));
     check("name-only: name is escaped (no injected markup)", (await pend.locator("h2 b").count()) === 0 && (await pend.locator("h2").textContent()) === nameRow.name);
     const et = await er.locator(".body").textContent();
     const elk = er.locator(".body a");
@@ -406,7 +407,7 @@ let base;
     await p.waitForFunction(() => window.__db.writes().length === 1);
     let o = (await ops(p))[0];
     check("name-only: a link to a single shop writes source_url only (www. kept for shops)", o.table === "products" && o.op === "update" && JSON.stringify(o.payload) === '{"source_url":"https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html"}' && o.filters[0][1] === "n1", JSON.stringify(o));
-    await p.waitForFunction(() => /Henter produktet … klar inden for et kvarter/.test(document.querySelector('.item[data-status="pending"] .head').textContent));
+    await p.waitForFunction(() => /Henter produktet …/.test(document.querySelector('.item[data-status="pending"] .head').textContent));
     check("name-only: row then shows the normal 'Henter produktet …'", /Dit link/.test(await p.locator('.item[data-status="pending"]').textContent()) || true);
     await p.fill("#u-n2", "https://prisjagt.dk/product.php?p=77"); await p.click('[data-fixurl="n2"] button[type=submit]');
     await p.waitForFunction(() => window.__db.writes().length === 2);
@@ -419,8 +420,8 @@ let base;
   {
     const p = await open({ products: [], label: "add-auto" });
     await p.waitForSelector("#addForm:not([hidden])");
-    check("add auto: default choice is 'Giv besked ved et godt tilbud', amount field hidden",
-      await p.isChecked("#fTypeAuto") && /Giv besked ved et godt tilbud/.test(await p.textContent(".goal")) && !(await p.isVisible("#fAmount")) && /godt tilbud/.test(await p.textContent("#fHint")));
+    check("add auto: default choice is 'Godt tilbud', amount and hint hidden",
+      await p.isChecked("#fTypeAuto") && /Godt tilbud/.test(await p.textContent(".goal")) && !(await p.isVisible("#fAmount")) && !(await p.isVisible("#fHint")));
     await p.fill("#fMain", "Sony WH-1000XM5 sort"); await p.click("#fSubmit");
     await p.waitForFunction(() => window.__db.writes().length === 1);
     let o = (await ops(p))[0];
@@ -449,7 +450,7 @@ let base;
     check("auto goal: head says 'godt tilbud' and the deal is shown as a hit", /godt tilbud/.test(head) && /Godt tilbud/.test(head) && !/mål \d/.test(head) && (await it.getAttribute("class")).indexOf("hit") >= 0, head);
     await p.locator('.head[data-id="dy"]').click();
     const body = await p.locator('.item:has(.head[data-id="dy"]) .body').textContent();
-    check("auto goal: one sentence says why", /Derfor giver vi besked: 3\.999 kr\. er 13 % under normalprisen/.test(body), body.slice(0, 300));
+    check("auto goal: the verdict says why, not repeated in a second line", /3\.999 kr\. er 13 % under normalprisen/.test(body) && !/Derfor giver vi besked/.test(body) && body.split("er 13 % under normalprisen").length === 2, body.slice(0, 300));
     check("auto goal: edit form has the three choices, auto selected, no number field",
       (await p.inputValue("#et-dy")) === "auto" && (await p.locator("#et-dy option").count()) === 3 && !(await p.isVisible("#e-dy")));
     // suggested goals
@@ -487,9 +488,9 @@ let base;
     const thin = row("test-dyson-v15", { id: "th", target_type: "auto", target_value: null, normal_price: null, verdict: { level: "unknown", text: "Der er endnu ikke nok prishistorik til at vurdere prisen." }, history: [{ d: "2026-11-10", p: 5000, s: "A", src: "check" }, { d: "2026-11-16", p: 3999, s: "Elgiganten", src: "check" }] });
     const r = await open({ products: [thin], label: "auto-thin" });
     await r.waitForSelector(".item"); await r.locator('.head[data-id="th"]').click();
-    check("auto goal: too little history -> 20 % under the first price is explained", /Derfor giver vi besked: 3\.999 kr\. er 20 % under den første pris, vi har set \(5\.000 kr\.\)\./.test(await r.textContent('.item .body')), (await r.textContent('.item .body')).slice(0, 200));
+    check("auto goal: too little history -> 20 % under the first price is explained", /3\.999 kr\. er 20 % under første pris \(5\.000 kr\.\)\./.test(await r.textContent('.item .body')), (await r.textContent('.item .body')).slice(0, 200));
     await r.evaluate(() => { var d = window.__db.products[0]; d.history[0].p = 4200; window.__emit(); });
-    await r.waitForFunction(() => !/Derfor giver vi besked/.test(document.querySelector(".item .body").textContent));
+    await r.waitForFunction(() => !/under første pris/.test(document.querySelector(".item .body").textContent));
     check("auto goal: only 5 % under the first price -> no hit, no sentence", (await r.getAttribute(".item", "class")).indexOf("hit") < 0);
     await r.context().close();
     await p.context().close();
@@ -604,7 +605,7 @@ let base;
   // 13. ask for access (signed out)
   {
     const p = await open({ session: false, label: "ask" });
-    check("ask: link under the login form, form hidden at first", /Har du ikke adgang endnu\? Bed om adgang/.test(await p.textContent("#askToggle")) && !(await p.isVisible("#askForm")));
+    check("ask: link under the login form, form hidden at first", /Ingen adgang endnu\? Bed om adgang/.test(await p.textContent("#askToggle")) && !(await p.isVisible("#askForm")));
     await p.click("#askToggle");
     check("ask: link reveals e-mail and name fields", await p.isVisible("#aEmail") && await p.isVisible("#aName") && await p.isVisible("#aSubmit"));
     await p.fill("#aEmail", "ikke-en-adresse"); await p.click("#aSubmit");
@@ -615,7 +616,7 @@ let base;
       ["allowed", /allerede adgang.*login-formularen ovenfor/],
       ["full", /mange anmodninger/],
       ["invalid", /gyldig e-mailadresse/],
-      ["rejected", /ikke givet adgang/]
+      ["rejected", /fik ikke adgang/]
     ];
     for (const [reply, re] of replies) {
       await p.evaluate(r => { window.__db.askReply = r; window.__db.rpcs.length = 0; }, reply);
@@ -650,7 +651,7 @@ let base;
     const w = await open({ session: false, width: 400, label: "ask-400" });
     await w.click("#askToggle"); await w.fill("#aEmail", "en.meget.lang.adresse.der.fylder.en.del@et-langt-domaenenavn-til-test.example.dk");
     await w.evaluate(() => { window.__db.askReply = "rejected"; }); await w.click("#aSubmit");
-    await w.waitForFunction(() => /ikke givet adgang/.test(document.getElementById("aMsg").textContent));
+    await w.waitForFunction(() => /fik ikke adgang/.test(document.getElementById("aMsg").textContent));
     const ow = await w.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
     check("ask: no horizontal overflow at 400 px (form open, message shown)", ow.sw <= ow.cw, JSON.stringify(ow));
     await w.context().close();
@@ -683,13 +684,13 @@ let base;
     await p.click('#reqList [data-aact="cancel"]');
     check("admin: 'Behold' cancels", (await p.locator('#reqList [data-aact="approve"]').count()) === 1 && (await p.evaluate(() => window.__db.rpcs.filter(r => r.name === "admin_decide").length)) === 0);
     await p.click('#reqList [data-aact="reject"]'); await p.click('#reqList [data-aact="reject-yes"]');
-    await p.waitForFunction(() => /Ingen venter/.test(document.getElementById("reqList").textContent));
+    await p.waitForFunction(() => /Ingen anmodninger/.test(document.getElementById("reqList").textContent));
     calls = await p.evaluate(() => window.__db.rpcs.filter(r => r.name === "admin_decide"));
     check("admin: confirmed Afvis calls admin_decide(email, false) and the row disappears", calls.length === 1 && calls[0].args.p_email === "lis@example.dk" && calls[0].args.p_approve === false);
     check("admin: badge hidden when nothing waits", !(await p.isVisible("#reqBadge")));
     // who has access
     await p.click("#allowedBox summary");
-    check("admin: list of who has access; no removal offered for the owner", (await p.locator('#allowedList [data-aact="remove"]').count()) === 2 && !/mor@familie\.dk[^]*Fjern adgang[^]*kim/.test("") && /Ejer/.test(await p.textContent("#allowedList")) && /produkter bliver liggende/.test(await p.textContent("#allowedBox")));
+    check("admin: list of who has access; no removal offered for the owner", (await p.locator('#allowedList [data-aact="remove"]').count()) === 2 && !/mor@familie\.dk[^]*Fjern adgang[^]*kim/.test("") && /Ejer/.test(await p.textContent("#allowedList")) && /Personens produkter beholdes/.test(await p.textContent("#allowedBox")));
     check("admin: owner row has no 'Fjern adgang'", (await p.locator('#allowedList .req', { hasText: "mor@familie.dk" }).locator('[data-aact="remove"]').count()) === 0);
     await p.evaluate(() => { window.__db.rpcs.length = 0; });
     await p.click('#allowedList .req:has-text("far@familie.dk") [data-aact="remove"]');
@@ -715,7 +716,7 @@ let base;
     // the 60-second poll refreshes the section (the timer is faked to run at once)
     const t = await open({ admin: true, requests: [], allowed: allowed(), label: "admin-poll" });
     await t.waitForSelector("#accessBox:not([hidden])");
-    check("admin: empty state text", /Ingen venter på svar/.test(await t.textContent("#reqList")) && !(await t.isVisible("#reqBadge")));
+    check("admin: empty state text", /Ingen anmodninger/.test(await t.textContent("#reqList")) && !(await t.isVisible("#reqBadge")));
     await t.evaluate(() => { window.__db.requests.push({ email: "ny@example.dk", name: "Ny", created_at: "2026-11-16T09:00:00Z" }); });
     await t.evaluate(() => { window.__tick(); });
     await t.waitForFunction(() => /ny@example\.dk/.test(document.getElementById("reqList").textContent));
@@ -1013,13 +1014,13 @@ let base;
       await p.waitForSelector("#importBox .impl");
       const ls = await lines(p);
       check("status lines: pending, done (+ note), done with cap note, error note, singular, zero, error without note; newest first", JSON.stringify(ls) === JSON.stringify([
-        "Henter ønsker fra Ønskeskyen. De er klar inden for et kvarter.",
+        "Henter ønsker fra Ønskeskyen …",
         "12 ønsker tilføjet fra Ønskeskyen. De er lagt på en ny liste, Fødselsdagsønsker.",
         "7 ønsker tilføjet fra Ønskeskyen. Der var kun plads til 7 af 12 ønsker. Du kan højst følge 40 varer.",
         "Ønskelisten er ikke offentlig eller findes ikke. Bed ejeren om at dele den offentligt.",
         "1 ønske tilføjet fra Ønskeskyen.",
         "0 ønsker tilføjet fra Ønskeskyen. 3 ønsker fandtes allerede.",
-        "Ønskerne kunne ikke hentes fra Ønskeskyen.",
+        "Ønskelisten kunne ikke hentes.",
       ]), JSON.stringify(ls));
       check("status lines: 'Skjul' on done and error lines only, none on the pending one", (await p.locator('#importBox [data-iact="hide"]').count()) === 6 && (await p.locator('#importBox .impl[data-istatus="pending"] button').count()) === 0);
       check("status lines sit right below the list chips", await p.evaluate(() => document.getElementById("listsBox").nextElementSibling.id === "importBox"));
@@ -1047,7 +1048,7 @@ let base;
       const p = await open({ products: [], label: "wish-flow" });
       await p.waitForSelector("#addForm:not([hidden])");
       await send(p, "https://onskeskyen.dk/s/e0mfx8");
-      check("after adding: the pending line is shown", JSON.stringify(await lines(p)) === JSON.stringify(["Henter ønsker fra Ønskeskyen. De er klar inden for et kvarter."]));
+      check("after adding: the pending line is shown", JSON.stringify(await lines(p)) === JSON.stringify(["Henter ønsker fra Ønskeskyen …"]));
       for (let i = 0; i < 4; i++) await send(p, "https://onskeskyen.dk/s/kode" + i);
       check("5 pending imports are accepted", (await lines(p)).length === 5);
       const before = (await writesOf(p)).length;
@@ -1143,12 +1144,17 @@ let base;
       await p.context().close();
     }
 
-    // the hint under the add field
+    // the hint under the add field: only for the choices that need a number
     {
       const p = await open({ products: [], label: "wish-hint" });
       await p.waitForSelector("#addForm:not([hidden])");
-      const h = await p.textContent("#fHelp");
-      check("hint under the add field mentions Ønskeskyen and keeps the old text", /Et delt link fra Ønskeskyen henter hele ønskelisten\./.test(h) && /et navn finder vi produktet til/.test(h) && !/—/.test(h), h);
+      const none = !(await p.isVisible("#fHint"));
+      await p.click(".goal label:has(#fTypePrice)");
+      const price = await p.isVisible("#fHint") && (await p.textContent("#fHint")) === "Varen skal være på lager.";
+      await p.click(".goal label:has(#fTypePct)");
+      const pct = (await p.textContent("#fHint")) === "Regnes fra normalprisen.";
+      await p.click(".goal label:has(#fTypeAuto)");
+      check("hint under the add field: none for the default, one short line for price and percent", none && price && pct && !(await p.isVisible("#fHint")));
       await p.context().close();
     }
   }

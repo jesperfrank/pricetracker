@@ -30,7 +30,7 @@
 
   <!-- signed out -->
   <section id="authView" hidden>
-    <p class="lead">Hold øje med prisen på en vare, og få en e-mail, når den er til den pris, du vil give.</p>
+    <p class="lead">Få en e-mail, når en vare bliver billig.</p>
     <form class="login" id="loginForm" novalidate>
       <label class="vh" for="lEmail">E-mailadresse</label>
       <input class="inp" type="email" id="lEmail" autocomplete="email" inputmode="email" required placeholder="Din e-mailadresse">
@@ -39,17 +39,16 @@
     <p class="msg" id="lMsg" role="alert" hidden></p>
     <div class="sent" id="sentBox" hidden>
       <b>Tjek din indbakke</b>
-      <p>Vi har sendt et login-link til <span class="n" id="sentTo"></span>. Åbn det på denne enhed. Kommer der ikke noget inden for et par minutter, så kig i uønsket post.</p>
+      <p>Login-link sendt til <span class="n" id="sentTo"></span>. Åbn det på denne enhed. Intet at se? Tjek uønsket post.</p>
       <button type="button" class="link" id="sentBack">Brug en anden adresse</button>
     </div>
-    <p class="hint">Siden er kun for inviterede. Har du ikke adgang endnu, kan du bede ejeren om den.</p>
-    <p class="fine ask-row"><button type="button" class="link" id="askToggle" aria-expanded="false" aria-controls="askBox">Har du ikke adgang endnu? Bed om adgang</button></p>
+    <p class="fine ask-row"><button type="button" class="link" id="askToggle" aria-expanded="false" aria-controls="askBox">Ingen adgang endnu? Bed om adgang</button></p>
     <div id="askBox" hidden>
       <form class="login ask" id="askForm" novalidate>
         <label class="vh" for="aEmail">E-mailadresse</label>
         <input class="inp" type="email" id="aEmail" autocomplete="email" inputmode="email" maxlength="200" required placeholder="Din e-mailadresse">
         <label class="vh" for="aName">Dit navn</label>
-        <input class="inp" type="text" id="aName" autocomplete="name" maxlength="80" placeholder="Dit navn, så ejeren ved, hvem du er">
+        <input class="inp" type="text" id="aName" autocomplete="name" maxlength="80" placeholder="Dit navn">
         <button class="btn" id="aSubmit" type="submit">Bed om adgang</button>
       </form>
       <p class="info" id="aMsg" role="status" hidden></p>
@@ -59,10 +58,10 @@
   <!-- signed in -->
   <section id="appView" hidden>
     <form class="add auto" id="addForm" autocomplete="off" novalidate>
-      <label class="vh" for="fMain">Produktnavn eller link</label>
-      <input class="inp url" type="text" id="fMain" maxlength="500" required placeholder="Produktnavn eller link">
+      <label class="vh" for="fMain">Produktnavn, link eller ønskeliste</label>
+      <input class="inp url" type="text" id="fMain" maxlength="500" required placeholder="Produktnavn, link eller ønskeliste">
       <div class="goal" role="radiogroup" aria-label="Hvornår vil du have besked?">
-        <label><input type="radio" name="fType" id="fTypeAuto" value="auto" checked><span>Giv besked ved et godt tilbud</span></label>
+        <label><input type="radio" name="fType" id="fTypeAuto" value="auto" checked><span>Godt tilbud</span></label>
         <label><input type="radio" name="fType" id="fTypePrice" value="price"><span>Pris under … kr.</span></label>
         <label><input type="radio" name="fType" id="fTypePct" value="pct"><span>Rabat på mindst … %</span></label>
       </div>
@@ -73,15 +72,14 @@
       <button class="btn" id="fSubmit" type="submit">Hold øje</button>
     </form>
     <p class="msg" id="fMsg" role="alert" hidden></p>
-    <p class="hint" id="fHelp">Et link fra prisjagt.dk giver priser fra mange butikker, et link til én butik følger kun den butik, og et navn finder vi produktet til. Et delt link fra Ønskeskyen henter hele ønskelisten.</p>
-    <p class="hint" id="fHint">Du får besked, når prisen er et godt tilbud: klart under normalprisen og den laveste i 30 dage. Er der for lidt historik, når prisen mindst 10 % under den første pris, vi har set.</p>
-    <p class="notice" id="readonly" hidden>Din adresse har ikke adgang til at gemme endnu. Bed ejeren om at tilføje den.</p>
+    <p class="hint" id="fHint" hidden></p>
+    <p class="notice" id="readonly" hidden>Du har ikke adgang til at gemme endnu. Bed ejeren om adgang.</p>
 
     <nav class="lists" id="listsBox" aria-label="Lister" hidden>
       <div class="chips" id="chips"></div>
       <form class="listform" id="listForm" autocomplete="off" novalidate hidden>
         <label class="vh" for="lfName" id="lfLabel">Navn på den nye liste</label>
-        <input class="inp" type="text" id="lfName" maxlength="40" placeholder="Navn på listen, fx Elektronik">
+        <input class="inp" type="text" id="lfName" maxlength="40" placeholder="Listenavn">
         <button class="btn small" id="lfSave" type="submit">Opret liste</button>
         <button class="link" id="lfCancel" type="button">Annuller</button>
       </form>
@@ -92,19 +90,22 @@
     <div class="imports" id="importBox" aria-live="polite" hidden></div>
 
     <section class="list" id="list" aria-live="polite">
-      <div class="empty"><b>Her kommer dine produkter</b>Laveste pris lige nu, butikkerne der fører varen, og prisen dag for dag.</div>
+      <div class="empty"><b>Her kommer dine produkter</b></div>
     </section>
 
-    <p class="fine">Et tilbud vurderes mod den laveste pris de seneste 30 dage og mod normalprisen, ikke mod butikkens egen førpris. Fragt er ikke regnet med, medmindre det står ved butikken. Listen er din egen og vises kun for dig. Priserne hentes automatisk hvert kvarter.</p>
+    <details class="fine" id="howBox">
+      <summary>Sådan vurderer vi tilbud</summary>
+      <p>Et tilbud vurderes mod den laveste pris de seneste 30 dage og mod normalprisen, ikke mod butikkens egen førpris. Er der for lidt historik, skal prisen være mindst 10 % under den første pris, vi har set. Fragt er ikke med, medmindre det står ved butikken. Priserne hentes hvert kvarter, og listen er kun din.</p>
+    </details>
     <details class="fine" id="settingsBox">
       <summary>Indstillinger</summary>
       <form id="shopForm">
-        <label for="shAlways">Tjek altid disse butikker eller sider</label>
+        <label for="shAlways">Tjek altid</label>
         <input type="text" id="shAlways" maxlength="600" placeholder="fx Proshop, hifiklubben.dk, Magasin">
-        <label for="shExclude">Udelad disse butikker</label>
-        <input type="text" id="shExclude" maxlength="600" placeholder="fx butikker du ikke vil handle hos">
-        <label class="chk"><input type="checkbox" id="shOnly"> Vis kun priser og giv kun besked fra butikkerne på min “tjek altid”-liste</label>
-        <label class="chk"><input type="checkbox" id="shNotify" checked> Send mig en e-mail, når et mål er nået</label>
+        <label for="shExclude">Udelad</label>
+        <input type="text" id="shExclude" maxlength="600" placeholder="fx Elgiganten">
+        <label class="chk"><input type="checkbox" id="shOnly"> Kun butikker fra “tjek altid”</label>
+        <label class="chk"><input type="checkbox" id="shNotify" checked> Send e-mail, når et mål er nået</label>
         <span><button class="link" type="submit">Gem</button> <span id="shMsg" role="status"></span></span>
       </form>
     </details>
@@ -115,7 +116,7 @@
       <details id="allowedBox">
         <summary id="allowedSum">Hvem har adgang</summary>
         <div id="allowedList"></div>
-        <p class="meta">Fjerner du en persons adgang, stopper det kun fremtidig adgang. Personens produkter bliver liggende i databasen.</p>
+        <p class="meta">Personens produkter beholdes.</p>
       </details>
     </section>
     <p class="fine" id="tryRow"><button type="button" class="link" id="tryBtn">Prøv lyden</button></p>
