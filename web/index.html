@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="da">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Prisvagten</title>
+<meta name="description" content="Prisvagten holder øje med priser på prisjagt.dk og sender en e-mail, når målet er nået.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="top">
+      <h1>Prisvagten</h1>
+      <span class="acts" id="acts" hidden>
+        <button type="button" class="link sound" id="soundBtn" aria-pressed="true">Lyd til</button>
+        <span class="who" id="who"></span>
+        <button type="button" class="link sound" id="logoutBtn">Log ud</button>
+      </span>
+    </div>
+    <p class="status" id="status"></p>
+  </header>
+
+  <!-- not set up -->
+  <p class="notice" id="setupMsg" hidden>Prisvagten er ikke sat op endnu. Der mangler forbindelse til databasen: <code>supabaseUrl</code> og <code>supabaseAnonKey</code> i <code>config.js</code> er tomme.</p>
+
+  <!-- signed out -->
+  <section id="authView" hidden>
+    <p class="lead">Hold øje med prisen på en vare fra prisjagt.dk, og få en e-mail, når den er til den pris, du vil give.</p>
+    <form class="login" id="loginForm" novalidate>
+      <label class="vh" for="lEmail">E-mailadresse</label>
+      <input class="inp" type="email" id="lEmail" autocomplete="email" inputmode="email" required placeholder="Din e-mailadresse">
+      <button class="btn" id="lSubmit" type="submit">Send login-link</button>
+    </form>
+    <p class="msg" id="lMsg" role="alert" hidden></p>
+    <div class="sent" id="sentBox" hidden>
+      <b>Tjek din indbakke</b>
+      <p>Vi har sendt et login-link til <span class="n" id="sentTo"></span>. Åbn det på denne enhed. Kommer der ikke noget inden for et par minutter, så kig i uønsket post.</p>
+      <button type="button" class="link" id="sentBack">Brug en anden adresse</button>
+    </div>
+    <p class="hint">Siden er kun for inviterede. Står din adresse ikke på listen, skal ejeren tilføje den først.</p>
+  </section>
+
+  <!-- signed in -->
+  <section id="appView" hidden>
+    <form class="add" id="addForm" autocomplete="off" novalidate>
+      <label class="vh" for="fUrl">Link fra prisjagt.dk</label>
+      <input class="inp url" type="url" id="fUrl" maxlength="500" required placeholder="Link fra prisjagt.dk">
+      <label class="vh" for="fName">Eget navn (valgfrit)</label>
+      <input class="inp name" type="text" id="fName" maxlength="140" placeholder="Eget navn (valgfrit)">
+      <div class="amount">
+        <label class="vh" for="fVal" id="fValLabel">Højeste pris i kroner</label>
+        <input class="inp n" type="number" id="fVal" min="1" step="1" required inputmode="numeric" placeholder="Højst">
+        <div class="unit" role="radiogroup" aria-label="Mål i kroner eller procent">
+          <label><input type="radio" name="fType" id="fTypePrice" value="price" checked><span>kr.</span></label>
+          <label><input type="radio" name="fType" id="fTypePct" value="pct"><span>%</span></label>
+        </div>
+      </div>
+      <button class="btn" id="fSubmit" type="submit">Hold øje</button>
+    </form>
+    <p class="msg" id="fMsg" role="alert" hidden></p>
+    <p class="hint" id="fHelp">Søg efter varen på prisjagt.dk, åbn den, og kopier adressen fra browserens adressefelt.</p>
+    <p class="hint" id="fHint">Du får besked, når varen er på lager til den pris eller under.</p>
+    <p class="notice" id="readonly" hidden>Din adresse har ikke adgang til at gemme endnu. Bed ejeren om at tilføje den.</p>
+
+    <section class="list" id="list" aria-live="polite">
+      <div class="empty"><b>Her kommer dine produkter</b>Laveste pris lige nu, butikkerne der fører varen, og prisen dag for dag.</div>
+    </section>
+
+    <p class="fine">Et tilbud vurderes mod den laveste pris de seneste 30 dage og mod normalprisen, ikke mod butikkens egen førpris. Fragt er ikke regnet med, medmindre det står ved butikken. Listen er din egen og vises kun for dig. Priserne hentes automatisk hvert kvarter.</p>
+    <details class="fine" id="settingsBox">
+      <summary>Indstillinger</summary>
+      <form id="shopForm">
+        <label for="shAlways">Tjek altid disse butikker eller sider</label>
+        <input type="text" id="shAlways" maxlength="600" placeholder="fx Proshop, hifiklubben.dk, Magasin">
+        <label for="shExclude">Udelad disse butikker</label>
+        <input type="text" id="shExclude" maxlength="600" placeholder="fx butikker du ikke vil handle hos">
+        <label class="chk"><input type="checkbox" id="shOnly"> Vis kun priser og giv kun besked fra butikkerne på min “tjek altid”-liste</label>
+        <label class="chk"><input type="checkbox" id="shNotify" checked> Send mig en e-mail, når et mål er nået</label>
+        <span><button class="link" type="submit">Gem</button> <span id="shMsg" role="status"></span></span>
+      </form>
+    </details>
+    <p class="fine" id="tryRow"><button type="button" class="link" id="tryBtn">Prøv lyden</button></p>
+  </section>
+</div>
+
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
