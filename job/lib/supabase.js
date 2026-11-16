@@ -4,13 +4,15 @@
 function makeClient(baseUrl, key, fetchImpl) {
   const base = String(baseUrl).replace(/\/+$/, '');
   const f = fetchImpl || fetch;
+  // New-style Supabase keys (sb_secret_...) are not JWTs: they go in `apikey` only. Legacy service_role JWTs go in both headers.
+  const auth = /^sb_/.test(String(key)) ? { apikey: key } : { apikey: key, Authorization: 'Bearer ' + key };
   async function call(method, path, body, extra) {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), 30000);
     try {
       const r = await f(base + path, {
         method,
-        headers: Object.assign({ apikey: key, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, extra || {}),
+        headers: Object.assign({}, auth, { 'Content-Type': 'application/json' }, extra || {}),
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: ctl.signal,
       });
