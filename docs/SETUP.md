@@ -97,6 +97,10 @@ Man kan skrive et produktnavn i stedet for et link. Produktet står så som "Fin
 3. Teksten er værdien til hemmeligheden `x-resolver-token`, som navne-assistenten bruger (sendes som HTTP-headeren `x-resolver-token`). Assistenten bruger kun den offentlige anon/publishable-nøgle, aldrig service_role-nøglen. Del ikke tokenet andre steder, og læg det ikke i repoet.
 4. Vil du skifte tokenet: `update public.resolver_secret set token = replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');`, og opdatér hemmeligheden hos assistenten.
 
+## Alternativer
+
+Under et produkt kan man trykke "Find alternativer". Navne-assistenten (samme AI-agent og samme `x-resolver-token`, se ovenfor) svarer inden for en time med lignende produkter og gode tilbud i samme kategori. Kør `supabase/schema.sql` igen, så databasen får de nye felter og funktioner; indtil da er knappen skjult. Hver person kan bede om alternativer 5 gange i døgnet. Assistentens tre funktioner og reglerne for dem står i `docs/AI.md`.
+
 ## To slags links
 
 Man kan indsætte to slags links. Et link fra prisjagt.dk giver priser fra mange butikker, og her vælger man variant. Et link til en enkelt butiks produktside (et hvilket som helst `https://`-link, fx til en vare, som kun den butik sælger) følger kun den ene butik og dens pris; historikken starter den dag, varen bliver tilføjet. Det virker kun, hvis siden selv oplyser pris og lagerstatus i dansk kroner (JSON-LD, `itemprop="price"` eller `product:price:amount`), og hvis butikken ikke afviser automatiske opslag. Afviser den, eller kan prisen ikke findes, får produktet en fejlnote, og jobbet forsøger ikke at omgå det. Kør `supabase/schema.sql` igen, så databasen tillader links til andre butikker.

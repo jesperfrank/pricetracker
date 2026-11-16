@@ -223,3 +223,17 @@ details.fine summary { margin-top: 0; color: var(--ink2) }
 body { padding-top: calc(48px + env(safe-area-inset-top, 0px)); padding-bottom: calc(80px + env(safe-area-inset-bottom, 0px)) }
 @media (max-width: 560px) { body { padding-top: calc(28px + env(safe-area-inset-top, 0px)); padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)) } }
 #installBox { margin-top: 10px } #installBox[hidden] { display: none }
+
+/* alternatives */
+.alts { margin: 0 }
+.alt-list { list-style: none; margin: 0; padding: 0 }
+.alt-list li { padding: 10px 0; border-top: 1px solid var(--line) }
+.alt-list li:first-child { border-top: 0; padding-top: 0 }
+.alt-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px }
+.alt-name { font-weight: 500; overflow-wrap: anywhere; min-width: 0 }
+.alt-price { font-weight: 600; white-space: nowrap }
+.alt-tag { color: var(--good); font-weight: 600 }
+.alt-why { margin-top: 0 }
+.alt-act { margin-top: 4px; font-size: 13.5px }
+.alts > .link { font-size: 13.5px; font-weight: 400; color: var(--ink2) }
+.alts .sec-h .link, .alts .note .link { font-size: 13px; font-weight: 400; color: var(--ink2) }

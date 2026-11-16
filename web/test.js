@@ -26,7 +26,7 @@ const FAKE = `
   var ticks = [], realSetInterval = window.setInterval;
   window.setInterval = function (fn, ms) { if (ms === 60000) ticks.push(fn); return realSetInterval.apply(window, arguments); };
   window.__tick = function () { ticks.forEach(function (f) { f(); }); };
-  var JOB = ["status","title","variants","offers","history","normal_price","verdict","warning","check_note","last_checked","notified_price","notified_at","backfill_state","digest_price","digest_at"];
+  var JOB = ["status","title","variants","offers","history","normal_price","verdict","warning","check_note","last_checked","notified_price","notified_at","backfill_state","digest_price","digest_at","alternatives","alt_done_at","alt_note"];
   function clone(x) { return JSON.parse(JSON.stringify(x)); }
   function builder(table) {
     var q = { op: "select", payload: null, filters: [], single: null, sel: false };
@@ -79,8 +79,11 @@ const FAKE = `
           rows.push(r); return resolve({ data: q.sel ? clone(r) : null, error: null });
         }
         if (q.op === "update" && table === "products" && "bought_price" in q.payload && q.payload.bought_price !== null && !(q.payload.bought_price > 0 && q.payload.bought_price <= 10000000)) return resolve({ data: null, error: { code: "23514", message: "products_bought_price_check" } });
+        if (q.op === "update" && table === "products" && "alt_requested_at" in q.payload && db.altError) return resolve({ data: null, error: clone(db.altError) });
         if (q.op === "update") {
           rows.filter(match).forEach(function (r) {
+            if (table === "products" && "alt_requested_at" in q.payload && q.payload.alt_requested_at) r.alt_requested_at = new Date().toISOString();   // products_guard: the server stamps the time
+            if (table === "products" && "alt_requested_at" in q.payload) delete q.payload.alt_requested_at;
             var newLink = "source_url" in q.payload && q.payload.source_url !== r.source_url;
             if ("bought_price" in q.payload && q.payload.bought_price !== null && !(q.payload.bought_price > 0 && q.payload.bought_price <= 10000000)) return;   // check constraint (see below)
             Object.keys(q.payload).forEach(function (k) { if (JOB.indexOf(k) < 0) r[k] = clone(q.payload[k]); });
@@ -1417,6 +1420,170 @@ let base;
       const pct = (await p.textContent("#fHint")) === "Regnes fra normalprisen.";
       await p.click(".goal label:has(#fTypeAuto)");
       check("hint under the add field: none for the default, one short line for price and percent", none && price && pct && !(await p.isVisible("#fHint")));
+      await p.context().close();
+    }
+  }
+
+
+  // 10e. alternatives: similar products and deals, answered by the AI agent (everything in them is untrusted)
+  {
+    const HOUR = 36e5, ago = h => new Date(Date.now() - h * HOUR).toISOString();
+    const alt = (id, over) => row("test-sony-xm5", Object.assign({ id, alt_requested_at: null, alternatives: null, alt_done_at: null, alt_note: null }, over || {}));
+    const body = (p, id) => p.locator('.item:has([data-id="' + id + '"]) .body');
+    const altText = async (p, id) => (await body(p, id).locator(".alts").first().innerText()).replace(/\s+/g, " ").trim();
+    const GOOD = [
+      { kind: "similar", name: "Bose QC 45", url: "https://shop.example.dk/bose", store: "Shop A", price: 2199, why: "Samme klasse, lidt lettere." },
+      { kind: "deal", name: "Sennheiser Momentum 4", url: "https://www.shop-b.dk/momentum?x=1&y=2#top", store: "Shop B", price: 1999, was: 2499, why: "Normalt 2.499 kr." },
+      { kind: "deal", name: "Jabra Elite 85h", url: "https://shop.example.dk/jabra", store: "Shop C", price: 1500, was: 1550, why: "Lille rabat." },
+      { kind: "deal", name: "AKG N9", url: "https://shop.example.dk/akg", store: "Shop D", price: 900, why: "Uden normalpris." }
+    ];
+    {   // no request yet
+      const p = await open({ products: [alt("a1"), alt("a2", { status: "pending" }), alt("a3", { bought_at: "2026-11-15T10:00:00Z", bought_price: 100 }), row("test-ps5-pro", { id: "old" }), alt("a4", { user_id: "m1" })], label: "alt-ask" });
+      await p.waitForSelector(".item");
+      await p.click('.head[data-id="a1"]');
+      check("alt: a quiet 'Find alternativer' link in the detail view of an own tracking product", (await body(p, "a1").locator('[data-act="alt-find"]').textContent()) === "Find alternativer");
+      await p.click('.head[data-id="old"]');
+      check("alt: a database without the columns shows nothing (no link, no section)", (await body(p, "old").locator(".alts").count()) === 0 && !/alternativ/i.test(await body(p, "old").innerText()));
+      await p.click('.head[data-id="a3"]');
+      check("alt: no request link on a bought product", (await body(p, "a3").locator(".alts").count()) === 0);
+      await p.click('.head[data-id="a4"]');
+      check("alt: no request link on someone else's product in a shared list", (await body(p, "a4").locator('[data-act="alt-find"]').count()) === 0);
+      await p.click('.head[data-id="a2"]');
+      check("alt: not for a product that is not tracked yet", (await body(p, "a2").locator(".alts").count()) === 0);
+      await p.click('[data-act="alt-find"][data-id="a1"]');
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      const o = (await ops(p))[0];
+      check("alt: the request writes only alt_requested_at (a time; the server stamps its own)", o.table === "products" && o.op === "update" && o.filters[0][1] === "a1" && JSON.stringify(Object.keys(o.payload)) === '["alt_requested_at"]' && Math.abs(Date.parse(o.payload.alt_requested_at) - Date.now()) < 60000, JSON.stringify(o));
+      await p.waitForFunction(() => /Søger alternativer/.test(document.body.innerText));
+      check("alt: pending shows 'Søger alternativer. Svar inden for en time.' and no link", (await altText(p, "a1")) === "Søger alternativer. Svar inden for en time." && (await body(p, "a1").locator('[data-act="alt-find"]').count()) === 0);
+      await p.waitForTimeout(150);
+      check("alt: ... and stays so after the list is read again", /Søger alternativer\. Svar inden for en time\./.test(await altText(p, "a1")));
+      await p.context().close();
+    }
+    {   // too old: failed
+      const p = await open({ products: [alt("s1", { alt_requested_at: ago(7) }), alt("s2", { alt_requested_at: ago(5) })], label: "alt-stale" });
+      await p.waitForSelector(".item");
+      await p.click('.head[data-id="s1"]'); await p.click('.head[data-id="s2"]');
+      check("alt: pending for more than 6 hours: 'Ingen svar. Prøv igen.'", (await altText(p, "s1")) === "Ingen svar. Prøv igen." && (await body(p, "s1").locator('[data-act="alt-find"]').textContent()) === "Prøv igen");
+      check("alt: pending for 5 hours is still pending", (await altText(p, "s2")) === "Søger alternativer. Svar inden for en time.");
+      await p.click('[data-act="alt-find"][data-id="s1"]');
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      await p.waitForFunction(() => /Søger alternativer/.test(document.querySelector('.item:has([data-id="s1"]) .body').innerText));
+      check("alt: 'Prøv igen' asks again", (await ops(p))[0].filters[0][1] === "s1");
+      await p.context().close();
+    }
+    {   // the daily limit and other errors come back as plain Danish
+      const p = await open({ products: [alt("l1")], label: "alt-limit" });
+      await p.waitForSelector(".item"); await p.click('.head[data-id="l1"]');
+      await p.evaluate(() => { window.__db.altError = { code: "23514", message: "Du kan bede om alternativer 5 gange i døgnet." }; });
+      await p.click('[data-act="alt-find"][data-id="l1"]');
+      await p.waitForFunction(() => /5 gange i døgnet/.test(document.body.innerText));
+      check("alt: the daily limit is shown as 'Du kan bede om alternativer 5 gange i døgnet.' and the link works again", (await body(p, "l1").locator('[data-rowmsg="alt-l1"]').textContent()) === "Du kan bede om alternativer 5 gange i døgnet." && !(await body(p, "l1").locator('[data-act="alt-find"]').isDisabled()));
+      await p.evaluate(() => { window.__db.altError = { code: "23514", message: "Der er allerede bedt om alternativer. Vent på svaret." }; });
+      await p.click('[data-act="alt-find"][data-id="l1"]');
+      await p.waitForFunction(() => /allerede bedt/.test(document.body.innerText));
+      check("alt: already pending is said in short", (await body(p, "l1").locator('[data-rowmsg="alt-l1"]').textContent()) === "Der er allerede bedt om alternativer.");
+      await p.evaluate(() => { window.__db.altError = { message: "boom <script>" }; });
+      await p.click('[data-act="alt-find"][data-id="l1"]');
+      await p.waitForFunction(() => /Kunne ikke gemme/.test(document.body.innerText));
+      check("alt: any other error is a generic sentence, never the raw message", !/boom|script/.test(await body(p, "l1").innerText()));
+      await p.context().close();
+    }
+    {   // the answer
+      const mine = alt("d1", { alt_requested_at: ago(2), alt_done_at: ago(1), alternatives: GOOD });
+      const p = await open({ products: [mine, row("test-ps5-pro", { id: "own", source_url: "https://shop.example.dk/jabra" })], label: "alt-done" });
+      await p.waitForSelector(".item");
+      await p.click('.head[data-id="d1"]');
+      const b = body(p, "d1");
+      check("alt: a heading 'Alternativer' and four items", (await b.locator(".alts h3").textContent()) === "Alternativer" && (await b.locator(".alt-list li").count()) === 4);
+      const names = await b.locator(".alt-name").allInnerTexts();
+      check("alt: deals first, then similar (own order kept inside)", JSON.stringify(names) === JSON.stringify(["Sennheiser Momentum 4", "Jabra Elite 85h", "AKG N9", "Bose QC 45"]), JSON.stringify(names));
+      const tags = await b.locator("li").evaluateAll(els => els.map(e => { const t = e.querySelector(".alt-tag"); return t ? t.textContent : ""; }));
+      check("alt: a '−20 %' tag on a deal with a normal price 5 % or more above, none below 5 %, none without 'was', none on 'similar'", JSON.stringify(tags) === JSON.stringify(["−20 %", "", "", ""]), JSON.stringify(tags));
+      const first = (await b.locator("li").first().innerText()).replace(/\s+/g, " ");
+      check("alt: a row shows name, price, store, tag and the why sentence", /Sennheiser Momentum 4/.test(first) && /1\.999 kr\./.test(first) && /Shop B/.test(first) && /Normalt 2\.499 kr\./.test(first), first);
+      const a0 = b.locator("li").first().locator("a");
+      check("alt: the name is a link with target _blank and rel noopener noreferrer", (await a0.getAttribute("target")) === "_blank" && (await a0.getAttribute("rel")) === "noopener noreferrer" && /^https:\/\/www\.shop-b\.dk\/momentum\?x=1&y=2/.test(await a0.getAttribute("href")));
+      check("alt: 'Søg igen' is there for the owner", (await b.locator('[data-act="alt-find"]').textContent()) === "Søg igen");
+      check("alt: 'Følg' on each, disabled 'Følges' for a link the person already tracks", (await b.locator('[data-act="alt-follow"]').allInnerTexts()).join("|") === "Følg|Følges|Følg|Følg" && (await b.locator('[data-act="alt-follow"]').nth(1).isDisabled()));
+      await b.locator('[data-act="alt-follow"]').first().click();
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      const o = (await ops(p))[0];
+      check("alt: 'Følg' adds a product with that link, goal auto, same list, as a new row", o.table === "products" && o.op === "insert" && JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://www.shop-b.dk/momentum?x=1&y=2", target_type: "auto", target_value: null, active: true }), JSON.stringify(o));
+      await p.waitForFunction(() => document.querySelectorAll("#list .item").length === 3);
+      check("alt: ... and the button says 'Følges' at once, and still after the list is read again", (await b.locator('[data-act="alt-follow"]').first().textContent()) === "Følges" && (await b.locator('[data-act="alt-follow"]').first().isDisabled()));
+      await p.context().close();
+    }
+    {   // the list of the current product is used
+      const L = { id: "l1", user_id: "u1", name: "Gaver" };
+      const p = await open({ products: [alt("g1", { list_id: "l1", alt_requested_at: ago(2), alt_done_at: ago(1), alternatives: GOOD.slice(0, 1) })], lists: [L], label: "alt-list", storage: { "pv-list": "all" } });
+      await p.waitForSelector(".item"); await p.click('.head[data-id="g1"]');
+      await p.click('[data-act="alt-follow"]');
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      const o = (await ops(p))[0];
+      check("alt: a product in a list: the new one goes into the same list", o.payload.list_id === "l1" && o.payload.target_type === "auto", JSON.stringify(o.payload));
+      await p.evaluate(() => { window.__db.insertError = { code: "23514", message: "Du kan højst følge 40 produkter. Slet et produkt først." }; window.__db.products[0].alternatives = window.__db.products[0].alternatives.concat([{ kind: "similar", name: "Anden", url: "https://shop.example.dk/anden", store: "S", price: 5, why: "x" }]); });
+      await p.evaluate(() => { window.__tick(); });
+      await p.waitForFunction(() => document.querySelectorAll('[data-act="alt-follow"]').length === 2);
+      await p.locator('[data-act="alt-follow"]').nth(1).click();
+      await p.waitForFunction(() => /højst følge 40/.test(document.body.innerText));
+      check("alt: a refused 'Følg' says why (the 40-product limit) and the button works again", (await body(p, "g1").locator('[data-rowmsg="alt-g1"]').textContent()) === "Du kan højst følge 40 produkter. Slet et produkt først." && !(await body(p, "g1").locator('[data-act="alt-follow"]').nth(1).isDisabled()));
+      await p.context().close();
+    }
+    {   // hostile strings
+      const EV = [
+        { kind: "deal", name: '<img src=x onerror="window.__xss=1">Fup', url: "https://shop.example.dk/a", store: "<script>window.__xss=2</script>Butik", price: 100, was: 200, why: '"><svg onload="window.__xss=3"> hej &amp; <b>fed</b>' },
+        { kind: "similar", name: "Farligt link", url: "javascript:window.__xss=4", store: "S", price: 50, why: "x" },
+        { kind: "similar", name: "Http link", url: "http://shop.example.dk/plain", store: "S", price: 50, why: "x" },
+        { kind: "similar", name: "Citat", url: 'https://shop.example.dk/a"onmouseover="window.__xss=5', store: "S", price: 50, why: "x" },
+        { kind: "similar", name: "Data", url: "data:text/html,<script>window.__xss=6</script>", store: "S", price: 50, why: "x" },
+        { kind: "similar", name: "Port", url: "https://user:pw@shop.example.dk:8443/x", store: "S", price: 50, why: "x" },
+        { kind: "similar", name: "Pris som tekst", url: "https://shop.example.dk/p", store: "S", price: "<b>1</b>", why: "x" },
+        { kind: "evil", name: "Ukendt art", url: "https://shop.example.dk/p", store: "S", price: 5, why: "x" },
+        "ikke et objekt", null, 7
+      ];
+      const note = '<script>window.__xss=7</script><b>Note</b>';
+      const p = await open({ products: [alt("h1", { alt_requested_at: ago(2), alt_done_at: ago(1), alternatives: EV }), alt("h2", { alt_requested_at: ago(2), alt_done_at: ago(1), alternatives: null, alt_note: note })], label: "alt-hostile" });
+      await p.waitForSelector(".item");
+      await p.click('.head[data-id="h1"]'); await p.click('.head[data-id="h2"]');
+      const b = body(p, "h1").locator(".alts");
+      check("alt: hostile strings are shown as text: no element is injected, no script runs", (await b.locator("img, script, svg, b, i").count()) === 0 && (await p.evaluate(() => window.__xss)) === undefined);
+      const txt = await b.innerText();
+      check("alt: ... the text itself is visible, escaped", txt.indexOf('<img src=x onerror="window.__xss=1">Fup') >= 0 && txt.indexOf("<script>window.__xss=2</script>Butik") >= 0 && txt.indexOf("&amp; <b>fed</b>") >= 0, txt.slice(0, 300));
+      const hrefs = await b.locator("a").evaluateAll(as => as.map(a => a.getAttribute("href")));
+      check("alt: only https links become links (javascript:, data:, http:, a port or user:password@ do not)", hrefs.length === 2 && hrefs.every(h => /^https:\/\//.test(h)) && !hrefs.some(h => /["'<> ]|^javascript|^data:|^http:/.test(h)), JSON.stringify(hrefs));
+      check("alt: a link with a quote in it cannot break out of the attribute", (await b.locator("[onmouseover], [onerror], [onload]").count()) === 0 && (await p.evaluate(() => window.__xss)) === undefined);
+      check("alt: a row without a usable link has no 'Følg'; a bad price or kind or non-object is dropped", (await b.locator("li").count()) === 6 && (await b.locator('[data-act="alt-follow"]').count()) === 2, "li " + (await b.locator("li").count()) + " follow " + (await b.locator('[data-act="alt-follow"]').count()));
+      const tagTxt = await b.locator(".alt-tag").allInnerTexts();
+      check("alt: the tag is computed, never copied from the text", JSON.stringify(tagTxt) === JSON.stringify(["−50 %"]), JSON.stringify(tagTxt));
+      const n = body(p, "h2").locator(".alts");
+      check("alt: a failure note is escaped too, and 'Prøv igen' is there", (await n.innerText()).indexOf(note) >= 0 && (await n.locator("script, b").count()) === 0 && (await n.locator('[data-act="alt-find"]').textContent()) === "Prøv igen" && (await p.evaluate(() => window.__xss)) === undefined);
+      await p.context().close();
+    }
+    {   // failed, empty, and read-only for a member
+      const p = await open({ products: [
+        alt("f1", { alt_requested_at: ago(2), alt_done_at: ago(1), alt_note: "Fandt intet, der passer." }),
+        alt("f2", { alt_requested_at: ago(2), alt_done_at: ago(1), alternatives: [] }),
+        alt("f3", { alt_requested_at: ago(30), alt_done_at: ago(29), alternatives: GOOD.slice(0, 1) }),
+        alt("m1", { user_id: "o9", list_id: "lx", alt_requested_at: ago(2), alt_done_at: ago(1), alternatives: GOOD.slice(0, 2) }),
+        alt("m2", { user_id: "o9", list_id: "lx", alt_requested_at: ago(1) })], lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], label: "alt-fail" });
+      await p.waitForSelector(".item");
+      for (const id of ["f1", "f2", "f3", "m1", "m2"]) await p.click('.head[data-id="' + id + '"]');
+      check("alt: failed: the note and 'Prøv igen'", (await altText(p, "f1")) === "Fandt intet, der passer. Prøv igen" && (await body(p, "f1").locator('[data-act="alt-find"]').textContent()) === "Prøv igen", await altText(p, "f1"));
+      check("alt: answered with nothing usable: a plain sentence", /^Ingen alternativer fundet\./.test(await altText(p, "f2")));
+      check("alt: an answer older than 24 hours still shows, with 'Søg igen'", (await body(p, "f3").locator(".alt-list li").count()) === 1 && (await body(p, "f3").locator('[data-act="alt-find"]').textContent()) === "Søg igen");
+      check("alt: a member sees the answer on someone else's product but has no 'Søg igen' (and cannot ask)", (await body(p, "m1").locator(".alt-list li").count()) === 2 && (await body(p, "m1").locator('[data-act="alt-find"]').count()) === 0);
+      check("alt: a member sees that an answer is pending, nothing to click", (await altText(p, "m2")) === "Søger alternativer. Svar inden for en time." && (await body(p, "m2").locator("button").filter({ hasText: /Prøv|Find|Søg/ }).count()) === 0);
+      await p.context().close();
+    }
+    {   // read-only access: no write buttons
+      const p = await open({ products: [alt("r1", { alt_requested_at: ago(2), alt_done_at: ago(1), alternatives: GOOD.slice(0, 1) })], label: "alt-ro" });
+      await p.waitForSelector(".item"); await p.evaluate(() => { window.__db.deny = true; });
+      await p.click('.head[data-id="r1"]');
+      await p.click('[data-act="alt-follow"]');
+      await p.waitForFunction(() => window.__db.ops.length >= 1);
+      await p.waitForFunction(() => !document.getElementById("readonly").hidden);
+      check("alt: a refused write (no access) switches the page to read-only like everywhere else", await p.isVisible("#readonly"));
       await p.context().close();
     }
   }

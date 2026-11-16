@@ -615,6 +615,7 @@ function makeFake(db) {
         if (db.patchFail && db.patchFail === id) return reply(500, { message: 'db error' });
         const body = JSON.parse(opts.body);
         ['id', 'user_id', 'name', 'source_url', 'target_type', 'target_value', 'active'].forEach((k) => assert(!(k in body), 'job must not write user column ' + k));
+        Object.keys(body).forEach((k) => assert(!/^alt/.test(k) && k !== 'alternatives', 'job must not write the alternatives columns: ' + k));
         Object.assign(row, body); db.patches.push({ id, body }); return reply(204);
       }
     }
@@ -845,6 +846,15 @@ test('job never writes user-owned columns (id, user_id, name, source_url, target
   const db = newDb(); db.products.push(product('Z', 'u1', 'sony'));
   await R.run(ctxFor(db, { [urlOf('sony')]: pageFor('sony') }));   // the fake asserts this on every PATCH
   assert(db.patches.length === 1 && db.products[0].status === 'choose' && db.products[0].variants.length === 5);
+});
+
+test('alternatives columns (select=*) are carried by the rows and never written by the job', async () => {
+  const alt = { alt_requested_at: '2026-11-16T09:00:00Z', alternatives: [{ kind: 'deal', name: 'X', url: 'https://x.dk/a', store: 'X', price: 1, why: 'y' }], alt_done_at: '2026-11-16T09:30:00Z', alt_note: null };
+  const db = newDb(); db.products.push(product('Z', 'u1', 'sony', alt), product('Y', 'u1', 'lego', { alt_requested_at: '2026-11-16T09:00:00Z', alt_done_at: null }));
+  const r = await R.run(ctxFor(db, { [urlOf('sony')]: pageFor('sony'), [urlOf('lego')]: pageFor('lego') }));   // the fake refuses any alt column in a PATCH
+  assert(db.patches.length === 2 && r.stats.writeFail === 0);
+  assert.deepStrictEqual({ a: db.products[0].alt_requested_at, b: db.products[0].alternatives, c: db.products[0].alt_done_at, d: db.products[0].alt_note }, { a: alt.alt_requested_at, b: alt.alternatives, c: alt.alt_done_at, d: null });
+  assert(db.products[1].alt_requested_at === '2026-11-16T09:00:00Z' && db.products[1].alt_done_at === null && !('alternatives' in db.products[1]));
 });
 
 test('name-only products (source_url null) are skipped silently: no fetch, no write, no 6-hour error retry', async () => {

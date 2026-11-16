@@ -80,6 +80,15 @@ alter table public.products add constraint products_bought_price_check check (
 alter table public.products add column if not exists digest_price numeric;
 alter table public.products add column if not exists digest_at timestamptz;
 
+-- "Alternativer" (see "alternatives" below): similar products and deals in the same category, answered by the AI agent.
+-- alt_requested_at = when the person asked (browser, but stamped with the server clock by products_guard); alternatives,
+-- alt_done_at and alt_note are written by the AI agent's functions only. Pending = requested and not answered since.
+alter table public.products add column if not exists alt_requested_at timestamptz;
+alter table public.products add column if not exists alternatives jsonb
+  check (alternatives is null or (case when jsonb_typeof(alternatives) = 'array' then jsonb_array_length(alternatives) <= 6 else false end));
+alter table public.products add column if not exists alt_done_at timestamptz;
+alter table public.products add column if not exists alt_note text check (alt_note is null or char_length(alt_note) <= 200);
+
 -- A product may be added by name only (source_url null); the name must then not be blank.
 -- NOT VALID: enforced for every new/changed row without re-checking old rows.
 alter table public.products drop constraint if exists products_name_not_blank;
@@ -161,7 +170,7 @@ grant select, insert, update, delete on public.allowed_emails, public.profiles, 
 -- A normal (browser) user can neither set the job-written columns nor change user_id.
 -- Roles 'authenticated' and 'anon' are the PostgREST roles of browser requests; the service role
 -- (the job) and the SQL editor / table editor (postgres) are not restricted.
--- Changing source_url starts the product over: the job fetches the new page from scratch.
+-- Changing source_url starts the product over: the job fetches the new page from scratch (alternatives are dropped with it).
 -- Someone else's product in a shared list (RLS lets list members this far): only the bought columns may change, every other
 -- column must be exactly as it was (compared as a whole row, so a column added later is protected too). A bought mark is
 -- stamped with the server time and with who set it (bought_by). It can be undone, or its price edited, by the person who set it,
@@ -186,6 +195,7 @@ begin
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     new.digest_price := null; new.digest_at := null;
+    new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
     -- bought_at / bought_price are the person's own, but the time is the server's and the person is who is signed in
     new.bought_by := null;
     if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; end if;
@@ -206,6 +216,23 @@ begin
   new.check_note := old.check_note; new.last_checked := old.last_checked;
   new.notified_price := old.notified_price; new.notified_at := old.notified_at; new.backfill_state := old.backfill_state;
   new.digest_price := old.digest_price; new.digest_at := old.digest_at;
+  -- alternatives: the answer is the AI agent's. A request is a change of alt_requested_at (only the product's own person gets this
+  -- far: a list member changing it fails the whole-row check above). Whatever value the browser sends, the time is the server's;
+  -- null is ignored. Refused while a request is pending (unless it is over 6 hours old: the page calls that failed), and after 5
+  -- requests in 24 hours (alt_take_slot).
+  new.alternatives := old.alternatives; new.alt_done_at := old.alt_done_at; new.alt_note := old.alt_note;
+  if new.alt_requested_at is distinct from old.alt_requested_at then
+    if new.alt_requested_at is null then
+      new.alt_requested_at := old.alt_requested_at;
+    else
+      if old.alt_requested_at is not null and (old.alt_done_at is null or old.alt_done_at < old.alt_requested_at)
+         and old.alt_requested_at > now() - interval '6 hours' then
+        raise exception 'Der er allerede bedt om alternativer. Vent på svaret.' using errcode = 'check_violation';
+      end if;
+      perform public.alt_take_slot();
+      new.alt_requested_at := now();
+    end if;
+  end if;
   -- bought: marking stamps the server time and the person once; the time and the person cannot be edited afterwards
   -- (only cleared, which also clears the price)
   if old.bought_at is null then
@@ -229,6 +256,7 @@ begin
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     new.digest_price := null; new.digest_at := null;
+    new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
   end if;
   return new;
 end;
@@ -1144,6 +1172,201 @@ grant execute on function public.share_list(uuid, text) to authenticated;
 grant execute on function public.list_members_named(uuid) to authenticated;
 grant execute on function public.unshare_list(uuid, uuid) to authenticated;
 grant execute on function public.leave_list(uuid) to authenticated;
+
+-- ---------------------------------------------------------------- alternatives (answered by the AI agent)
+-- A person asks for "Alternativer" for a product of their own (the browser sets alt_requested_at, see products_guard). The AI agent
+-- (the same scheduled Claude session and the same x-resolver-token as the resolver functions above, with no broader access) reads
+-- the waiting requests with ai_alt_list(), and answers with ai_alt_set() or ai_alt_fail(). Same pattern and grants as resolver_*.
+-- A request is pending when alt_requested_at is set and alt_done_at is null or older than it.
+
+-- One row per request, so the limit (5 per person per 24 hours, across all their products) survives a product being asked again
+-- and again. No policy and no grants: only alt_take_slot() and the service role.
+create table if not exists public.alt_attempts (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  at      timestamptz not null default now()
+);
+create index if not exists alt_attempts_idx on public.alt_attempts (user_id, at);
+alter table public.alt_attempts enable row level security;
+revoke all on public.alt_attempts from public, anon, authenticated;
+grant select, insert, update, delete on public.alt_attempts to service_role;
+
+-- Called by products_guard for a request. It only works inside a trigger (it is no use as an RPC), speaks only about the caller,
+-- and is SECURITY DEFINER so the caller needs no rights on alt_attempts. The row is written in the request's own transaction.
+create or replace function public.alt_take_slot()
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  me uuid := auth.uid();
+begin
+  if me is null or pg_trigger_depth() = 0 then
+    raise exception 'not allowed' using errcode = '42501';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('alt:' || me::text, 0));
+  delete from public.alt_attempts a where a.user_id = me and a.at < now() - interval '2 days';
+  if (select count(*) from public.alt_attempts a where a.user_id = me and a.at > now() - interval '24 hours') >= 5 then
+    raise exception 'Du kan bede om alternativer 5 gange i døgnet.' using errcode = 'check_violation';
+  end if;
+  insert into public.alt_attempts (user_id) values (me);
+end;
+$$;
+revoke all on function public.alt_take_slot() from public, anon;
+grant execute on function public.alt_take_slot() to authenticated;
+
+-- Up to 5 pending requests, oldest first, only for products that are being tracked and have a title. Nothing about the person.
+-- price = the lowest in-stock price in offers now (null when there is none), host = the shop's host name (no path, no query).
+create or replace function public.ai_alt_list()
+returns table (id uuid, title text, price numeric, normal_price numeric, host text, requested_at timestamptz)
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  return query
+    select p.id,
+           left(coalesce(nullif(btrim(p.title), ''), p.name), 200),
+           (select min((o ->> 'price')::numeric)
+              from jsonb_array_elements(case when jsonb_typeof(p.offers) = 'array' then p.offers else '[]'::jsonb end) o
+             where jsonb_typeof(o) = 'object' and o -> 'inStock' = 'true'::jsonb and jsonb_typeof(o -> 'price') = 'number'),
+           p.normal_price,
+           nullif(regexp_replace(substring(p.source_url from '^https://([^/?#]+)'), '^www\.', ''), ''),
+           p.alt_requested_at
+      from public.products p
+     where p.active and p.status = 'tracking' and p.title is not null
+       and p.alt_requested_at is not null and (p.alt_done_at is null or p.alt_done_at < p.alt_requested_at)
+     order by p.alt_requested_at, p.id
+     limit 5;
+end;
+$$;
+
+-- Stores the answer for a pending product: 1 to 6 suggestions, each an object with exactly the keys kind ('similar' | 'deal'),
+-- name (1-120), url (https, the products.source_url rule, 500), store (1-60), price (> 0 and < 10 million) and why (1-160), and
+-- optionally was (a number above price: the normal price of a deal; null counts as absent). Text must have no control
+-- characters, no invisible direction marks and no < or >. Anything else raises 22023 and stores nothing. The stored copy is
+-- cleaned (trimmed, price and was rounded to 2 decimals). Returns true, or false when the product is not pending (any more).
+create or replace function public.ai_alt_set(p_id uuid, p_items jsonb)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  e       jsonb;
+  i       integer := 0;
+  k       text;
+  s       text;
+  pr      numeric;
+  wa      numeric;
+  clean   jsonb := '[]'::jsonb;
+  item    jsonb;
+  n       integer;
+  bad     constant text := '[[:cntrl:]<>​-‏‪-‮⁦-⁩﻿  ]';
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) not between 1 and 6 then
+    raise exception 'ai_alt: items must be an array of 1 to 6 objects' using errcode = '22023';
+  end if;
+  for e in select x from jsonb_array_elements(p_items) x loop
+    i := i + 1;
+    if jsonb_typeof(e) <> 'object' then
+      raise exception 'ai_alt: item %: not an object', i using errcode = '22023';
+    end if;
+    for k in select jsonb_object_keys(e) loop
+      if k not in ('kind', 'name', 'url', 'store', 'price', 'was', 'why') then
+        raise exception 'ai_alt: item %: unknown key %', i, left(k, 40) using errcode = '22023';
+      end if;
+    end loop;
+    foreach k in array array['kind', 'name', 'url', 'store', 'price', 'why'] loop
+      if not e ? k or jsonb_typeof(e -> k) = 'null' then
+        raise exception 'ai_alt: item %: % is missing', i, k using errcode = '22023';
+      end if;
+    end loop;
+    -- the text fields
+    foreach k in array array['kind', 'name', 'url', 'store', 'why'] loop
+      if jsonb_typeof(e -> k) <> 'string' then
+        raise exception 'ai_alt: item %: % must be a string', i, k using errcode = '22023';
+      end if;
+      s := btrim(e ->> k);
+      if s ~ bad then
+        raise exception 'ai_alt: item %: % has control characters or angle brackets', i, k using errcode = '22023';
+      end if;
+      if (k = 'kind' and s not in ('similar', 'deal'))
+         or (k = 'name' and char_length(s) not between 1 and 120)
+         or (k = 'store' and char_length(s) not between 1 and 60)
+         or (k = 'why' and char_length(s) not between 1 and 160)
+         or (k = 'url' and (char_length(s) > 500 or s !~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$')) then
+        raise exception 'ai_alt: item %: % is not valid', i, k using errcode = '22023';
+      end if;
+    end loop;
+    -- the numbers
+    if jsonb_typeof(e -> 'price') <> 'number' then
+      raise exception 'ai_alt: item %: price must be a number', i using errcode = '22023';
+    end if;
+    pr := round((e ->> 'price')::numeric, 2);
+    if not (pr > 0 and pr < 10000000) then
+      raise exception 'ai_alt: item %: price must be above 0 and below 10000000', i using errcode = '22023';
+    end if;
+    wa := null;
+    if e ? 'was' and jsonb_typeof(e -> 'was') <> 'null' then
+      if jsonb_typeof(e -> 'was') <> 'number' then
+        raise exception 'ai_alt: item %: was must be a number', i using errcode = '22023';
+      end if;
+      wa := round((e ->> 'was')::numeric, 2);
+      if not (wa > pr and wa < 10000000) then
+        raise exception 'ai_alt: item %: was must be above price and below 10000000', i using errcode = '22023';
+      end if;
+    end if;
+    item := jsonb_build_object('kind', btrim(e ->> 'kind'), 'name', btrim(e ->> 'name'), 'url', btrim(e ->> 'url'),
+                               'store', btrim(e ->> 'store'), 'price', pr, 'why', btrim(e ->> 'why'));
+    if wa is not null then item := item || jsonb_build_object('was', wa); end if;
+    clean := clean || jsonb_build_array(item);
+  end loop;
+  update public.products
+     set alternatives = clean, alt_done_at = now(), alt_note = null
+   where id = p_id and active and alt_requested_at is not null and (alt_done_at is null or alt_done_at < alt_requested_at);
+  get diagnostics n = row_count;
+  return n = 1;
+end;
+$$;
+
+-- The agent found nothing usable: stores a short note for the person (control characters and < > removed, cut to 200 characters,
+-- a plain sentence when empty) and no alternatives. Returns true, or false when the product is not pending (any more).
+create or replace function public.ai_alt_fail(p_id uuid, p_note text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  n integer;
+  t text;
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  t := left(btrim(regexp_replace(coalesce(p_note, ''), '[[:cntrl:]<>​-‏‪-‮⁦-⁩﻿  ]+', ' ', 'g')), 200);
+  update public.products
+     set alternatives = null, alt_done_at = now(), alt_note = coalesce(nullif(btrim(t), ''), 'Kunne ikke finde alternativer.')
+   where id = p_id and active and alt_requested_at is not null and (alt_done_at is null or alt_done_at < alt_requested_at);
+  get diagnostics n = row_count;
+  return n = 1;
+end;
+$$;
+
+revoke all on function public.ai_alt_list() from public;
+revoke all on function public.ai_alt_set(uuid, jsonb) from public;
+revoke all on function public.ai_alt_fail(uuid, text) from public;
+grant execute on function public.ai_alt_list() to anon, authenticated;
+grant execute on function public.ai_alt_set(uuid, jsonb) to anon, authenticated;
+grant execute on function public.ai_alt_fail(uuid, text) to anon, authenticated;
 
 -- First run only: nobody is admin yet, so the address added first (the owner added themselves first) becomes admin.
 -- Later runs change nothing, so admin never moves.

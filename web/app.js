@@ -177,7 +177,10 @@
       shopsAlways: r.shops_always, shopsExclude: r.shops_exclude, shopsOnly: !!r.shops_only,
       url: r.source_url || null, createdAt: r.created_at || "", listId: r.list_id || null,
       boughtAt: r.bought_at || null, boughtPrice: num(r.bought_price),
-      userId: r.user_id || null, boughtBy: r.bought_by || null
+      userId: r.user_id || null, boughtBy: r.bought_by || null,
+      // alternatives: altOk = the database has the columns (an older database does not send them, and the feature stays hidden)
+      altOk: "alt_requested_at" in r, altReq: r.alt_requested_at || null, altDone: r.alt_done_at || null,
+      alts: Array.isArray(r.alternatives) ? r.alternatives : null, altNote: typeof r.alt_note === "string" ? r.alt_note : ""
     };
   }
   function offersOf(p) {
@@ -501,6 +504,7 @@
             (u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">Se varen</a>' : '') + '</td></tr>';
         }).join("") + '</tbody></table></div></div>';
     }
+    html += altHtml(p);
     if (mayEdit(p)) {
       html += '<details class="pshops"><summary>Butiksvalg</summary><form class="pshop" data-shops="' + esc(id) + '">' +
         '<label for="sa-' + esc(id) + '">Tjek altid</label>' +
@@ -511,6 +515,66 @@
         '<span><button class="link" type="submit">Gem</button></span></form></details>';
     }
     return html + footHtml(p);
+  }
+
+  // ---- alternatives: similar products and deals, answered by the AI agent within the hour ----
+  // Everything in an alternative comes from the AI agent and is untrusted: text goes through esc(), a link only when it passes
+  // parseLink (https, same rule as the database), and nothing is ever put into the page without escaping.
+  var ALT_STALE = 6 * 36e5, ALT_LIMIT = "Du kan bede om alternativer 5 gange i døgnet.";
+  function altTime(v) { var t = Date.parse(v); return isFinite(t) ? t : null; }
+  function altPending(p) { var r = altTime(p.altReq), d = altTime(p.altDone); return r !== null && (d === null || d < r); }
+  function altOver(p) { var r = altTime(p.altReq); return altPending(p) && r !== null && Date.now() - r > ALT_STALE; }
+  function altAnswered(p) { var r = altTime(p.altReq), d = altTime(p.altDone); return r !== null && d !== null && d >= r; }
+  function altClean(p) {
+    var ok = (p.alts || []).filter(function (a) {
+      return a && typeof a === "object" && (a.kind === "deal" || a.kind === "similar") && typeof a.name === "string" && a.name.trim() &&
+        typeof a.store === "string" && typeof a.price === "number" && isFinite(a.price) && a.price > 0;
+    });
+    return ok.filter(function (a) { return a.kind === "deal"; }).concat(ok.filter(function (a) { return a.kind !== "deal"; })).slice(0, 6);
+  }
+  // "-18 %": only for a deal that has a normal price at least 5 % above the price
+  function altTag(a) {
+    if (a.kind !== "deal" || typeof a.was !== "number" || !isFinite(a.was) || !(a.was > a.price)) return "";
+    var pc = Math.round((1 - a.price / a.was) * 100);
+    return pc >= 5 ? "\u2212" + pc + " %" : "";
+  }
+  function altTracked(u) {
+    return !!u && state.products.some(function (x) { return x.url && parseLink(x.url) === u; });
+  }
+  function altItemHtml(p, a, i) {
+    var u = typeof a.url === "string" ? parseLink(a.url) : null, tag = altTag(a), id = p._id;
+    var name = u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(a.name) + '</a>' : esc(a.name);
+    var act = "";
+    if (u && state.canWrite) {
+      var has = altTracked(u);
+      act = '<button type="button" class="link" data-act="alt-follow" data-id="' + esc(id) + '" data-i="' + i + '"' + (has ? " disabled" : "") + '>' + (has ? "Følges" : "Følg") + '</button>';
+    }
+    return '<li><div class="alt-row"><span class="alt-name">' + name + '</span><span class="alt-price n">' + esc(kr(a.price)) + '</span></div>' +
+      '<div class="meta">' + esc(a.store) + (tag ? ' · <span class="alt-tag">' + esc(tag) + '</span>' : '') + '</div>' +
+      (typeof a.why === "string" && a.why ? '<div class="meta alt-why">' + esc(a.why) + '</div>' : '') +
+      (act ? '<div class="alt-act">' + act + '</div>' : '') + '</li>';
+  }
+  function altHtml(p) {
+    if (!p.altOk || p.status !== "tracking") return "";
+    var id = p._id, ask = mayEdit(p) && !p.boughtAt, msg = '<span class="meta" data-rowmsg="alt-' + esc(id) + '">' + esc(state.rowMsg["alt-" + id] || "") + '</span>';
+    var btn = function (label) { return '<button type="button" class="link" data-act="alt-find" data-id="' + esc(id) + '">' + label + '</button>'; };
+    if (altPending(p) && !altOver(p)) return '<p class="note alts">Søger alternativer. Svar inden for en time.</p>';
+    if (altOver(p)) return '<p class="note alts">Ingen svar.' + (ask ? " " + btn("Prøv igen") + "." + " " + msg : "") + '</p>';
+    if (altAnswered(p)) {
+      var list = altClean(p);
+      if (!list.length) return '<p class="note alts">' + esc(p.altNote || "Ingen alternativer fundet.") + (ask ? " " + btn("Prøv igen") + " " + msg : "") + '</p>';
+      return '<div class="alts"><div class="sec-h"><h3>Alternativer</h3>' + (ask ? '<span>' + btn("Søg igen") + ' ' + msg + '</span>' : '') + '</div><ul class="alt-list">' +
+        list.map(function (a, i) { return altItemHtml(p, a, i); }).join("") + '</ul></div>';
+    }
+    return ask ? '<div class="alts">' + btn("Find alternativer") + ' ' + msg + '</div>' : "";
+  }
+  // the alternatives the page shows, in the order it shows them (what "Følg" points at)
+  function altShown(p) { return altClean(p); }
+  function altError(e) {
+    var m = String((e && e.message) || "");
+    if (m === ALT_LIMIT) return ALT_LIMIT;
+    if (/^Der er allerede bedt om alternativer/.test(m)) return "Der er allerede bedt om alternativer.";
+    return "Kunne ikke gemme lige nu. Prøv igen om lidt.";
   }
 
   // ---- lists: chips above the product list ----
@@ -1017,6 +1081,28 @@
         if (r && r.error) { b.disabled = false; onWriteError(r.error); return; }
         p.boughtAt = null; p.boughtPrice = null; render(); fetchProducts();
       }, function () { b.disabled = false; });
+    }
+    else if (act === "alt-find" && sb && p) {
+      b.disabled = true; setRowMsg("alt-" + id, "");
+      sb.from("products").update({ alt_requested_at: new Date().toISOString() }).eq("id", id).then(function (r) {
+        if (r && r.error) { b.disabled = false; setRowMsg("alt-" + id, altError(r.error)); onWriteError(r.error); return; }
+        p.altReq = new Date().toISOString(); p.alts = null; p.altNote = ""; state.rowMsg["alt-" + id] = ""; render(); fetchProducts();
+      }, function () { b.disabled = false; setRowMsg("alt-" + id, altError(null)); });
+    }
+    else if (act === "alt-follow" && sb && p) {
+      var alt = altShown(p)[+b.dataset.i], au = alt && typeof alt.url === "string" ? parseLink(alt.url) : null;
+      if (!au || altTracked(au)) return;
+      var arow = { name: PLACEHOLDER, source_url: au, target_type: "auto", target_value: null, active: true };
+      if (listKnown(p.listId)) arow.list_id = p.listId;       // the same list as this product
+      b.disabled = true; setRowMsg("alt-" + id, "");
+      sb.from("products").insert(arow).then(function (r) {
+        if (r && r.error) {
+          var m = String(r.error.message || "");
+          setRowMsg("alt-" + id, r.error.code === "23514" && /^Du kan højst/.test(m) ? m : "Kunne ikke følge den lige nu. Prøv igen om lidt.");
+          b.disabled = false; onWriteError(r.error); return;
+        }
+        b.textContent = "Følges"; fetchProducts();           // the next render finds the link among the products
+      }, function () { b.disabled = false; setRowMsg("alt-" + id, "Kunne ikke følge den lige nu. Prøv igen om lidt."); });
     }
     else if (act === "del") { state.confirmDel = id; render(); }
     else if (act === "del-no") { state.confirmDel = null; render(); }

@@ -920,11 +920,14 @@ select t.chk('member: ... and back out', t.put('b-privat', null) = 'ok');
 reset role;
 -- a donor row that differs from a-gave in every column but the bought ones, used to try every column
 insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
-  status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id)
+  status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id,
+  alt_requested_at, alternatives, alt_done_at, alt_note)
 values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
-  'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01');
+  'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01',
+  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor');
 update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
-  variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04'
+  variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04',
+  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave'
  where name = 'a-gave';
 create table t.donor as select * from public.products where name = 'donor';
 create table t.snap as select id, to_jsonb(p) as j from public.products p where name = 'a-gave';
@@ -1218,6 +1221,365 @@ select t.chk('delete user: the membership goes, the bought mark stays without a 
   (select count(*) = 0 from public.list_members) and (select bought_at is not null and bought_by is null from public.products where name = 'slut-a'));
 delete from public.products where name = 'slut-a'; delete from public.lists where name = 'Slut';
 insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000c5', 'sara@familie.dk');
+
+-- 11f. alternatives ("Alternativer"): the request from the browser, the limit, and the AI agent's three functions.
+-- People: A = mor (asks), B = far (member of A's list, and asks for B's own), C = sara (stranger, no list).
+delete from public.alt_attempts;
+insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000aa05', '00000000-0000-0000-0000-0000000000a1', 'Alt');
+insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa05', '00000000-0000-0000-0000-0000000000b2');
+insert into public.products (user_id, name, source_url, target_type, status, title, offers, normal_price, list_id) values
+  ('00000000-0000-0000-0000-0000000000a1', 'alt1', 'https://www.shop.example.dk/p/1?x=1', 'auto', 'tracking', 'Sony XM5',
+     '[{"store":"A","price":2100,"inStock":false},{"store":"B","price":2300,"inStock":true},{"store":"C","price":2250.5,"inStock":true},{"store":"D","price":"x","inStock":true}]', 2600, '00000000-0000-0000-0000-00000000aa05'),
+  ('00000000-0000-0000-0000-0000000000a1', 'alt2', 'https://shop.example.dk/2', 'auto', 'tracking', null, '[]', null, null),
+  ('00000000-0000-0000-0000-0000000000a1', 'alt3', 'https://shop.example.dk/3', 'auto', 'tracking', 'Tre', '[{"store":"A","price":5,"inStock":false}]', null, null),
+  ('00000000-0000-0000-0000-0000000000a1', 'alt4', 'https://shop.example.dk/4', 'auto', 'tracking', 'Fire', null, null, null),
+  ('00000000-0000-0000-0000-0000000000a1', 'alt5', 'https://shop.example.dk/5', 'auto', 'tracking', 'Fem', 'null', null, null),
+  ('00000000-0000-0000-0000-0000000000a1', 'alt6', 'https://shop.example.dk/6', 'auto', 'tracking', 'Seks', '{"price":5}', null, null),
+  ('00000000-0000-0000-0000-0000000000b2', 'bs-alt', 'https://shop.example.dk/b', 'auto', 'tracking', 'Bs', '[]', null, null);
+-- the message of a statement, or 'ok'
+create function t.err(q text) returns text language plpgsql as $$
+declare n integer; begin execute q; get diagnostics n = row_count; return 'ok' || n; exception when others then return sqlerrm; end $$;
+-- a request from the browser for a product by name, with a forged client value; returns 'ok' or the message
+create function t.req(n text) returns text language plpgsql as $$
+declare c integer; begin
+  update public.products set alt_requested_at = '2000-01-01' where name = n; get diagnostics c = row_count;
+  return case when c = 1 then 'ok' else 'rows ' || c end;
+exception when others then return sqlerrm; end $$;
+-- the agent answers: marks a product as answered (any role) and makes it pending again
+create function t.answered(n text) returns void language sql security definer as $$
+  update public.products set alt_done_at = now(), alternatives = '[{"kind":"similar","name":"Gammel","url":"https://x.dk/a","store":"X","price":1,"why":"g"}]' where name = n $$;
+create function t.age(n text, h numeric) returns void language sql security definer as $$
+  update public.products set alt_requested_at = now() - (h || ' hours')::interval where name = n $$;
+-- the value of a query (as text), run on its own snapshot: use it to read after a change made in the same select
+create function t.q(q text) returns text language plpgsql security definer as $$ declare r text; begin execute q into r; return r; end $$;
+grant execute on function t.q(text) to public;
+grant execute on function t.err(text), t.req(text), t.answered(text), t.age(text, numeric) to public;
+
+set role authenticated;
+select t.asA();
+select t.chk('alt: A asks', t.req('alt1') = 'ok');
+select t.chk('alt: ... the time is the server clock (whatever the client sent)', (select abs(extract(epoch from now() - alt_requested_at)) < 60 from public.products where name = 'alt1'));
+select t.chk('alt: nothing else changed by asking', (select alternatives is null and alt_done_at is null and alt_note is null from public.products where name = 'alt1'));
+select t.chk('alt: a second request while pending is refused with a clear message', t.req('alt1') = 'Der er allerede bedt om alternativer. Vent på svaret.');
+select t.chk('alt: ... also when the client sends a future time or null (null is ignored)',
+  t.err($$update public.products set alt_requested_at = now() + interval '1 day' where name = 'alt1'$$) like 'Der er allerede bedt%'
+  and t.err($$update public.products set alt_requested_at = null where name = 'alt1'$$) = 'ok1'
+  and t.q($$select (alt_requested_at is not null)::text from public.products where name = 'alt1'$$) = 'true');
+select t.chk('alt: sending the same value is no request (no change, no slot used)',
+  t.err($$update public.products set alt_requested_at = (select alt_requested_at from public.products where name = 'alt1'), name = 'alt1' where name = 'alt1'$$) = 'ok1');
+reset role;
+select t.chk('alt: only the one accepted request used a slot', (select count(*) = 1 from public.alt_attempts));
+set role authenticated;
+select t.asA();
+-- forging the AI columns from the browser
+select t.chk('alt: the browser cannot write alternatives, alt_done_at or alt_note (the rest of the update goes through)',
+  t.err($$update public.products set alternatives = '[{"kind":"deal"}]', alt_done_at = now() + interval '1 hour', alt_note = 'snyd', name = 'alt1-nyt' where name = 'alt1'$$) = 'ok1'
+  and t.q($$select (alternatives is null and alt_done_at is null and alt_note is null and name = 'alt1-nyt')::text from public.products where name = 'alt1-nyt'$$) = 'true');
+update public.products set name = 'alt1' where name = 'alt1-nyt';
+select t.chk('alt: a browser insert cannot preset any alt column',
+  t.err($$insert into public.products (name, target_type, alt_requested_at, alternatives, alt_done_at, alt_note) values ('alt-ny', 'auto', now(), '[]', now(), 'x')$$) = 'ok1'
+  and t.q($$select (alt_requested_at is null and alternatives is null and alt_done_at is null and alt_note is null)::text from public.products where name = 'alt-ny'$$) = 'true');
+delete from public.products where name = 'alt-ny';
+reset role;
+select t.chk('alt: the check constraints reject a non-array, 7 items and a 201-character note',
+  t.err($$update public.products set alternatives = '{"a":1}' where name = 'alt3'$$) like '%alternatives_check%'
+  and t.err($$update public.products set alternatives = '[1,2,3,4,5,6,7]' where name = 'alt3'$$) like '%alternatives_check%'
+  and t.err($$update public.products set alt_note = repeat('x', 201) where name = 'alt3'$$) like '%alt_note_check%'
+  and t.err($$update public.products set alternatives = '[]', alt_note = repeat('x', 200) where name = 'alt3'$$) = 'ok1');
+update public.products set alternatives = null, alt_note = null where name = 'alt3';
+
+-- a list member and others
+set role authenticated;
+select t.asB();
+select t.chk('alt: B (member of A''s list) can see A''s product, but cannot ask for alternatives on it',
+  (select count(*) = 1 from public.products where name = 'alt1') and t.req('alt3') = 'rows 0' and t.req('alt1') like 'Kun den, der har tilføjet%');
+select t.chk('alt: ... nor write any alt column on it',
+  t.err($$update public.products set alternatives = '[]' where name = 'alt1'$$) like 'Kun den, der har tilføjet%'
+  and t.err($$update public.products set alt_done_at = now() where name = 'alt1'$$) like 'Kun den, der har tilføjet%'
+  and t.err($$update public.products set alt_note = 'x' where name = 'alt1'$$) like 'Kun den, der har tilføjet%'
+  and t.err($$update public.products set alt_requested_at = null where name = 'alt1'$$) like 'Kun den, der har tilføjet%');
+select t.chk('alt: ... but marking it as bought still works', t.err($$update public.products set bought_at = now(), bought_price = 5 where name = 'alt1'$$) = 'ok1');
+select t.chk('alt: ... and A''s request time is untouched by that', (select alt_requested_at > now() - interval '1 minute' from public.products where name = 'alt1'));
+update public.products set bought_at = null, bought_price = null where name = 'alt1';
+select t.chk('alt: B asks for B''s own product', t.req('bs-alt') = 'ok');
+select t.asC();
+select t.chk('alt: C (a stranger) sees nothing and can ask for nothing', (select count(*) = 0 from public.products) and t.req('alt1') = 'rows 0' and t.req('bs-alt') = 'rows 0');
+select t.chk('alt: a browser user cannot call alt_take_slot() directly', t.err($$select public.alt_take_slot()$$) = 'not allowed');
+reset role;
+select t.chk('alt: the refused direct calls used no slot (A: 1, B: 1)', (select count(*) = 2 from public.alt_attempts));
+set role anon;
+select t.chk('alt: anon cannot touch the log table, nor call alt_take_slot', t.denied('select * from public.alt_attempts') and t.denied($$select public.alt_take_slot()$$));
+reset role;
+set role authenticated;
+select t.chk('alt: authenticated cannot read or write the log table', t.denied('select * from public.alt_attempts') and t.denied($$delete from public.alt_attempts$$));
+reset role;
+
+-- a pending request over 6 hours old counts as failed: a new request is allowed (and takes a slot)
+select t.age('alt1', 5);
+set role authenticated;
+select t.asA();
+select t.chk('alt: pending for 5 hours: still refused', t.req('alt1') like 'Der er allerede%');
+reset role;
+select t.age('alt1', 7);
+set role authenticated;
+select t.asA();
+select t.chk('alt: pending for 7 hours: a new request is allowed', t.req('alt1') = 'ok');
+select t.chk('alt: ... stamped now', (select alt_requested_at > now() - interval '1 minute' from public.products where name = 'alt1'));
+reset role;
+select t.chk('alt: that one used a slot (A: 2, B: 1)', (select count(*) = 2 from public.alt_attempts where user_id = '00000000-0000-0000-0000-0000000000a1')
+  and (select count(*) = 1 from public.alt_attempts where user_id = '00000000-0000-0000-0000-0000000000b2'));
+-- an answered request can be asked again at once; the limit is 5 in 24 hours counted over all products
+select t.answered('alt1'); select t.answered('alt4');
+set role authenticated;
+select t.asA();
+select t.chk('alt: the answered product can be asked again (3 of 5)', t.req('alt1') = 'ok');
+select t.chk('alt: another product (4 of 5)', t.req('alt4') = 'ok');
+reset role;
+select t.answered('alt4');
+set role authenticated;
+select t.asA();
+select t.chk('alt: 5 of 5 (counted across products)', t.req('alt4') = 'ok');
+reset role;
+select t.answered('alt4');
+set role authenticated;
+select t.asA();
+select t.chk('alt: the 6th request in 24 hours is refused with the sentence the page shows', t.req('alt4') = 'Du kan bede om alternativer 5 gange i døgnet.');
+select t.chk('alt: ... also on another product', t.req('alt5') = 'Du kan bede om alternativer 5 gange i døgnet.');
+select t.chk('alt: ... and the refused request changed nothing', (select alt_requested_at is not null from public.products where name = 'alt4') and (select alt_requested_at is null from public.products where name = 'alt5'));
+select t.asB();
+reset role;
+select t.answered('bs-alt');
+set role authenticated;
+select t.asB();
+select t.chk('alt: B is not affected by A''s limit', t.req('bs-alt') = 'ok');
+reset role;
+select t.chk('alt: the log holds 5 for A and 2 for B (the refused ones are not in it)',
+  (select count(*) = 5 from public.alt_attempts where user_id = '00000000-0000-0000-0000-0000000000a1')
+  and (select count(*) = 2 from public.alt_attempts where user_id = '00000000-0000-0000-0000-0000000000b2'));
+-- after 24 hours the slots are free again, old log rows are removed
+update public.alt_attempts set at = now() - interval '25 hours' where user_id = '00000000-0000-0000-0000-0000000000a1' and ctid in (select ctid from public.alt_attempts where user_id = '00000000-0000-0000-0000-0000000000a1' limit 3);
+select t.answered('alt4');
+set role authenticated;
+select t.asA();
+select t.chk('alt: 3 of A''s requests are 25 hours old: 2 left in the window, so a request is allowed', t.req('alt4') = 'ok');
+reset role;
+update public.alt_attempts set at = now() - interval '3 days' where user_id = '00000000-0000-0000-0000-0000000000a1';
+select t.answered('alt4');
+set role authenticated;
+select t.asA();
+select t.chk('alt: ... and old log rows are cleaned away on the next request', t.req('alt4') = 'ok');
+reset role;
+select t.chk('alt: ... only the newest A row is left', (select count(*) = 1 from public.alt_attempts where user_id = '00000000-0000-0000-0000-0000000000a1'));
+-- a new link starts the product over, alternatives go with it
+update public.products set alternatives = '[{"kind":"deal"}]', alt_done_at = now(), alt_note = 'n', alt_requested_at = now() - interval '1 hour' where name = 'alt6';
+set role authenticated;
+select t.asA();
+update public.products set source_url = 'https://shop.example.dk/6b' where name = 'alt6';
+reset role;
+select t.chk('alt: a new link drops the alternatives and the request', (select alternatives is null and alt_done_at is null and alt_note is null and alt_requested_at is null and status = 'pending' from public.products where name = 'alt6'));
+
+-- ---- the AI agent's functions: same token and grants as the resolver functions
+update public.products set alt_requested_at = null, alt_done_at = null, alternatives = null, alt_note = null;
+delete from public.alt_attempts;
+update public.resolver_secret set token = repeat('a', 64);
+update public.products set status = 'tracking', active = true, source_url = 'https://shop.example.dk/6' where name = 'alt6';
+update public.products set title = '   ' where name = 'alt6';
+insert into public.products (user_id, name, source_url, target_type, status, title, offers) values
+  ('00000000-0000-0000-0000-0000000000a1', 'alt7', 'https://shop.example.dk/7', 'auto', 'tracking', 'Syv', '[{"store":"A","price":70,"inStock":true}]'),
+  ('00000000-0000-0000-0000-0000000000a1', 'alt8', 'https://shop.example.dk/8', 'auto', 'tracking', 'Otte', '[]'),
+  ('00000000-0000-0000-0000-0000000000a1', 'alt9', 'https://shop.example.dk/9', 'auto', 'tracking', 'Ni', '[]');
+select t.age('bs-alt', 10); select t.age('alt1', 9); select t.age('alt6', 8); select t.age('alt7', 7); select t.age('alt8', 6); select t.age('alt9', 1);
+select t.age('alt2', 5); select t.age('alt3', 5); select t.age('alt4', 5); select t.age('alt5', 5);
+update public.products set status = 'choose' where name = 'alt3';
+update public.products set alt_done_at = alt_requested_at + interval '1 hour' where name = 'alt4';
+update public.products set active = false where name = 'alt5';
+select set_config('request.headers', '{}', false);
+create function t.tok(h text) returns void language sql as $$ select set_config('request.headers', case when h is null then '{}' else '{"x-resolver-token":"' || h || '"}' end, false) $$;
+grant execute on function t.tok(text) to public;
+create function t.cnt() returns text language plpgsql as $$ begin return (select count(*) from public.ai_alt_list())::text; exception when others then return sqlerrm; end $$;
+grant execute on function t.cnt() to public;
+
+select t.chk('ai: ai_alt_list takes the resolver token: none, empty, wrong, a prefix: all refused with the resolver''s error (as anon and as a signed-in user)', (
+  select bool_and(r) from (
+    select t.cnt() = 'resolver: invalid or missing token' as r from (select t.tok(null)) x union all
+    select t.cnt() = 'resolver: invalid or missing token' from (select t.tok('')) x union all
+    select t.cnt() = 'resolver: invalid or missing token' from (select t.tok('fel')) x union all
+    select t.cnt() = 'resolver: invalid or missing token' from (select t.tok(repeat('a', 63))) x) y));
+set role anon;
+select t.tok(null);
+select t.chk('ai: anon without a token: refused with 42501', t.err($$select * from public.ai_alt_list()$$) = 'resolver: invalid or missing token');
+do $$ begin perform public.ai_alt_list(); raise exception 'no error'; exception when sqlstate '42501' then null; end $$;
+select t.chk('ai: set and fail also need the token (anon)',
+  t.err(format($$select public.ai_alt_set(%L, '[]')$$, t.pid('alt1'))) = 'resolver: invalid or missing token'
+  and t.err(format($$select public.ai_alt_fail(%L, 'x')$$, t.pid('alt1'))) = 'resolver: invalid or missing token');
+reset role;
+set role authenticated;
+select t.asA();
+select t.chk('ai: ... and as a signed-in user without the token',
+  t.cnt() = 'resolver: invalid or missing token'
+  and t.err(format($$select public.ai_alt_set(%L, '[]')$$, t.pid('alt1'))) = 'resolver: invalid or missing token'
+  and t.err(format($$select public.ai_alt_fail(%L, 'x')$$, t.pid('alt1'))) = 'resolver: invalid or missing token');
+reset role;
+select t.chk('ai: nothing was changed by the refused calls', (select count(*) = 0 from public.products where alt_done_at is not null and name <> 'alt4'));
+
+select t.tok(repeat('a', 64));
+set role anon;
+select t.chk('ai: with the token anon can list (5 at most)', t.cnt() = '5');
+select t.chk('ai: oldest request first; only tracking, active, titled, pending ones; at most 5',
+  (select array_agg(title order by requested_at, id) from public.ai_alt_list()) = array['Bs', 'Sony XM5', 'alt6', 'Syv', 'Otte']
+  and (select array_agg(title) from public.ai_alt_list()) = array['Bs', 'Sony XM5', 'alt6', 'Syv', 'Otte']);
+select t.chk('ai: ai_alt_list columns are exactly id, title, price, normal_price, host, requested_at',
+  (select proargnames from pg_proc where proname = 'ai_alt_list') = array['id', 'title', 'price', 'normal_price', 'host', 'requested_at']);
+select t.chk('ai: lowest in-stock price (out of stock and non-numeric prices ignored), normal price, host without www and path',
+  (select price = 2250.5 and normal_price = 2600 and host = 'shop.example.dk' and title = 'Sony XM5' from public.ai_alt_list() where id = t.pid('alt1')));
+select t.chk('ai: no in-stock offer, or offers that are not an array: price null', (select price is null and normal_price is null from public.ai_alt_list() where title = 'Bs'));
+select t.chk('ai: one in-stock offer', (select price = 70 from public.ai_alt_list() where title = 'Syv'));
+select t.chk('ai: a blank title falls back to the product name', (select count(*) = 1 from public.ai_alt_list() where title = 'alt6'));
+select t.chk('ai: nothing about the person (no user_id, no e-mail, no list, no full url)',
+  (select to_jsonb(l)::text !~ '(@|user|list|https|0000-0000-0000-0000-0000000000a1)' from public.ai_alt_list() l limit 1));
+reset role;
+-- offers where the product has a string price, a non-object entry
+update public.products set offers = '[1, "x", null, {"price": 3, "inStock": "true"}, {"price": 9, "inStock": true}]' where name = 'alt7';
+select t.chk('ai: odd offers entries are skipped, never an error', (select price = 9 from public.ai_alt_list() where title = 'Syv'));
+update public.products set offers = '[{"store":"A","price":70,"inStock":true}]' where name = 'alt7';
+
+-- ai_alt_set
+create function t.pend(n text) returns void language sql security definer as $$
+  update public.products set alt_requested_at = now() - interval '1 hour', alt_done_at = null, alternatives = null, alt_note = null, active = true, status = 'tracking' where name = n $$;
+grant execute on function t.pend(text) to public;
+create function t.base() returns jsonb language sql as $$
+  select '{"kind":"deal","name":"Bose QC 45","url":"https://shop.example.dk/bose?id=1","store":"Shop","price":1999,"was":2499,"why":"Rabat på 20 % i dag."}'::jsonb $$;
+create function t.items(patch jsonb, drop_key text default null) returns jsonb language sql as $$
+  select jsonb_build_array((t.base() || coalesce(patch, '{}'::jsonb)) - coalesce(drop_key, '')) $$;
+create function t.aset(items jsonb) returns text language plpgsql as $$
+begin return public.ai_alt_set(t.pid('alt1'), items)::text; exception when others then return sqlstate || ' ' || sqlerrm; end $$;
+grant execute on function t.base(), t.items(jsonb, text), t.aset(jsonb) to public;
+select t.pend('alt1');
+set role anon;
+select t.chk('ai: set: not an array, empty, 7 items, items that are not objects',
+  t.aset('{"a":1}') like '22023 ai_alt: items must be%' and t.aset('[]') like '22023%' and t.aset(null) like '22023%' and t.aset('"x"') like '22023%'
+  and t.aset((select jsonb_agg(t.base()) from generate_series(1, 7))) like '22023%' and t.aset('[1]') like '22023 ai_alt: item 1: not an object' and t.aset('[null]') like '22023%');
+select t.chk('ai: set: extra key, and every required key missing or null',
+  t.aset(t.items('{"extra":1}')) like '22023 ai_alt: item 1: unknown key extra'
+  and t.aset(t.items(null, 'kind')) like '%kind is missing' and t.aset(t.items(null, 'name')) like '%name is missing' and t.aset(t.items(null, 'url')) like '%url is missing'
+  and t.aset(t.items(null, 'store')) like '%store is missing' and t.aset(t.items(null, 'price')) like '%price is missing' and t.aset(t.items(null, 'why')) like '%why is missing'
+  and t.aset(t.items('{"name":null}')) like '%name is missing');
+select t.chk('ai: set: kind', t.aset(t.items('{"kind":"other"}')) like '22023%kind is not valid' and t.aset(t.items('{"kind":"Deal"}')) like '22023%' and t.aset(t.items('{"kind":1}')) like '%must be a string'
+  and t.aset(t.items('{"kind":" "}')) like '22023%');
+select t.chk('ai: set: name 1-120 characters', t.aset(t.items('{"name":""}')) like '%name is not valid' and t.aset(t.items('{"name":"   "}')) like '%name is not valid'
+  and t.aset(t.items(jsonb_build_object('name', repeat('x', 121)))) like '%name is not valid' and t.aset(t.items('{"name":5}')) like '%name must be a string');
+select t.chk('ai: set: store 1-60, why 1-160',
+  t.aset(t.items(jsonb_build_object('store', repeat('x', 61)))) like '%store is not valid' and t.aset(t.items('{"store":""}')) like '%store is not valid'
+  and t.aset(t.items(jsonb_build_object('why', repeat('x', 161)))) like '%why is not valid' and t.aset(t.items('{"why":""}')) like '%why is not valid');
+select t.chk('ai: set: url must be https like products.source_url (no http, port, user:password@, dotless host, space, javascript:, 501 characters)',
+  t.aset(t.items('{"url":"http://shop.dk/x"}')) like '%url is not valid' and t.aset(t.items('{"url":"https://shop.dk:8443/x"}')) like '%url is not valid'
+  and t.aset(t.items('{"url":"https://u:p@shop.dk/x"}')) like '%url is not valid' and t.aset(t.items('{"url":"https://localhost/x"}')) like '%url is not valid'
+  and t.aset(t.items('{"url":"https://shop.dk/a b"}')) like '%url is not valid' and t.aset(t.items('{"url":"javascript:alert(1)"}')) like '%url is not valid'
+  and t.aset(t.items(jsonb_build_object('url', 'https://shop.dk/' || repeat('a', 485)))) like '%url is not valid' and t.aset(t.items('{"url":""}')) like '%url is not valid'
+  and t.aset(t.items('{"url":7}')) like '%url must be a string');
+select t.chk('ai: set: text with control characters, newlines, tabs, angle brackets or invisible direction marks is refused in every text field', (
+  select bool_and(t.aset(t.items(jsonb_build_object(f, v))) like '22023%')
+    from (values ('name'), ('store'), ('why'), ('url')) a(f),
+         (values ('a' || chr(10) || 'b'), ('a' || chr(9) || 'b'), ('a' || chr(7) || 'b'), ('a<b'), ('a>b'), ('<script>x</script>'), ('a' || chr(8238) || 'b'), ('a' || chr(8203) || 'b'), ('a' || chr(65279) || 'b'), ('a' || chr(8232) || 'b')) b(v)));
+select t.chk('ai: set: price must be a number above 0 and below 10 million',
+  t.aset(t.items('{"price":0}')) like '%price must be above 0%' and t.aset(t.items('{"price":-5}')) like '%price must be above 0%' and t.aset(t.items('{"price":"12"}')) like '%price must be a number'
+  and t.aset(t.items('{"price":10000000}')) like '%price must be above 0%' and t.aset(t.items('{"price":0.001}')) like '%price must be above 0%'
+  and t.aset(t.items('{"price":true}')) like '%price must be a number');
+select t.chk('ai: set: was must be a number above price and below 10 million',
+  t.aset(t.items('{"was":1999}')) like '%was must be above price%' and t.aset(t.items('{"was":1000}')) like '%was must be above price%' and t.aset(t.items('{"was":"2499"}')) like '%was must be a number'
+  and t.aset(t.items('{"was":10000000}')) like '%was must be above price%' and t.aset(t.items('{"was":1999.001}')) like '%was must be above price%');
+select t.chk('ai: set: nothing was stored by any refused call', t.q($$select (alternatives is null and alt_done_at is null)::text from public.products where name = 'alt1'$$) = 'true');
+-- a good answer
+select t.chk('ai: set: a good answer returns true', t.aset(t.items('{"name":"  Bose QC 45  ","price":1999.456,"why":" Rabat. "}')) = 'true');
+reset role;
+select t.chk('ai: set: stored as a cleaned copy (trimmed, rounded), alt_done_at = now, alt_note null',
+  (select alternatives = '[{"kind":"deal","name":"Bose QC 45","url":"https://shop.example.dk/bose?id=1","store":"Shop","price":1999.46,"was":2499,"why":"Rabat."}]'::jsonb
+      and abs(extract(epoch from now() - alt_done_at)) < 60 and alt_note is null and alt_done_at >= alt_requested_at from public.products where name = 'alt1'));
+set role anon;
+select t.chk('ai: set: the answer is given once: no longer pending, so false and nothing changes', t.aset(t.items('{"name":"Anden"}')) = 'false'
+  and t.q($$select (alternatives -> 0 ->> 'name' = 'Bose QC 45')::text from public.products where name = 'alt1'$$) = 'true');
+select t.chk('ai: ... and it is gone from the list', (select count(*) = 0 from public.ai_alt_list() where title = 'Sony XM5'));
+reset role;
+select t.pend('alt1');
+set role anon;
+select t.chk('ai: set: 6 items, similar without was, was null is dropped, 500-character url, 120-character name, extreme prices',
+  t.aset((select jsonb_agg(t.base() || jsonb_build_object('kind', 'similar', 'was', null, 'name', repeat('n', 120), 'price', 0.01, 'url', 'https://shop.dk/' || repeat('a', 484)) ) from generate_series(1, 6))) = 'true');
+reset role;
+select t.chk('ai: ... stored with 6 items, no was key, the new answer replaced the old',
+  (select jsonb_array_length(alternatives) = 6 and not (alternatives -> 0 ? 'was') and alternatives -> 0 ->> 'kind' = 'similar' and char_length(alternatives -> 0 ->> 'url') = 500 from public.products where name = 'alt1'));
+select t.pend('alt1');
+set role anon;
+select t.chk('ai: set: price 9999999.99 with was above price is not possible, below the limit is fine', t.aset(t.items('{"price":9999999.99,"was":9999999.995}')) like '%was must be above price%'
+  and t.aset(t.items('{"price":9999999.98,"was":9999999.99}')) = 'true');
+reset role;
+
+-- ai_alt_fail
+select t.pend('alt1');
+update public.products set alternatives = '[{"kind":"deal","name":"x","url":"https://x.dk/a","store":"X","price":1,"why":"g"}]' where name = 'alt1';
+set role anon;
+select t.chk('ai: fail: returns true, drops alternatives, stores the note, alt_done_at = now',
+  public.ai_alt_fail(t.pid('alt1'), '  Fandt intet, der passer.  ') and true);
+reset role;
+select t.chk('ai: fail: stored', (select alternatives is null and alt_note = 'Fandt intet, der passer.' and abs(extract(epoch from now() - alt_done_at)) < 60 from public.products where name = 'alt1'));
+set role anon;
+select t.chk('ai: fail: not pending any more: false, nothing changes', not public.ai_alt_fail(t.pid('alt1'), 'igen')
+  and t.q($$select (alt_note = 'Fandt intet, der passer.')::text from public.products where name = 'alt1'$$) = 'true'
+  and not public.ai_alt_fail(t.pid('alt4'), 'x') and not public.ai_alt_fail('00000000-0000-0000-0000-000000000000', 'x'));
+select t.chk('ai: set: not pending (never asked, or unknown id): false', not public.ai_alt_set(t.pid('alt4'), jsonb_build_array(t.base())) and not public.ai_alt_set('00000000-0000-0000-0000-000000000000', jsonb_build_array(t.base())));
+reset role;
+select t.pend('alt1');
+set role anon;
+select t.chk('ai: fail: a 300-character note is cut to 200, control characters and angle brackets become spaces',
+  public.ai_alt_fail(t.pid('alt1'), repeat('x', 300)));
+reset role;
+select t.chk('ai: fail: ... 200 characters', (select char_length(alt_note) = 200 from public.products where name = 'alt1'));
+select t.pend('alt1');
+set role anon;
+select public.ai_alt_fail(t.pid('alt1'), 'a' || chr(10) || '<b>fed</b>' || chr(7) || 'b');
+reset role;
+select t.chk('ai: fail: ... cleaned', (select alt_note = 'a b fed /b b' from public.products where name = 'alt1'));
+select t.pend('alt1');
+set role anon;
+select public.ai_alt_fail(t.pid('alt1'), '   ');
+reset role;
+select t.chk('ai: fail: an empty note gets a plain sentence', (select alt_note = 'Kunne ikke finde alternativer.' from public.products where name = 'alt1'));
+select t.pend('alt1');
+set role anon;
+select public.ai_alt_fail(t.pid('alt1'), null);
+reset role;
+select t.chk('ai: fail: a null note too', (select alt_note = 'Kunne ikke finde alternativer.' from public.products where name = 'alt1'));
+
+-- the functions work for a request the browser made, end to end, and the person sees the answer
+update public.products set alt_requested_at = null, alt_done_at = null, alternatives = null, alt_note = null;
+set role authenticated;
+select t.asA();
+select t.chk('e2e: A asks', t.req('alt1') = 'ok');
+reset role;
+set role anon;
+select t.chk('e2e: the agent sees it', (select count(*) = 1 from public.ai_alt_list() where title = 'Sony XM5'));
+select t.chk('e2e: ... answers it', public.ai_alt_set(t.pid('alt1'), jsonb_build_array(t.base())));
+select t.chk('e2e: ... and it is not listed again', (select count(*) = 0 from public.ai_alt_list() where title = 'Sony XM5'));
+reset role;
+set role authenticated;
+select t.asA();
+select t.chk('e2e: A reads the answer on the product; the shared list member reads it too, but writes nothing',
+  (select alternatives -> 0 ->> 'name' = 'Bose QC 45' from public.products where name = 'alt1'));
+select t.asB();
+select t.chk('e2e: B (member) reads it', (select alternatives -> 0 ->> 'name' = 'Bose QC 45' from public.products where name = 'alt1'));
+select t.asC();
+select t.chk('e2e: C (stranger) does not', (select count(*) = 0 from public.products where name = 'alt1'));
+reset role;
+select t.tok(null);
+-- grants: the same as the resolver functions
+select t.chk('ai: grants as the resolver functions (anon and authenticated may execute, public may not); alt_take_slot not for anon',
+  has_function_privilege('anon', 'public.ai_alt_list()', 'execute') and has_function_privilege('authenticated', 'public.ai_alt_set(uuid, jsonb)', 'execute')
+  and has_function_privilege('anon', 'public.ai_alt_fail(uuid, text)', 'execute') and not has_function_privilege('anon', 'public.alt_take_slot()', 'execute')
+  and not exists (select 1 from information_schema.routine_privileges where routine_name like 'ai_alt%' and grantee = 'PUBLIC'));
+-- clean up for the final run
+delete from public.products where name ~ '^(alt[0-9]|bs-alt)';
+delete from public.lists where name = 'Alt';
+delete from public.alt_attempts;
+select set_config('request.jwt.claims', '', false);
 
 -- 12. final whole-file run on the populated database
 \o /dev/null
