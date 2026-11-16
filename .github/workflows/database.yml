@@ -1,0 +1,37 @@
+name: Database
+
+# Applies supabase/schema.sql to the live database whenever it changes on main.
+# The script is idempotent: running it again changes nothing that is already in place.
+# Needs the repository secret SUPABASE_DB_URL (the "Session pooler" connection string, with the password filled in).
+on:
+  push:
+    branches: [main]
+    paths:
+      - supabase/schema.sql
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: database
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply schema
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::warning::SUPABASE_DB_URL is not set, so the database was not updated."
+            exit 0
+          fi
+          # Query results go to /dev/null: the script ends by selecting a secret token, which must never reach this public log.
+          psql "$SUPABASE_DB_URL" --no-psqlrc --quiet --output=/dev/null \
+            --set ON_ERROR_STOP=1 --single-transaction --file supabase/schema.sql
+          echo "Database is up to date."
