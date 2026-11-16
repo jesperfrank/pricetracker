@@ -89,6 +89,21 @@ alter table public.products add column if not exists alternatives jsonb
 alter table public.products add column if not exists alt_done_at timestamptz;
 alter table public.products add column if not exists alt_note text check (alt_note is null or char_length(alt_note) <= 200);
 
+-- "Find the cheapest shop" (see "compare" in the resolver section): a product that follows one shop only (source_url is a shop's
+-- product page, not prisjagt.dk) can be switched to its prisjagt.dk page, which lists many shops. compare_state: 'wanted' = the AI
+-- agent is asked to look for the product on Prisjagt, 'done' = it was switched (shop_url keeps the original shop link, so the person
+-- can go back), 'none' = looked for and not found (or the person went back); null = never asked. compare_at = when the state was
+-- set. Written by the job, the AI agent's functions and products_guard only; the person may only request ('wanted') or go back.
+alter table public.products add column if not exists compare_state text;
+alter table public.products add column if not exists compare_at timestamptz;
+alter table public.products add column if not exists shop_url text;
+alter table public.products drop constraint if exists products_compare_state_check;
+alter table public.products add constraint products_compare_state_check check (compare_state is null or compare_state in ('wanted', 'done', 'none'));
+-- shop_url follows the same rule as source_url (see below)
+alter table public.products drop constraint if exists products_shop_url_check;
+alter table public.products add constraint products_shop_url_check check (
+  shop_url is null or (char_length(shop_url) <= 500 and shop_url ~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$'));
+
 -- A product may be added by name only (source_url null); the name must then not be blank.
 -- NOT VALID: enforced for every new/changed row without re-checking old rows.
 alter table public.products drop constraint if exists products_name_not_blank;
@@ -184,6 +199,7 @@ declare
   restricted boolean := current_user in ('authenticated', 'anon');
   uid uuid := auth.uid();
   may_edit_bought boolean;
+  asked_compare text;
 begin
   if not restricted then
     return new;
@@ -196,6 +212,7 @@ begin
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     new.digest_price := null; new.digest_at := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
+    new.compare_state := null; new.compare_at := null; new.shop_url := null;
     -- bought_at / bought_price are the person's own, but the time is the server's and the person is who is signed in
     new.bought_by := null;
     if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; end if;
@@ -233,6 +250,17 @@ begin
       new.alt_requested_at := now();
     end if;
   end if;
+  -- compare: the state is the job's and the AI agent's. Whatever the browser sends is ignored, with two exceptions that only the
+  -- product's own person gets this far for (a list member changing it fails the whole-row check above): a request, compare_state
+  -- 'wanted' (see the source_url block below for going back). A request is accepted for a single-shop product (a link that is not a
+  -- prisjagt.dk page) never asked before, or asked and not found more than 7 days ago; the time is the server's.
+  asked_compare := new.compare_state;
+  new.compare_state := old.compare_state; new.compare_at := old.compare_at; new.shop_url := old.shop_url;
+  if asked_compare is not distinct from 'wanted' and old.compare_state is distinct from 'wanted' and new.source_url is not distinct from old.source_url
+     and old.source_url is not null and old.source_url !~* '^https://(www\.)?prisjagt\.dk([/?#]|$)'
+     and (old.compare_state is null or (old.compare_state = 'none' and coalesce(old.compare_at, '-infinity') < now() - interval '7 days')) then
+    new.compare_state := 'wanted'; new.compare_at := now();
+  end if;
   -- bought: marking stamps the server time and the person once; the time and the person cannot be edited afterwards
   -- (only cleared, which also clears the price)
   if old.bought_at is null then
@@ -257,6 +285,13 @@ begin
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     new.digest_price := null; new.digest_at := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
+    -- A new link is the person's own choice: the comparison starts over, except for going back to the original shop link after a
+    -- switch to Prisjagt (exactly shop_url): that is 'none' from now on, so the product is not switched again.
+    if old.compare_state = 'done' and old.shop_url is not null and new.source_url = old.shop_url then
+      new.compare_state := 'none'; new.compare_at := now(); new.shop_url := null;
+    else
+      new.compare_state := null; new.compare_at := null; new.shop_url := null;
+    end if;
   end if;
   return new;
 end;
@@ -610,9 +645,16 @@ end;
 $$;
 revoke all on function public.resolver_token_ok() from public, anon, authenticated;
 
--- Up to 20 products with a name but no link yet, oldest first. No user ids, no e-mails.
-create or replace function public.resolver_list()
-returns table (id uuid, name text, created_at timestamptz)
+-- What the AI agent has to do, at most 10 rows, nothing about the person. kind 'name': a product with a name but no link yet (people
+-- are waiting: these come first, oldest first). kind 'compare': a single-shop product that should be looked for on Prisjagt
+-- (compare_state 'wanted', oldest request first); name is then the product's title as the job read it (else the name the person gave),
+-- host the shop's host name (no path, no query) and price the current lowest in-stock price (null when there is none), so the agent can
+-- check that a Prisjagt page is the same product at a sensible price. For kind 'name' host and price are null.
+-- The return type grew (kind, host, price): Postgres cannot change it with create or replace, so the function is dropped first
+-- (safe to re-run) and its grants are stated again below.
+drop function if exists public.resolver_list();
+create function public.resolver_list()
+returns table (id uuid, name text, created_at timestamptz, kind text, host text, price numeric)
 language plpgsql
 stable
 security definer
@@ -623,11 +665,24 @@ begin
     raise exception 'resolver: invalid or missing token' using errcode = '42501';
   end if;
   return query
-    select p.id, p.name, p.created_at
-    from public.products p
-    where p.active and p.source_url is null and p.status = 'pending'
-    order by p.created_at, p.id
-    limit 20;
+    select x.id, x.name, x.created_at, x.kind, x.host, x.price
+    from (
+      select p.id, p.name, p.created_at, 'name'::text as kind, null::text as host, null::numeric as price,
+             0 as grp, p.created_at as ord
+        from public.products p
+       where p.active and p.source_url is null and p.status = 'pending'
+      union all
+      select p.id, left(coalesce(nullif(btrim(p.title), ''), p.name), 200), p.created_at, 'compare'::text,
+             nullif(regexp_replace(substring(p.source_url from '^https://([^/?#]+)'), '^www\.', ''), ''),
+             (select min((o ->> 'price')::numeric)
+                from jsonb_array_elements(case when jsonb_typeof(p.offers) = 'array' then p.offers else '[]'::jsonb end) o
+               where jsonb_typeof(o) = 'object' and o -> 'inStock' = 'true'::jsonb and jsonb_typeof(o -> 'price') = 'number'),
+             1, coalesce(p.compare_at, p.created_at)
+        from public.products p
+       where p.active and p.compare_state = 'wanted' and p.source_url is not null
+    ) x
+    order by x.grp, x.ord, x.id
+    limit 10;
 end;
 $$;
 
@@ -682,12 +737,58 @@ begin
 end;
 $$;
 
+-- The answer to a 'compare' row. p_url is the product's prisjagt.dk page, exactly https://prisjagt.dk/product.php?p=<digits> (a leading
+-- www. is dropped): the product is then switched to it. The original shop link is kept in shop_url, compare_state becomes 'done', and the
+-- job-written state is reset exactly as products_guard does when the person changes the link, so the job fetches the Prisjagt page as a
+-- new product (status 'pending'). The person's own fields (name, goal, list, bought, shop choices) and the alternatives stay.
+-- p_url null: the product was not found on Prisjagt (or is not the same product): compare_state 'none', nothing else changes.
+-- Any other link raises 22023 and changes nothing. Returns true when the product was waiting, false when it is not (any more).
+create or replace function public.resolver_compare(p_id uuid, p_url text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  u text;
+  n integer;
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  if p_url is null then
+    update public.products
+       set compare_state = 'none', compare_at = now()
+     where id = p_id and active and compare_state = 'wanted';
+    get diagnostics n = row_count;
+    return n = 1;
+  end if;
+  u := regexp_replace(btrim(p_url), '^https://www\.prisjagt\.dk/', 'https://prisjagt.dk/');
+  if u !~ '^https://prisjagt\.dk/product\.php\?p=[0-9]{1,18}$' then
+    raise exception 'resolver: not a prisjagt.dk product link' using errcode = '22023';
+  end if;
+  -- the same reset as the source_url block of products_guard (without the alternatives, which stay)
+  update public.products
+     set shop_url = source_url, source_url = u, compare_state = 'done', compare_at = now(),
+         status = 'pending', tracked_variants = null,
+         title = null, variants = null, offers = null, history = null,
+         normal_price = null, verdict = null, warning = null, check_note = null,
+         last_checked = null, notified_price = null, notified_at = null, backfill_state = null,
+         digest_price = null, digest_at = null
+   where id = p_id and active and compare_state = 'wanted' and source_url is not null;
+  get diagnostics n = row_count;
+  return n = 1;
+end;
+$$;
+
 revoke all on function public.resolver_list() from public;
 revoke all on function public.resolver_set(uuid, text) from public;
 revoke all on function public.resolver_fail(uuid, text) from public;
+revoke all on function public.resolver_compare(uuid, text) from public;
 grant execute on function public.resolver_list() to anon, authenticated;
 grant execute on function public.resolver_set(uuid, text) to anon, authenticated;
 grant execute on function public.resolver_fail(uuid, text) to anon, authenticated;
+grant execute on function public.resolver_compare(uuid, text) to anon, authenticated;
 
 -- ---------------------------------------------------------------- access requests
 -- A visitor asks for access on the login screen (request_access, callable without login). The owner

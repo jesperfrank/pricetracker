@@ -180,7 +180,9 @@
       userId: r.user_id || null, boughtBy: r.bought_by || null,
       // alternatives: altOk = the database has the columns (an older database does not send them, and the feature stays hidden)
       altOk: "alt_requested_at" in r, altReq: r.alt_requested_at || null, altDone: r.alt_done_at || null,
-      alts: Array.isArray(r.alternatives) ? r.alternatives : null, altNote: typeof r.alt_note === "string" ? r.alt_note : ""
+      alts: Array.isArray(r.alternatives) ? r.alternatives : null, altNote: typeof r.alt_note === "string" ? r.alt_note : "",
+      // compare ("find the cheapest shop"): cmpOk = the database has the columns. cmp: 'wanted' | 'done' | 'none' | null; shopUrl = the original shop link after a switch
+      cmpOk: "compare_state" in r, cmp: r.compare_state || null, cmpAt: r.compare_at || null, shopUrl: r.shop_url || null
     };
   }
   function offersOf(p) {
@@ -320,7 +322,7 @@
     var b = bestOf(p), t = targetKr(p), os = offersOf(p), st;
     var anyStock = os.some(function (o) { return o.inStock !== false; });
     if (p.status === "pending") st = p.url ? "Henter produktet …" : "Finder produktet …";
-    else if (p.status === "error") st = '<span class="warn">' + esc(p.checkNote || "Produktet kunne ikke hentes") + '</span>';
+    else if (p.status === "error") st = '<span class="warn">' + esc(cmpErrText(p) || "Produktet kunne ikke hentes") + '</span>';
     else if (awaitingFetch(p)) st = "Henter priser for den valgte variant …";
     else if (p.status === "choose") st = isMine(p) ? '<span class="out">Vælg variant</span>' : '<span class="out">Variant ikke valgt</span>';
     else if (p.boughtAt && p.status === "tracking") {
@@ -432,24 +434,24 @@
   function bodyHtml(p) {
     var id = p._id;
     if (p.status === "pending" && !p.url) return findHtml(p) + footHtml(p);
-    if (p.status === "pending") return footHtml(p);
+    if (p.status === "pending") return cmpHtml(p) + footHtml(p);
     if (p.status === "error" && !p.url)
       return '<p class="verdict poor"><b>Produktet blev ikke fundet.</b> ' + esc(p.checkNote || "Find det selv på Prisjagt, og indsæt linket her.") + '</p>' + findHtml(p, true) + footHtml(p);
     if (p.status === "error") {
       var f = mayEdit(p) ? '<form class="edit" data-fixurl="' + esc(id) + '" novalidate><label class="vh" for="u-' + esc(id) + '">Link til produktet</label>' +
         '<input class="wide" type="url" id="u-' + esc(id) + '" maxlength="500" required value="' + esc(p.url || "") + '" placeholder="Link fra prisjagt.dk eller en butik">' +
         '<button class="link" type="submit">Gem linket og prøv igen</button><span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></form>' : "";
-      return '<p class="verdict poor"><b>Produktet kunne ikke hentes.</b> ' + esc(p.checkNote || "Tjek, at linket er en produktside.") + '</p>' + f + footHtml(p);
+      return '<p class="verdict poor"><b>Produktet kunne ikke hentes.</b> ' + esc(cmpErrText(p) || "Tjek, at linket er en produktside.") + '</p>' + cmpHtml(p) + f + footHtml(p);
     }
     if (awaitingFetch(p))
-      return '<div class="foot"><span>Variant: ' + esc(variantLabels(p)) + '</span>' + (mayEdit(p) && !isShopUrl(p.url) ? '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>' : '') + '</div>' + footHtml(p);
-    if (p.status === "choose") return (isMine(p) ? chooserHtml(p) : '<p class="note">Variant ikke valgt endnu.</p>') + footHtml(p);
+      return '<div class="foot"><span>Variant: ' + esc(variantLabels(p)) + '</span>' + (mayEdit(p) && !isShopUrl(p.url) ? '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>' : '') + '</div>' + cmpHtml(p) + footHtml(p);
+    if (p.status === "choose") return (isMine(p) ? chooserHtml(p) : '<p class="note">Variant ikke valgt endnu.</p>') + cmpHtml(p) + footHtml(p);
 
     var b = bestOf(p), h = histOf(p), now = Date.now(), html = "";
     if (state.note[id]) html += '<p class="note">' + esc(state.note[id]) + '</p>';
     if (state.change[id]) html += chooserHtml(p);
     var single = isShopUrl(p.url);
-    if (single && p.checkNote) html += '<p class="note">' + esc(p.checkNote) + '</p>';
+    if (single && p.checkNote) html += '<p class="note">' + esc(cmpErrText(p)) + '</p>';
     var v = p.verdict;
     if (v && v.text) {
       var lab = { good: "Godt tilbud.", ok: "Almindelig pris.", poor: "Ikke et godt tilbud.", unknown: "For tidligt at sige." }[v.level] || "";
@@ -458,12 +460,13 @@
     if (p.targetType === "auto" && autoReason(p) && !(v && v.text === autoReason(p))) html += '<p class="note">' + esc(autoReason(p)) + '</p>';
     if (p.warning) html += '<p class="verdict poor"><b>Pas på førprisen.</b> ' + esc(p.warning) + '</p>';
     if (single) {
-      html += '<p class="note">Kun denne butik. Et link fra prisjagt.dk sammenligner flere.</p>';
+      html += '<p class="note">Kun denne butik. Et link fra prisjagt.dk sammenligner flere.</p>' + cmpHtml(p);
     } else if (p.variants.length) {
       html += '<div class="foot"><span>' + (p.variants.length > 1 ? "Variant: " + esc(variantLabels(p) || "alle") : "") + '</span>';
       if (mayEdit(p) && !state.change[id]) html += '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>';
       html += '</div>';
     }
+    if (!single) html += cmpHtml(p);
 
     var last30 = h.filter(function (x) { return x.t >= now - 30 * DAY; });
     var low30 = last30.length ? Math.min.apply(null, last30.map(function (x) { return x.p; })) : null;
@@ -575,6 +578,45 @@
     if (m === ALT_LIMIT) return ALT_LIMIT;
     if (/^Der er allerede bedt om alternativer/.test(m)) return "Der er allerede bedt om alternativer.";
     return "Kunne ikke gemme lige nu. Prøv igen om lidt.";
+  }
+
+  // ---- compare: a product that follows one shop can be switched to Prisjagt (the AI agent finds the page), and switched back ----
+  // The state is the server's (compare_state, written by the job and the AI agent); the person can only ask ('wanted') and go back
+  // (source_url = the original shop link). A quiet line each, nothing in the product row.
+  var CMP_WAIT = 7 * 24 * 36e5, CMP_REFUSED = "Butikken afviser automatiske opslag.";
+  function cmpSingle(p) { return !!p.url && isShopUrl(p.url); }
+  function cmpTime(v) { var t = Date.parse(v); return isFinite(t) ? t : null; }
+  // the original shop link of a switched product, only when it is an https link to one shop (it came from the database: checked again)
+  function cmpShopLink(p) {
+    var u = p.shopUrl;
+    return typeof u === "string" && /^https:\/\//i.test(u) && parseLink(u) && isShopUrl(u) ? u : null;
+  }
+  // may the person ask? A shop link, not asked before (or asked and not found more than 7 days ago); their own product, not bought
+  function cmpMayAsk(p) {
+    if (!p.cmpOk || !mayEdit(p) || p.boughtAt || !cmpSingle(p) || (p.status !== "tracking" && p.status !== "error")) return false;
+    if (p.cmp === null) return true;
+    var t = cmpTime(p.cmpAt);
+    return p.cmp === "none" && (t === null || Date.now() - t > CMP_WAIT);
+  }
+  // the error text of a shop that refuses, when a comparison is being looked for: the one line says both
+  function cmpErrText(p) {
+    if (p.cmpOk && p.cmp === "wanted" && cmpSingle(p) && p.checkNote === CMP_REFUSED) return "Butikken afviser opslag. Leder efter andre butikker.";
+    return p.checkNote;
+  }
+  function cmpHtml(p) {
+    if (!p.cmpOk) return "";
+    var id = p._id, msg = '<span class="meta" data-rowmsg="cmp-' + esc(id) + '">' + esc(state.rowMsg["cmp-" + id] || "") + '</span>';
+    if (p.cmp === "done" && !cmpSingle(p)) {
+      var u = cmpShopLink(p);
+      if (!u) return "";
+      return '<p class="note cmp">Skiftet til Prisjagt for at sammenligne butikker. <a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">Oprindelig butik</a>' +
+        (mayEdit(p) ? ' <button type="button" class="link" data-act="cmp-undo" data-id="' + esc(id) + '">Fortryd</button> ' + msg : '') + '</p>';
+    }
+    if (!cmpSingle(p)) return "";
+    if (p.cmp === "wanted") return p.checkNote === CMP_REFUSED ? "" : '<p class="note cmp">Leder efter flere butikker.</p>';
+    if (cmpMayAsk(p)) return '<p class="note cmp"><button type="button" class="link" data-act="cmp-find" data-id="' + esc(id) + '">Find flere butikker</button> ' + msg + '</p>';
+    if (p.cmp === "none") return '<p class="note cmp">Fandt ikke varen hos andre butikker.</p>';
+    return "";
   }
 
   // ---- lists: chips above the product list ----
@@ -1088,6 +1130,24 @@
         if (r && r.error) { b.disabled = false; setRowMsg("alt-" + id, altError(r.error)); onWriteError(r.error); return; }
         p.altReq = new Date().toISOString(); p.alts = null; p.altNote = ""; state.rowMsg["alt-" + id] = ""; render(); fetchProducts();
       }, function () { b.disabled = false; setRowMsg("alt-" + id, altError(null)); });
+    }
+    else if (act === "cmp-find" && sb && p && cmpMayAsk(p)) {
+      b.disabled = true; setRowMsg("cmp-" + id, "");
+      sb.from("products").update({ compare_state: "wanted" }).eq("id", id).then(function (r) {
+        if (r && r.error) { b.disabled = false; setRowMsg("cmp-" + id, "Kunne ikke gemme lige nu. Prøv igen om lidt."); onWriteError(r.error); return; }
+        p.cmp = "wanted"; p.cmpAt = new Date().toISOString(); state.rowMsg["cmp-" + id] = ""; render(); fetchProducts();
+      }, function () { b.disabled = false; setRowMsg("cmp-" + id, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+    }
+    else if (act === "cmp-undo" && sb && p && p.cmp === "done" && mayEdit(p) && cmpShopLink(p)) {
+      // back to the original shop link, exactly as it is stored (the database tells a way back from a new link by comparing the two)
+      var back = cmpShopLink(p);
+      b.disabled = true; setRowMsg("cmp-" + id, "");
+      sb.from("products").update({ source_url: back }).eq("id", id).then(function (r) {
+        if (r && r.error) { b.disabled = false; setRowMsg("cmp-" + id, "Kunne ikke gemme lige nu. Prøv igen om lidt."); onWriteError(r.error); return; }
+        // the database starts the product over on a new link and will not look for other shops again
+        p.url = back; p.status = "pending"; p.checkNote = ""; p.cmp = "none"; p.cmpAt = new Date().toISOString(); p.shopUrl = null; state.rowMsg["cmp-" + id] = "";
+        render(); fetchProducts();
+      }, function () { b.disabled = false; setRowMsg("cmp-" + id, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
     }
     else if (act === "alt-follow" && sb && p) {
       var alt = altShown(p)[+b.dataset.i], au = alt && typeof alt.url === "string" ? parseLink(alt.url) : null;

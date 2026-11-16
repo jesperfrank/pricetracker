@@ -274,9 +274,22 @@ function pickCandidates(wishList, have) {
 async function addProducts(sb, imp, take, title, log) {
   const pl = await pickList(sb, imp, title, log);
   // status exactly as a product added in the browser: 'pending' (the job fetches the first price), goal 'auto'
-  const rows = take.map((c) => ({ user_id: imp.user_id, name: c.name, source_url: c.source_url, target_type: 'auto', target_value: null, list_id: pl.listId, active: true, status: 'pending' }));
-  await sb.insert('products', rows, false);
+  // A wish with one shop's link only follows that shop: the AI agent is asked to look for the product on Prisjagt (compare_state
+  // 'wanted'). A prisjagt.dk link is already the comparison; a wish without a link is found by name first.
+  const rows = take.map((c) => ({ user_id: imp.user_id, name: c.name, source_url: c.source_url, target_type: 'auto', target_value: null, list_id: pl.listId, active: true, status: 'pending', compare_state: wantsCompare(c.source_url) ? 'wanted' : null }));
+  try { await sb.insert('products', rows, false); }
+  catch (e) {
+    // the database has not been given the compare columns yet (the script is applied on push): add the products without them
+    if (!/compare_state/i.test(String(e && (e.body || e.message) || ''))) throw e;
+    await sb.insert('products', rows.map((r) => { const o = Object.assign({}, r); delete o.compare_state; return o; }), false);
+  }
   return pl;
+}
+
+// true for a link to one web shop's product page (not prisjagt.dk)
+function wantsCompare(u) {
+  if (!u) return false;
+  try { return !SHOP.isPrisjagtHost(new URL(u).hostname); } catch (e) { return false; }
 }
 
 // Returns {status, note, found, added, ...}. Throws ImportError('deadline') when out of time (the import then stays pending).

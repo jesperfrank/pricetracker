@@ -26,7 +26,7 @@ const FAKE = `
   var ticks = [], realSetInterval = window.setInterval;
   window.setInterval = function (fn, ms) { if (ms === 60000) ticks.push(fn); return realSetInterval.apply(window, arguments); };
   window.__tick = function () { ticks.forEach(function (f) { f(); }); };
-  var JOB = ["status","title","variants","offers","history","normal_price","verdict","warning","check_note","last_checked","notified_price","notified_at","backfill_state","digest_price","digest_at","alternatives","alt_done_at","alt_note"];
+  var JOB = ["status","title","variants","offers","history","normal_price","verdict","warning","check_note","last_checked","notified_price","notified_at","backfill_state","digest_price","digest_at","alternatives","alt_done_at","alt_note","compare_at","shop_url"];
   function clone(x) { return JSON.parse(JSON.stringify(x)); }
   function builder(table) {
     var q = { op: "select", payload: null, filters: [], single: null, sel: false };
@@ -85,6 +85,14 @@ const FAKE = `
             if (table === "products" && "alt_requested_at" in q.payload && q.payload.alt_requested_at) r.alt_requested_at = new Date().toISOString();   // products_guard: the server stamps the time
             if (table === "products" && "alt_requested_at" in q.payload) delete q.payload.alt_requested_at;
             var newLink = "source_url" in q.payload && q.payload.source_url !== r.source_url;
+            if (table === "products" && "compare_state" in r) {   // products_guard: the state is the server's; a request, or the way back to the original shop link
+              if (newLink) {
+                if (r.compare_state === "done" && r.shop_url && q.payload.source_url === r.shop_url) { r.compare_state = "none"; r.compare_at = new Date().toISOString(); r.shop_url = null; }
+                else { r.compare_state = null; r.compare_at = null; r.shop_url = null; }
+              } else if (q.payload.compare_state === "wanted" && r.compare_state !== "wanted" && r.source_url && !/^https:[/][/](www[.])?prisjagt[.]dk/i.test(r.source_url)
+                         && (r.compare_state == null || (r.compare_state === "none" && Date.now() - Date.parse(r.compare_at) > 7 * 864e5))) { r.compare_state = "wanted"; r.compare_at = new Date().toISOString(); }
+              delete q.payload.compare_state;
+            }
             if ("bought_price" in q.payload && q.payload.bought_price !== null && !(q.payload.bought_price > 0 && q.payload.bought_price <= 10000000)) return;   // check constraint (see below)
             Object.keys(q.payload).forEach(function (k) { if (JOB.indexOf(k) < 0) r[k] = clone(q.payload[k]); });
             if (q.payload.bought_at) r.bought_at = "2026-11-16T12:00:00Z";   // products_guard: the server stamps the time
@@ -1720,6 +1728,106 @@ let base;
       await q.waitForFunction(() => document.getElementById("shDigest").checked);
       check("digest: shown on when the profile has it on", true);
       await q.context().close();
+    }
+  }
+
+  // 10f. compare: a single-shop product can be switched to Prisjagt by the AI agent, and the person can go back
+  {
+    const DAY = 864e5, ago = d => new Date(Date.now() - d * DAY).toISOString();
+    const SHOP = "https://www.adidas.dk/sko/samba-og", ORIG = "https://www.proshop.dk/Mus/Logitech-MX?utm=1";
+    const sh = (id, over) => row("test-dyson-v15", Object.assign({ id, name: "Samba " + id, source_url: SHOP, title: "Samba OG", tracked_variants: ["shop"],
+      variants: [{ id: "shop", label: "Adidas", lowest: 899, offers: 1, sample: "Samba OG" }], offers: [{ store: "Adidas", price: 899, url: SHOP, inStock: true, note: null, variant: "shop" }],
+      check_note: null, compare_state: null, compare_at: null, shop_url: null }, over || {}));
+    const body = (p, id) => p.locator('.item:has([data-id="' + id + '"]) .body');
+    const cmpText = async (p, id) => { const l = body(p, id).locator(".cmp"); return (await l.count()) ? (await l.first().innerText()).replace(/\s+/g, " ").trim() : null; };
+    const headText = async (p, id) => (await p.locator('.head[data-id="' + id + '"]').innerText()).replace(/\s+/g, " ");
+    {   // asking
+      const noCol = sh("c0"); delete noCol.compare_state; delete noCol.compare_at; delete noCol.shop_url;
+      const p = await open({ products: [sh("c1"), noCol, sh("c3", { bought_at: ago(1), bought_price: 800 }), sh("c4", { status: "pending", last_checked: null, offers: null }), row("test-ps5-pro", { id: "pj", compare_state: null, compare_at: null, shop_url: null }),
+        sh("c5", { user_id: "o9", list_id: "lx" })], lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], label: "compare-ask" });
+      await p.waitForSelector(".item");
+      for (const id of ["c1", "c0", "c3", "c4", "pj", "c5"]) await p.click('.head[data-id="' + id + '"]');
+      check("compare: a quiet 'Find flere butikker' action on an own single-shop product that was never asked", (await body(p, "c1").locator('[data-act="cmp-find"]').textContent()) === "Find flere butikker");
+      check("compare: a database without the columns shows nothing about it", (await body(p, "c0").locator(".cmp").count()) === 0 && !/Find flere|Leder efter|Fandt ikke|Skiftet til/.test(await body(p, "c0").innerText()));
+      check("compare: no action on a bought product, a product not fetched yet, a prisjagt product or someone else's product",
+        (await body(p, "c3").locator('[data-act="cmp-find"]').count()) === 0 && (await body(p, "c4").locator('[data-act="cmp-find"]').count()) === 0 && (await body(p, "pj").locator('[data-act="cmp-find"]').count()) === 0
+        && (await body(p, "c5").locator('[data-act="cmp-find"]').count()) === 0 && (await body(p, "pj").locator(".cmp").count()) === 0);
+      await p.click('[data-act="cmp-find"][data-id="c1"]');
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      const o = (await ops(p))[0];
+      check("compare: the request writes only compare_state = 'wanted' (the server stamps the time)", o.table === "products" && o.op === "update" && o.filters[0][1] === "c1" && JSON.stringify(o.payload) === '{"compare_state":"wanted"}', JSON.stringify(o));
+      await p.waitForFunction(() => /Leder efter flere butikker/.test(document.body.innerText));
+      check("compare: then 'Leder efter flere butikker.' and no action; nothing in the row", (await cmpText(p, "c1")) === "Leder efter flere butikker." && (await body(p, "c1").locator('[data-act="cmp-find"]').count()) === 0 && !/Leder efter/.test(await headText(p, "c1")));
+      await p.waitForTimeout(150);
+      check("compare: ... and after the list is read again", (await cmpText(p, "c1")) === "Leder efter flere butikker.");
+      await p.context().close();
+    }
+    {   // the states
+      const p = await open({ products: [sh("w1", { compare_state: "wanted", compare_at: ago(1) }), sh("n1", { compare_state: "none", compare_at: ago(3) }), sh("n2", { compare_state: "none", compare_at: ago(8) }),
+        sh("n3", { compare_state: "none", compare_at: ago(3), user_id: "o9", list_id: "lx" }), sh("w3", { compare_state: "wanted", compare_at: ago(1), user_id: "o9", list_id: "lx" })], lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], label: "compare-states" });
+      await p.waitForSelector(".item");
+      for (const id of ["w1", "n1", "n2", "n3", "w3"]) await p.click('.head[data-id="' + id + '"]');
+      check("compare: wanted: the quiet line, no action", (await cmpText(p, "w1")) === "Leder efter flere butikker." && (await body(p, "w1").locator('[data-act="cmp-find"]').count()) === 0);
+      check("compare: none for less than 7 days: 'Fandt ikke varen hos andre butikker.' and no action", (await cmpText(p, "n1")) === "Fandt ikke varen hos andre butikker." && (await body(p, "n1").locator('[data-act="cmp-find"]').count()) === 0);
+      check("compare: none for more than 7 days: the action is back", (await body(p, "n2").locator('[data-act="cmp-find"]').textContent()) === "Find flere butikker");
+      check("compare: others see the lines on a shared product but cannot ask", (await cmpText(p, "n3")) === "Fandt ikke varen hos andre butikker." && (await cmpText(p, "w3")) === "Leder efter flere butikker." && (await p.locator('.item [data-act="cmp-find"][data-id="n3"]').count()) === 0);
+      check("compare: no em-dash and no exclamation mark in any of it", !/[—!]/.test(await cmpText(p, "w1") + await cmpText(p, "n1")));
+      await p.context().close();
+    }
+    {   // a shop error
+      const R = "Butikken afviser automatiske opslag.";
+      const p = await open({ products: [sh("x1", { status: "error", check_note: R, compare_state: "wanted", compare_at: ago(1), offers: null, last_checked: ago(1) }), sh("x2", { status: "error", check_note: R, compare_state: null, offers: null }),
+        sh("x3", { status: "error", check_note: "Kunne ikke finde en pris på siden.", compare_state: "wanted", compare_at: ago(1), offers: null }), sh("x4", { status: "tracking", check_note: R, compare_state: "wanted", compare_at: ago(1) }),
+        sh("x5", { status: "error", check_note: R, compare_state: "none", compare_at: ago(2), offers: null })], label: "compare-error" });
+      await p.waitForSelector(".item");
+      for (const id of ["x1", "x2", "x3", "x4", "x5"]) await p.click('.head[data-id="' + id + '"]');
+      check("compare: refused and wanted: 'Butikken afviser opslag. Leder efter andre butikker.' in the row", /Butikken afviser opslag\. Leder efter andre butikker\./.test(await headText(p, "x1")) && !/automatiske/.test(await headText(p, "x1")), await headText(p, "x1"));
+      check("compare: ... and in the detail, once", /Butikken afviser opslag\. Leder efter andre butikker\./.test(await body(p, "x1").innerText()) && (await cmpText(p, "x1")) === null);
+      check("compare: refused, not wanted: the existing text", /Butikken afviser automatiske opslag\./.test(await headText(p, "x2")) && !/Leder efter/.test(await headText(p, "x2")) && (await body(p, "x2").locator('[data-act="cmp-find"]').count()) === 1);
+      check("compare: another error and wanted: the existing error text, and the quiet line in the detail", /Kunne ikke finde en pris på siden\./.test(await headText(p, "x3")) && !/Leder efter/.test(await headText(p, "x3")) && (await cmpText(p, "x3")) === "Leder efter flere butikker.");
+      check("compare: a tracked product whose shop starts to refuse says it once in the detail", /Butikken afviser opslag\. Leder efter andre butikker\./.test(await body(p, "x4").innerText()) && !/automatiske/.test(await body(p, "x4").innerText()));
+      check("compare: refused and none: the existing text", /Butikken afviser automatiske opslag\./.test(await headText(p, "x5")) && (await cmpText(p, "x5")) === "Fandt ikke varen hos andre butikker.");
+      await p.context().close();
+    }
+    {   // switched
+      const PJ = "https://prisjagt.dk/product.php?p=555";
+      const sw = (id, over) => row("test-dyson-v15", Object.assign({ id, name: "Mus " + id, source_url: PJ, compare_state: "done", compare_at: ago(1), shop_url: ORIG }, over || {}));
+      const evil = sw("d4", { shop_url: "javascript:alert(1)" }), http = sw("d5", { shop_url: "http://shop.dk/x" }), pjOrig = sw("d6", { shop_url: "https://prisjagt.dk/product.php?p=1" });
+      const p = await open({ products: [sw("d1"), sw("d2", { user_id: "o9", list_id: "lx" }), sw("d3", { status: "pending", variants: null, offers: null, history: null, title: null, last_checked: null }), evil, http, pjOrig], lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], label: "compare-done" });
+      await p.waitForSelector(".item");
+      for (const id of ["d1", "d2", "d3", "d4", "d5", "d6"]) await p.click('.head[data-id="' + id + '"]');
+      check("compare: switched: 'Skiftet til Prisjagt for at sammenligne butikker.' with 'Oprindelig butik' and 'Fortryd'", /^Skiftet til Prisjagt for at sammenligne butikker\. Oprindelig butik Fortryd/.test(await cmpText(p, "d1")), await cmpText(p, "d1"));
+      const a = body(p, "d1").locator(".cmp a");
+      check("compare: the link goes to the original shop, in a new tab, noopener", (await a.getAttribute("href")) === ORIG && /noopener/.test(await a.getAttribute("rel")) && (await a.getAttribute("target")) === "_blank");
+      check("compare: nothing about it in the row", !/Skiftet|Fortryd|Oprindelig/.test(await headText(p, "d1")));
+      check("compare: someone else's switched product shows the line and the link, but no 'Fortryd'", /Oprindelig butik/.test(await cmpText(p, "d2")) && (await body(p, "d2").locator('[data-act="cmp-undo"]').count()) === 0);
+      check("compare: a switched product not fetched yet shows the line too (so it can be undone at once)", (await body(p, "d3").locator('[data-act="cmp-undo"]').count()) === 1);
+      check("compare: a stored link that is not an https shop link (javascript:, http:, prisjagt) is never shown, and nothing to undo to",
+        (await cmpText(p, "d4")) === null && (await cmpText(p, "d5")) === null && (await cmpText(p, "d6")) === null && (await p.locator('[data-act="cmp-undo"]').count()) === 2 && (await p.locator('a[href^="javascript"]').count()) === 0);
+      check("compare: a prisjagt product after a switch is an ordinary prisjagt product ('Skift variant', no single-shop line)", /Skift variant/.test(await body(p, "d1").innerText()) && !/Kun denne butik/.test(await body(p, "d1").innerText()));
+      await p.click('[data-act="cmp-undo"][data-id="d1"]');
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      const o = (await ops(p))[0];
+      check("compare: 'Fortryd' writes only source_url = the original shop link, exactly as stored", o.table === "products" && o.op === "update" && o.filters[0][1] === "d1" && JSON.stringify(o.payload) === JSON.stringify({ source_url: ORIG }), JSON.stringify(o));
+      await p.waitForFunction(() => /Fandt ikke varen/.test(document.body.innerText) || !/Skiftet til Prisjagt/.test(document.querySelector('.head[data-id="d1"]').closest(".item").innerText));
+      await p.waitForTimeout(150);
+      const st = await p.evaluate(() => { const r = window.__db.products.filter(x => x.id === "d1")[0]; return [r.source_url, r.compare_state, r.shop_url, r.status]; });
+      check("compare: back on the shop link: pending, none, not switched again", JSON.stringify(st) === JSON.stringify([ORIG, "none", null, "pending"]), JSON.stringify(st));
+      check("compare: ... the line is gone", !/Skiftet til Prisjagt/.test(await body(p, "d1").innerText()) && (await body(p, "d1").locator('[data-act="cmp-undo"]').count()) === 0);
+      await p.context().close();
+    }
+    {   // failing writes
+      const p = await open({ products: [sh("f1"), row("test-dyson-v15", { id: "f2", source_url: "https://prisjagt.dk/product.php?p=9", compare_state: "done", compare_at: ago(1), shop_url: ORIG })], label: "compare-fail" });
+      await p.waitForSelector(".item");
+      await p.click('.head[data-id="f1"]'); await p.click('.head[data-id="f2"]');
+      await p.evaluate(() => { window.__db.netFail = true; });
+      await p.click('[data-act="cmp-find"][data-id="f1"]');
+      await p.waitForFunction(() => /Kunne ikke gemme/.test(document.body.innerText));
+      check("compare: a failing request says so and the action stays", /Kunne ikke gemme lige nu/.test(await body(p, "f1").innerText()) && !(await body(p, "f1").locator('[data-act="cmp-find"]').isDisabled()));
+      await p.click('[data-act="cmp-undo"][data-id="f2"]');
+      await p.waitForFunction(() => (document.body.innerText.match(/Kunne ikke gemme/g) || []).length >= 2);
+      check("compare: a failing 'Fortryd' says so and stays", /Kunne ikke gemme lige nu/.test(await body(p, "f2").innerText()) && /Skiftet til Prisjagt/.test(await body(p, "f2").innerText()));
+      await p.context().close();
     }
   }
 

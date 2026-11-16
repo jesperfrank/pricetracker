@@ -558,6 +558,7 @@ function makeFake(db) {
             assert.strictEqual(h.Prefer, 'return=minimal');
             const mine = t.filter((x) => x.user_id === r.user_id).length;
             if (mine >= 40) return reply(400, { code: '23514', message: 'Du kan højst følge 40 produkter. Slet et produkt først.' });
+            if (db.noCompareColumn && 'compare_state' in r) return reply(400, { code: 'PGRST204', message: "Could not find the 'compare_state' column of 'products' in the schema cache" });   // the database has not got the column yet
             if (typeof r.name !== 'string' || r.name.trim() === '' || Array.from(r.name).length > 140) return reply(400, { code: '23514', message: 'name check' });
             if (r.source_url != null && !(r.source_url.length <= 500 && /^https:\/\/[^/?#@:\s]+\.[^/?#@:\s]+([/?#][^\s]*)?$/.test(r.source_url))) return reply(400, { code: '23514', message: 'source_url check' });
             if (r.list_id && !(db.lists || []).some((l) => l.id === r.list_id && l.user_id === r.user_id)) return reply(409, { code: '23503', message: 'Listen findes ikke.' });
@@ -635,6 +636,7 @@ function product(id, user, fixture, extra) {
     id, user_id: user, name: 'Produkt ' + id, source_url: urlOf(fixture), target_type: 'price', target_value: 1, tracked_variants: null,
     shops_always: [], shops_exclude: [], shops_only: false, active: true, status: 'pending', title: null, variants: null, offers: null, history: null,
     normal_price: null, verdict: null, warning: null, check_note: null, last_checked: null, notified_price: null, notified_at: null,
+    compare_state: null, compare_at: null, shop_url: null,
   }, extra || {});
 }
 function pageFor(fixture, priceFn) {
@@ -1417,7 +1419,7 @@ test('onskeskyen: the rows are inserted in one request, as a browser would have 
   const bodies = []; const f = makeFake(db);
   await ONSKE.runImports({ sb: makeClient('https://x.supabase.test', SERVICE_KEY, async (u, o) => { if (o && o.method === 'POST' && /\/products$/.test(u)) bodies.push(JSON.parse(o.body)); return f(u, o); }), fetch: f, now: () => NOW, sleep: async () => {}, log: () => {} });
   assert.strictEqual(bodies.length, 1); assert.strictEqual(bodies[0].length, 12);
-  assert.deepStrictEqual(Object.keys(bodies[0][0]).sort(), ['active', 'list_id', 'name', 'source_url', 'status', 'target_type', 'target_value', 'user_id']);
+  assert.deepStrictEqual(Object.keys(bodies[0][0]).sort(), ['active', 'compare_state', 'list_id', 'name', 'source_url', 'status', 'target_type', 'target_value', 'user_id']);
 });
 
 test('onskeskyen: list choice (given list, reuse by name, 30-list cap, other people\'s lists, long and empty titles)', async () => {
@@ -2052,6 +2054,161 @@ test('digest: DST days in a full run (07:00 is 05:00Z in summer time, 06:00Z in 
 });
 
 // ---------------------------------------------------------------- live sanity check (opt-in)
+
+// ---------------------------------------------------------------- compare: find the cheapest shop (switch from one shop to Prisjagt)
+
+const wantedOf = (db, id) => db.products.find((p) => p.id === id).compare_state;
+
+test("compare: a shop that refuses, or has no price we can read, asks for a comparison once (compare_state 'wanted'); nothing else does", async () => {
+  const db = newDb();
+  const A1 = 'https://www.afvisende.dk/a', A2 = 'https://afvisende.dk/b', NOP = 'https://www.tom.dk/e', EUR = 'https://www.udlandet.dk/d', GONE = 'https://www.vaek.dk/g', SLOW = 'https://www.langsom.dk/h', NET = 'https://www.net.dk/i', OK = 'https://www.fornuftig.dk/c';
+  db.products.push(shopProduct('C1', 'u1', A1), shopProduct('C2', 'u1', A2), shopProduct('C3', 'u1', NOP), shopProduct('C4', 'u1', EUR), shopProduct('C5', 'u1', GONE), shopProduct('C6', 'u1', SLOW), shopProduct('C7', 'u1', NET),
+    shopProduct('C8', 'u1', OK, { target_value: 1 }), product('C9', 'u1', 'dyson', { target_value: 1 }),
+    shopProduct('D1', 'u1', 'https://www.afvisende2.dk/x', { compare_state: 'none', compare_at: '2026-11-01T00:00:00Z' }), shopProduct('D2', 'u1', 'https://www.afvisende3.dk/x', { compare_state: 'done', shop_url: 'https://old.dk/x' }),
+    shopProduct('D3', 'u1', 'https://www.afvisende4.dk/x', { compare_state: 'wanted', compare_at: '2026-11-02T00:00:00Z' }));
+  const map = { [A1]: () => resp(403, 'Forbidden'), [A2]: shopHtml('shop-jsonld-single'), [NOP]: shopHtml('shop-noprice'), [EUR]: shopHtml('shop-eur'), [GONE]: () => resp(404, ''), [SLOW]: () => { const e = new Error('t'); e.name = 'AbortError'; throw e; },
+    [NET]: () => resp(502, 'Bad gateway'), [OK]: shopHtml('shop-jsonld-single'), 'https://www.afvisende2.dk/x': () => resp(429, ''), 'https://www.afvisende3.dk/x': () => resp(403, ''), 'https://www.afvisende4.dk/x': () => resp(403, '') };
+  const ctx = shopCtx(db, map, { getPage: undefined }); const dyson = pageFor('dyson');
+  ctx.getPage = async (url) => { ctx.fetched.push(url); return url.indexOf('prisjagt.dk') !== -1 ? dyson : fetchShop(url, map, ctx.calls); };
+  await R.run(ctx);
+  const w = (id) => wantedOf(db, id), by = (id) => db.products.find((p) => p.id === id);
+  assert.strictEqual(w('C1'), 'wanted', 'refused (403)'); assert.strictEqual(by('C1').check_note, 'Butikken afviser automatiske opslag.'); assert.strictEqual(by('C1').status, 'error');
+  assert.strictEqual(w('C2'), 'wanted', 'same host, skipped after the refusal in this run: asked for as well'); assert.strictEqual(by('C2').status, 'pending', 'but otherwise not touched'); assert(!ctx.fetched.includes(A2));
+  assert.strictEqual(w('C3'), 'wanted', 'no price in the structured data'); assert.strictEqual(w('C4'), 'wanted', 'not in kroner');
+  assert.strictEqual(w('C5'), null, 'page gone (404)'); assert.strictEqual(w('C6'), null, 'timeout'); assert.strictEqual(w('C7'), null, 'network error / 5xx');
+  assert.strictEqual(w('C8'), null, 'a shop that works'); assert.strictEqual(w('C9'), null, 'a prisjagt link');
+  assert.strictEqual(w('D1'), 'none', 'looked for and not found: never again'); assert.strictEqual(by('D1').compare_at, '2026-11-01T00:00:00Z');
+  assert.strictEqual(w('D2'), 'done'); assert.strictEqual(by('D2').shop_url, 'https://old.dk/x'); assert.strictEqual(w('D3'), 'wanted'); assert.strictEqual(by('D3').compare_at, '2026-11-02T00:00:00Z', 'a request is not stamped again');
+  assert.strictEqual(by('C1').compare_at, '2026-11-16T10:00:00Z', 'the time of the request is stored'); assert.strictEqual(by('C2').compare_at, '2026-11-16T10:00:00Z');
+  assert(db.sent.length === 0);
+  // a tracked product whose shop starts to refuse (error on a normal check) asks as well, once, and keeps its data
+  const db2 = newDb();
+  db2.products.push(shopProduct('T1', 'u1', A1, { status: 'tracking', tracked_variants: ['shop'], offers: [{ store: 'S', price: 5, inStock: true, url: A1, note: null, variant: 'shop' }], history: [{ d: '2026-11-01', p: 5, s: 'S', src: 'check' }] }));
+  await R.run(shopCtx(db2, map));
+  assert.strictEqual(db2.products[0].compare_state, 'wanted'); assert.strictEqual(db2.products[0].status, 'tracking'); assert.strictEqual(db2.products[0].history.length, 1); assert.strictEqual(db2.products[0].check_note, 'Butikken afviser automatiske opslag.');
+  // a database without the columns (the row has no compare_state key at all): nothing is written
+  const db3 = newDb();
+  db3.products.push(shopProduct('N1', 'u1', A1)); delete db3.products[0].compare_state; delete db3.products[0].compare_at; delete db3.products[0].shop_url;
+  await R.run(shopCtx(db3, map));
+  assert(!('compare_state' in db3.products[0]) && !('compare_at' in db3.products[0]), 'the missing column is never written'); assert.strictEqual(db3.products[0].status, 'error');
+  assert(R.wantsCompare({ compare_state: null }, { shop: true }, Object.assign(new PJ.PageError('blocked', 'x'), { shop: true })));
+  assert(!R.wantsCompare({ compare_state: null }, { shop: false }, Object.assign(new PJ.PageError('blocked', 'x'), { shop: true })), 'never for prisjagt');
+  assert(!R.wantsCompare({ compare_state: null }, { shop: true }, new Error('x')));
+});
+
+test('compare: Onskeskyen wishes with one shop link ask for a comparison; a prisjagt link or no link does not; a missing column does not stop the import', async () => {
+  const web = onskeWeb(), db = importsDb(web); impRow(db, SHARE);
+  await runImp(db);
+  const rows = mine(db);
+  assert.strictEqual(rows.length, 12);
+  rows.forEach((p) => {
+    const host = p.source_url ? new URL(p.source_url).hostname : null;
+    assert.strictEqual(p.compare_state, p.source_url && !SHOP.isPrisjagtHost(host) ? 'wanted' : null, p.name + ' ' + p.source_url);
+  });
+  assert(rows.some((p) => p.compare_state === 'wanted'));
+  // synthetic list: shop link, prisjagt link, no link
+  const wl = [{ id: 'w1', title: 'Sko', price: 1, currency: 'DKK', url: 'https://www.adidas.dk/sko/x' }, { id: 'w2', title: 'Støvsuger', price: 1, currency: 'DKK', url: 'https://www.prisjagt.dk/product.php?p=5745115' },
+    { id: 'w3', title: 'Bare et navn', price: null, currency: null, url: null }, { id: 'w4', title: 'Ugyldigt', price: 1, currency: 'DKK', url: 'http://shop.dk/x' }];
+  const db2 = importsDb(onskeWeb({ lists: { [LIST_ID]: { title: 'T', accessLevel: 'Public', wishes: wl } } })); impRow(db2, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  await runImp(db2);
+  assert.deepStrictEqual(mine(db2).map((p) => [p.name, p.source_url, p.compare_state]), [['Sko', 'https://www.adidas.dk/sko/x', 'wanted'], ['Støvsuger', 'https://prisjagt.dk/product.php?p=5745115', null], ['Bare et navn', null, null], ['Ugyldigt', null, null]]);
+  // the database has not got the columns yet: the same rows are added without compare_state
+  const db3 = importsDb(onskeWeb({ lists: { [LIST_ID]: { title: 'T', accessLevel: 'Public', wishes: wl } } }), { noCompareColumn: true }); impRow(db3, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  const r3 = await runImp(db3);
+  assert.strictEqual(r3.stats.added, 4); assert.strictEqual(mine(db3).length, 4); assert(mine(db3).every((p) => !('compare_state' in p)));
+  assert.strictEqual(db3.imports[0].status, 'done');
+  // the daily sync adds new wishes the same way
+  const web4 = onskeWeb({ lists: { [LIST_ID]: { title: 'T', accessLevel: 'Public', wishes: wl.slice(0, 1) } } }), db4 = importsDb(web4);
+  impRow(db4, 'https://onskeskyen.dk/wishlists/' + LIST_ID); await runImp(db4);
+  assert.strictEqual(mine(db4).length, 1);
+  web4.lists = null;
+  const web5 = onskeWeb({ lists: { [LIST_ID]: { title: 'T', accessLevel: 'Public', wishes: wl.slice(0, 2).concat([{ id: 'w9', title: 'Ny ting', price: 1, currency: 'DKK', url: 'https://www.proshop.dk/Mus/x' }]) } } });
+  db4.web = web5; db4.imports[0].synced_at = '2026-11-14T10:00:00Z';
+  await runImp(db4);
+  const added = mine(db4).filter((p) => p.name === 'Ny ting' || p.name === 'Støvsuger');
+  assert.deepStrictEqual(added.map((p) => [p.name, p.compare_state]), [['Støvsuger', null], ['Ny ting', 'wanted']]);
+});
+
+// What resolver_compare does to a row (supabase/schema.sql), for the fake database: the original link goes to shop_url, the Prisjagt page is the new link, the
+// job-written state is reset the way a link change resets it. The person's fields and the alternatives stay.
+function switchLikeSql(p, url) {
+  Object.assign(p, { shop_url: p.source_url, source_url: url, compare_state: 'done', compare_at: '2026-11-16T09:00:00Z', status: 'pending', tracked_variants: null, title: null, variants: null, offers: null, history: null,
+    normal_price: null, verdict: null, warning: null, check_note: null, last_checked: null, notified_price: null, notified_at: null, backfill_state: null, digest_price: null, digest_at: null });
+  return p;
+}
+
+test("compare: after a switch the job tracks the Prisjagt page as a new product; the first check is silent (no mail, only notified_price), a later real drop mails; no archive lookup", async () => {
+  const SHOP_URL = 'https://www.adidas.dk/sko/samba', PJ_URL = urlOf('dyson');
+  const db = newDb();
+  // a wish followed in one shop: it had history and a price there, auto goal. The shop refuses now, the agent found it on Prisjagt.
+  db.products.push(shopProduct('W1', 'u1', SHOP_URL, { name: 'Dyson V15', target_type: 'auto', target_value: null, status: 'error', check_note: 'Butikken afviser automatiske opslag.', history: [{ d: '2026-10-01', p: 5200, s: 'Adidas', src: 'check' }],
+    offers: [{ store: 'Adidas', price: 5200, inStock: true, url: SHOP_URL, note: null, variant: 'shop' }], tracked_variants: ['shop'], notified_price: 5200, backfill_state: { at: '2026-11-01T00:00:00Z', result: 'done', found: 0, tries: 1 }, compare_state: 'wanted', compare_at: '2026-11-15T00:00:00Z',
+    alternatives: [{ kind: 'deal', name: 'x' }], list_id: 'L1', bought_at: null }));
+  switchLikeSql(db.products[0], PJ_URL);
+  const wb = [], dyson = pageFor('dyson');
+  const mk = (page) => { const ctx = wbCtx(db, {}, archiveFake({}, wb, '[]'), {}); ctx.getPage = async (u) => { ctx.fetched.push(u); if (u === PJ_URL) return page; throw new Error('the shop must not be fetched: ' + u); }; return ctx; };
+  let ctx = mk(dyson), res = await R.run(ctx);
+  const W = () => db.products[0];
+  assert.deepStrictEqual(ctx.fetched, [PJ_URL], 'the Prisjagt page is fetched, the shop page is not');
+  assert.strictEqual(W().status, 'tracking'); assert.deepStrictEqual(W().tracked_variants, ['none']); assert.strictEqual(W().title, 'Dyson V15 Detect Absolute Ledningsfri');
+  assert.strictEqual(W().offers[0].price, 3999); assert(W().history.some((x) => x.src === 'page') && W().history.some((x) => x.src === 'check' && x.p === 3999));
+  assert.strictEqual(W().verdict.level, 'good', 'the Prisjagt history makes 3.999 kr. a good price: this would mail for a new product');
+  assert.strictEqual(res.stats.hits, 0); assert.strictEqual(db.sent.length, 0, 'but the first check after a switch is silent');
+  assert.strictEqual(W().notified_price, 3999, 'remembered as already announced'); assert.strictEqual(W().notified_at, null);
+  assert.strictEqual(W().compare_state, 'done'); assert.strictEqual(W().shop_url, SHOP_URL); assert.strictEqual(W().source_url, PJ_URL, 'the job never writes the compare columns of a switched row');
+  assert.strictEqual(W().list_id, 'L1'); assert.strictEqual(W().name, 'Dyson V15'); assert.deepStrictEqual(W().alternatives, [{ kind: 'deal', name: 'x' }]);
+  assert.strictEqual(wb.length, 0, 'no archive lookup for a prisjagt product'); assert.strictEqual(W().backfill_state, null, 'and no marker is set');
+  assert.strictEqual(res.stats.backfilled, 0);
+  // same price again: still nothing
+  ctx = mk(dyson); res = await R.run(ctx); assert.strictEqual(db.sent.length, 0); assert.strictEqual(W().notified_price, 3999); assert.strictEqual(wb.length, 0);
+  // the price really falls: one mail
+  ctx = mk(pageFor('dyson', (r) => r.price - 400)); res = await R.run(ctx);
+  assert.strictEqual(res.stats.hits, 1); assert.strictEqual(db.sent.length, 1); assert.strictEqual(W().notified_price, 3599); assert(W().notified_at);
+  assert.strictEqual(wb.length, 0);
+
+  // contrast: the same Prisjagt product added as a new product (no switch) mails at its first check
+  const dbc = newDb(); dbc.products.push(product('N1', 'u1', 'dyson', { target_type: 'auto', target_value: null }));
+  await R.run(ctxFor(dbc, { [PJ_URL]: dyson })); assert.strictEqual(dbc.sent.length, 1, 'a new product with a good price mails at once, as before'); assert.strictEqual(dbc.products[0].notified_price, 3999);
+  // going back to the shop link (compare_state none, shop_url null) or any other state is not silent
+  const dbu = newDb(); dbu.products.push(product('N2', 'u1', 'dyson', { target_type: 'auto', target_value: null, compare_state: 'none', compare_at: '2026-11-16T09:00:00Z' }));
+  await R.run(ctxFor(dbu, { [PJ_URL]: dyson })); assert.strictEqual(dbu.sent.length, 1);
+  // 'done' without shop_url is no switch the job knows of
+  const dbd = newDb(); dbd.products.push(product('N3', 'u1', 'dyson', { target_type: 'auto', target_value: null, compare_state: 'done' }));
+  await R.run(ctxFor(dbd, { [PJ_URL]: dyson })); assert.strictEqual(dbd.sent.length, 1);
+});
+
+test('compare: a price goal and a switch: the first check is silent whether or not the goal is met; a bought product, several variants and the morning mail', async () => {
+  const PJ_URL = urlOf('dyson'), dyson = pageFor('dyson');
+  // price goal 4000, the price is 3999: a hit for a new product, silent here
+  const db = newDb();
+  db.products.push(switchLikeSql(shopProduct('G1', 'u1', 'https://www.proshop.dk/x', { target_type: 'price', target_value: 4000, compare_state: 'wanted' }), PJ_URL));
+  db.products.push(switchLikeSql(shopProduct('G2', 'u1', 'https://www.proshop.dk/y', { target_type: 'price', target_value: 3000, compare_state: 'wanted' }), PJ_URL));
+  await R.run(ctxFor(db, { [PJ_URL]: dyson }));
+  assert.strictEqual(db.sent.length, 0); assert.strictEqual(db.products[0].notified_price, 3999); assert.strictEqual(db.products[1].notified_price, null, 'no hit: nothing remembered');
+  assert.strictEqual(db.products[0].status, 'tracking');
+  // a later check at a price under the goal of G2 mails
+  await R.run(ctxFor(db, { [PJ_URL]: pageFor('dyson', (r) => r.price - 1500) }));
+  assert.strictEqual(db.sent.length, 1); assert.strictEqual(db.products[1].notified_price, 2499);
+  assert.strictEqual(db.products[0].notified_price, 2499, 'G1 fell further under its goal: a real drop');
+  // several variants: the product waits for a choice; once the person has chosen, the first tracking check is still silent
+  const rob = pageFor('roborock'), RU = urlOf('roborock'), db2 = newDb();
+  db2.products.push(switchLikeSql(shopProduct('V1', 'u1', 'https://www.proshop.dk/r', { target_type: 'auto', target_value: null, compare_state: 'wanted' }), RU));
+  await R.run(ctxFor(db2, { [RU]: rob }));
+  assert.strictEqual(db2.products[0].status, 'choose'); assert.strictEqual(db2.sent.length, 0); assert.strictEqual(db2.products[0].compare_state, 'done');
+  db2.products[0].tracked_variants = [rob.variants[0].id];
+  await R.run(ctxFor(db2, { [RU]: rob }));
+  assert.strictEqual(db2.products[0].status, 'tracking'); assert.strictEqual(db2.sent.length, 0, 'the first tracking check after the choice is silent too');
+  assert(db2.products[0].history.some((x) => x.src === 'check'));
+  // a bought product stays quiet and keeps its fields
+  const db3 = newDb();
+  db3.products.push(switchLikeSql(shopProduct('B1', 'u1', 'https://www.proshop.dk/b', { target_type: 'auto', target_value: null, compare_state: 'wanted', bought_at: '2026-11-10T00:00:00Z', bought_price: 4500 }), PJ_URL));
+  await R.run(ctxFor(db3, { [PJ_URL]: dyson })); assert.strictEqual(db3.sent.length, 0); assert.strictEqual(db3.products[0].status, 'tracking'); assert.strictEqual(db3.products[0].bought_price, 4500);
+  // morning mail: nothing is collected for the silent check
+  const db4 = newDb();
+  db4.profiles.push({ user_id: 'u1', notify_email: true, mail_digest: true, digest_sent_at: null, shops_always: [], shops_exclude: [], shops_only: false });
+  db4.products.push(switchLikeSql(shopProduct('M1', 'u1', 'https://www.proshop.dk/m', { target_type: 'auto', target_value: null, compare_state: 'wanted', digest_price: null }), PJ_URL));
+  await R.run(ctxFor(db4, { [PJ_URL]: dyson })); assert.strictEqual(db4.sent.length, 0); assert.strictEqual(db4.products[0].digest_price, null);
+});
 
 async function live() {
   const url = 'https://prisjagt.dk/product.php?p=' + PRODUCT_IDS.roborock;

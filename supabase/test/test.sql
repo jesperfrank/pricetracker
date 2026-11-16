@@ -921,10 +921,10 @@ reset role;
 -- a donor row that differs from a-gave in every column but the bought ones, used to try every column
 insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
   status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id,
-  alt_requested_at, alternatives, alt_done_at, alt_note)
+  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url)
 values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
   'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01',
-  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor');
+  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original');
 update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
   variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04',
   alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave'
@@ -1579,6 +1579,277 @@ select t.chk('ai: grants as the resolver functions (anon and authenticated may e
 delete from public.products where name ~ '^(alt[0-9]|bs-alt)';
 delete from public.lists where name = 'Alt';
 delete from public.alt_attempts;
+select set_config('request.jwt.claims', '', false);
+
+-- 11c. compare: "find the cheapest shop" (compare_state / compare_at / shop_url, resolver_list kind, resolver_compare)
+delete from public.products;
+delete from public.lists where name = 'Cmp';
+insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000aa0c', '00000000-0000-0000-0000-0000000000a1', 'Cmp');
+insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa0c', '00000000-0000-0000-0000-0000000000b2') on conflict do nothing;
+update public.resolver_secret set token = repeat('a', 64);
+select t.tok(null);
+-- the whole state of a product that has been tracked from one shop, to see what a switch resets and what it keeps
+create function t.cmpmk(n text, u text, st text, ca timestamptz, su text) returns void language sql security definer as $$
+  insert into public.products (user_id, name, source_url, target_type, target_value, status, title, variants, offers, history, normal_price, verdict, warning, check_note,
+    last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, tracked_variants, shops_always, list_id, compare_state, compare_at, shop_url,
+    alt_requested_at, alternatives, alt_done_at, alt_note)
+  values ('00000000-0000-0000-0000-0000000000a1', n, u, 'pct', 15, 'tracking', 'Titel ' || n, '[{"id":"shop"}]', '[{"store":"Shop","price":450,"inStock":true},{"store":"Andet","price":400,"inStock":false}]',
+    '[{"d":"2026-11-01","p":500,"s":"Shop","src":"check"}]', 600, '{"level":"poor"}', 'w', 'n', '2026-11-02', 450, '2026-11-03', '{"result":"done"}', 440, '2026-11-04', array['shop'], array['Proshop'],
+    '00000000-0000-0000-0000-00000000aa0c', st, ca, su, '2026-10-01', '[{"kind":"deal"}]', '2026-10-02', null) $$;
+grant execute on function t.cmpmk(text, text, text, timestamptz, text) to public;
+select t.cmpmk('cmp-w1', 'https://www.adidas.dk/sko/x', 'wanted', now() - interval '2 days', null);
+select t.cmpmk('cmp-w2', 'https://proshop.dk/vare/y', 'wanted', now() - interval '1 day', null);
+select t.cmpmk('cmp-null', 'https://shop.example.dk/z', null, null, null);
+select t.cmpmk('cmp-pj', 'https://prisjagt.dk/product.php?p=5', null, null, null);
+select t.cmpmk('cmp-pj2', 'https://www.prisjagt.dk/product.php?p=6', null, null, null);
+select t.cmpmk('cmp-done', 'https://prisjagt.dk/product.php?p=7', 'done', now() - interval '1 day', 'https://shop.example.dk/original');
+select t.cmpmk('cmp-none-new', 'https://shop.example.dk/n1', 'none', now() - interval '6 days', null);
+select t.cmpmk('cmp-none-old', 'https://shop.example.dk/n2', 'none', now() - interval '8 days', null);
+insert into public.products (user_id, name, target_type) values ('00000000-0000-0000-0000-0000000000a1', 'cmp-navn', 'auto');
+
+select t.chk('compare: the columns exist and are null on an ordinary product',
+  (select count(*) = 3 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name in ('compare_state', 'compare_at', 'shop_url'))
+  and (select compare_state is null and compare_at is null and shop_url is null from public.products where name = 'cmp-navn'));
+select t.chk('compare: the checks reject an unknown state and a bad shop_url',
+  t.err($$update public.products set compare_state = 'ja' where name = 'cmp-null'$$) like '%products_compare_state_check%'
+  and t.err($$update public.products set shop_url = 'http://shop.dk/x' where name = 'cmp-null'$$) like '%products_shop_url_check%'
+  and t.err($$update public.products set shop_url = 'https://shop.dk/' || repeat('a', 485) where name = 'cmp-null'$$) like '%products_shop_url_check%'
+  and t.err($$update public.products set shop_url = 'https://shop.dk/x', compare_state = 'done' where name = 'cmp-none-new'$$) = 'ok1');
+update public.products set shop_url = null, compare_state = 'none' where name = 'cmp-none-new';
+select t.chk('compare: exactly one check on each', (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_compare_state_check')
+  and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_shop_url_check'));
+
+-- ---- the person
+set role authenticated;
+select t.asA();
+select t.chk('compare: a browser insert cannot preset any compare column',
+  t.err($$insert into public.products (name, source_url, target_type, compare_state, compare_at, shop_url) values ('cmp-ny', 'https://shop.example.dk/ny', 'auto', 'done', now(), 'https://x.dk/a')$$) = 'ok1'
+  and t.q($$select (compare_state is null and compare_at is null and shop_url is null)::text from public.products where name = 'cmp-ny'$$) = 'true');
+delete from public.products where name = 'cmp-ny';
+select t.chk('compare: A requests a comparison for a single-shop product, the time is the server clock (and nothing else is written by it)',
+  t.err($$update public.products set compare_state = 'wanted', compare_at = '2000-01-01', shop_url = 'https://evil.dk/x' where name = 'cmp-null'$$) = 'ok1'
+  and t.q($$select (compare_state = 'wanted' and abs(extract(epoch from now() - compare_at)) < 60 and shop_url is null and status = 'tracking' and title is not null and alternatives is not null)::text from public.products where name = 'cmp-null'$$) = 'true');
+select t.chk('compare: a second request changes nothing (still wanted, same time)',
+  t.q($$select compare_at::text from public.products where name = 'cmp-null'$$) = (select compare_at::text from public.products where name = 'cmp-null')
+  and t.err($$update public.products set compare_state = 'wanted' where name = 'cmp-null'$$) = 'ok1');
+select t.chk('compare: A cannot request for a prisjagt link (with or without www), a name-only product, a done product or a recent none',
+  t.err($$update public.products set compare_state = 'wanted' where name in ('cmp-pj', 'cmp-pj2', 'cmp-navn', 'cmp-done', 'cmp-none-new')$$) = 'ok5'
+  and (select count(*) = 0 from public.products where name in ('cmp-pj', 'cmp-pj2', 'cmp-navn', 'cmp-done', 'cmp-none-new') and compare_state = 'wanted'));
+select t.chk('compare: ... the states of those products are what they were',
+  (select compare_state is null from public.products where name = 'cmp-pj') and (select compare_state = 'done' and shop_url = 'https://shop.example.dk/original' from public.products where name = 'cmp-done')
+  and (select compare_state = 'none' from public.products where name = 'cmp-none-new'));
+select t.chk('compare: a none older than 7 days can be asked again, with a new time',
+  t.err($$update public.products set compare_state = 'wanted' where name = 'cmp-none-old'$$) = 'ok1'
+  and t.q($$select (compare_state = 'wanted' and compare_at > now() - interval '1 minute')::text from public.products where name = 'cmp-none-old'$$) = 'true');
+select t.chk('compare: the browser cannot set done, none or null, nor the time or shop_url (the rest of the update goes through)',
+  t.err($$update public.products set compare_state = 'done', compare_at = now(), shop_url = 'https://shop.example.dk/q', name = 'cmp-null2' where name = 'cmp-w1'$$) = 'ok1'
+  and t.err($$update public.products set compare_state = 'none' where name = 'cmp-w2'$$) = 'ok1'
+  and t.err($$update public.products set compare_state = null where name = 'cmp-null'$$) = 'ok1'
+  and t.err($$update public.products set compare_state = 'done', shop_url = 'https://shop.example.dk/q', compare_at = now() where name = 'cmp-pj'$$) = 'ok1'
+  and t.err($$update public.products set compare_state = 'none', compare_at = null where name = 'cmp-done'$$) = 'ok1'
+  and t.q($$select (compare_state = 'wanted' and shop_url is null and name = 'cmp-null2' and compare_at < now() - interval '1 day')::text from public.products where name = 'cmp-null2'$$) = 'true'
+  and t.q($$select (compare_state = 'wanted')::text from public.products where name = 'cmp-w2'$$) = 'true' and t.q($$select (compare_state = 'wanted')::text from public.products where name = 'cmp-null'$$) = 'true'
+  and t.q($$select (compare_state is null and shop_url is null and compare_at is null)::text from public.products where name = 'cmp-pj'$$) = 'true'
+  and t.q($$select (compare_state = 'done' and shop_url = 'https://shop.example.dk/original' and compare_at is not null)::text from public.products where name = 'cmp-done'$$) = 'true');
+update public.products set name = 'cmp-w1' where name = 'cmp-null2';
+select t.chk('compare: asking changes no job state', (select status = 'tracking' and offers is not null and history is not null and last_checked is not null and notified_price = 450 and backfill_state is not null and digest_price = 440 from public.products where name = 'cmp-null'));
+
+-- a member of the shared list sees the products but changes nothing in them
+select t.asB();
+select t.chk('compare: B (member) sees A''s product and cannot ask for a comparison, nor write any compare column',
+  (select count(*) >= 1 from public.products where name = 'cmp-null2' or name = 'cmp-w1')
+  and t.err($$update public.products set compare_state = 'wanted' where name = 'cmp-none-new'$$) like 'Kun den, der har tilføjet%'
+  and t.err($$update public.products set compare_state = 'none' where name = 'cmp-w1'$$) like 'Kun den, der har tilføjet%'
+  and t.err($$update public.products set compare_at = now() where name = 'cmp-w1'$$) like 'Kun den, der har tilføjet%'
+  and t.err($$update public.products set shop_url = 'https://shop.example.dk/b' where name = 'cmp-w1'$$) like 'Kun den, der har tilføjet%'
+  and t.err($$update public.products set source_url = 'https://shop.example.dk/b' where name = 'cmp-done'$$) like 'Kun den, der har tilføjet%');
+select t.chk('compare: ... and the bought mark still works for B on a product with a comparison',
+  t.err($$update public.products set bought_at = now(), bought_price = 300 where name = 'cmp-done'$$) = 'ok1');
+update public.products set bought_at = null, bought_price = null where name = 'cmp-done';
+select t.asA();
+-- a new link starts over; going back to the original link after a switch is 'none'
+select t.chk('compare: a new link (not the original one) wipes compare_state, compare_at and shop_url, and the job state',
+  t.err($$update public.products set source_url = 'https://shop.example.dk/helt-ny' where name = 'cmp-done'$$) = 'ok1'
+  and t.q($$select (compare_state is null and compare_at is null and shop_url is null and status = 'pending' and history is null and alternatives is null)::text from public.products where name = 'cmp-done'$$) = 'true');
+select t.chk('compare: a new link on a wanted product wipes the request',
+  t.err($$update public.products set source_url = 'https://prisjagt.dk/product.php?p=11' where name = 'cmp-w2'$$) = 'ok1'
+  and t.q($$select (compare_state is null and compare_at is null and shop_url is null and status = 'pending')::text from public.products where name = 'cmp-w2'$$) = 'true');
+reset role;
+update public.products set source_url = 'https://prisjagt.dk/product.php?p=7', shop_url = 'https://shop.example.dk/original', compare_state = 'done', compare_at = now() - interval '1 day', status = 'tracking',
+  history = '[{"d":"2026-11-10","p":300,"s":"X","src":"check"}]', title = 'T', notified_price = 300, backfill_state = '{"result":"done"}' where name = 'cmp-done';
+set role authenticated;
+select t.asA();
+select t.chk('compare: undo: source_url = shop_url gives compare_state none from now, shop_url null, job state reset, person''s fields kept',
+  t.err($$update public.products set source_url = 'https://shop.example.dk/original' where name = 'cmp-done'$$) = 'ok1'
+  and t.q($$select (compare_state = 'none' and compare_at > now() - interval '1 minute' and shop_url is null and source_url = 'https://shop.example.dk/original' and status = 'pending' and history is null and title is null
+        and notified_price is null and backfill_state is null and alternatives is null and target_type = 'pct' and target_value = 15 and list_id is not null and shops_always = array['Proshop'])::text from public.products where name = 'cmp-done'$$) = 'true');
+select t.chk('compare: ... and the product cannot be asked for again for 7 days', t.err($$update public.products set compare_state = 'wanted' where name = 'cmp-done'$$) = 'ok1'
+  and t.q($$select (compare_state = 'none')::text from public.products where name = 'cmp-done'$$) = 'true');
+reset role;
+update public.products set source_url = 'https://prisjagt.dk/product.php?p=7', shop_url = 'https://shop.example.dk/original', compare_state = 'done', compare_at = now() where name = 'cmp-done';
+set role authenticated;
+select t.asA();
+select t.chk('compare: only exactly shop_url counts as going back (another address, or one that differs in the query, is a new link)',
+  t.err($$update public.products set source_url = 'https://shop.example.dk/original?x=1' where name = 'cmp-done'$$) = 'ok1'
+  and t.q($$select (compare_state is null and shop_url is null)::text from public.products where name = 'cmp-done'$$) = 'true');
+reset role;
+
+-- ---- the AI agent: resolver_list
+update public.products set compare_state = 'wanted', compare_at = now() - interval '2 days', source_url = 'https://www.adidas.dk/sko/x', title = 'Adidas Samba OG', status = 'error' where name = 'cmp-w1';
+update public.products set compare_state = 'wanted', compare_at = now() - interval '3 days', source_url = 'https://proshop.dk/vare/y', title = null, offers = null, status = 'pending' where name = 'cmp-w2';
+update public.products set compare_state = 'wanted', compare_at = null, source_url = 'https://shop.example.dk/z' where name = 'cmp-null';
+update public.products set created_at = now() - interval '5 days' where name = 'cmp-navn';
+update public.products set compare_state = null, compare_at = null where name = 'cmp-none-old';
+insert into public.products (user_id, name, target_type, created_at) values ('00000000-0000-0000-0000-0000000000a1', 'cmp-navn-gammel', 'auto', now() - interval '10 days'), ('00000000-0000-0000-0000-0000000000a1', 'cmp-navn-ny', 'auto', now() - interval '1 day');
+select t.tok(repeat('a', 64));
+create function t.cmplist() returns text language sql as $$
+  select string_agg(kind || ':' || name, ' | ' order by ord) from (select row_number() over () as ord, * from public.resolver_list()) x $$;
+grant execute on function t.cmplist() to public;
+set role anon;
+select t.chk('compare: resolver_list: name-only products first (oldest first), then compare rows by when they were asked (created_at when never); kind on every row',
+  t.cmplist() = 'name:cmp-navn-gammel | name:cmp-navn | name:cmp-navn-ny | compare:cmp-w2 | compare:Adidas Samba OG | compare:Titel cmp-null');
+select t.chk('compare: ... host without www and path, price = lowest in-stock offer (null without offers), host and price null for name rows',
+  (select host = 'adidas.dk' and price = 450 from public.resolver_list() where name = 'Adidas Samba OG')
+  and (select host = 'proshop.dk' and price is null from public.resolver_list() where kind = 'compare' and host = 'proshop.dk')
+  and (select bool_and(host is null and price is null) from public.resolver_list() where kind = 'name')
+  and (select count(*) = 3 from public.resolver_list() where kind = 'name'));
+select t.chk('compare: ... the columns are id, name, created_at, kind, host, price',
+  (select proargnames = array['id', 'name', 'created_at', 'kind', 'host', 'price'] from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace));
+select t.chk('compare: ... a compare row shows the stored title, else the name, and the product''s own created_at',
+  (select id = t.pid('cmp-w1') and created_at = t.q($$select created_at::text from public.products where name = 'cmp-w1'$$)::timestamptz from public.resolver_list() where name = 'Adidas Samba OG')
+  and exists (select 1 from public.resolver_list() where kind = 'compare' and name = 'cmp-w2'));
+reset role;
+-- what is not listed: an inactive product, a done / none / plain one; and at most 10 rows
+update public.products set active = false where name = 'cmp-w2';
+set role anon;
+select t.chk('compare: ... an inactive product is not listed, nor a done, none or plain single-shop one',
+  (select count(*) = 5 from public.resolver_list()) and not exists (select 1 from public.resolver_list() where name in ('cmp-w2', 'cmp-pj', 'cmp-done', 'cmp-none-new', 'cmp-none-old')));
+reset role;
+update public.products set active = true where name = 'cmp-w2';
+insert into public.products (user_id, name, source_url, target_type, compare_state, created_at)
+  select '00000000-0000-0000-0000-0000000000a1', 'cmp-m' || g, 'https://shop.example.dk/m' || g, 'auto', null, now() from generate_series(1, 12) g;
+update public.products set compare_state = 'wanted', compare_at = now() - (g || ' hours')::interval from (select name as n, substr(name, 6)::int as g from public.products where name ~ '^cmp-m[0-9]+$') x where name = x.n;
+set role anon;
+select t.chk('compare: ... at most 10 rows in all, name rows first, then compare rows oldest first',
+  (select count(*) = 10 from public.resolver_list())
+  and (select array_agg(kind order by ord) = array['name', 'name', 'name', 'compare', 'compare', 'compare', 'compare', 'compare', 'compare', 'compare'] from (select row_number() over () as ord, kind from public.resolver_list()) y)
+  and (select array_agg(name order by ord) = array['cmp-w2', 'Adidas Samba OG', 'cmp-m12', 'cmp-m11', 'cmp-m10', 'cmp-m9', 'cmp-m8'] from (select row_number() over () as ord, name from public.resolver_list() where kind = 'compare') y));
+reset role;
+delete from public.products where name ~ '^cmp-m[0-9]+$';
+
+-- ---- the token on the new and the changed function; grants
+create function t.ccount() returns text language plpgsql as $$ begin return (select count(*) from public.resolver_list())::text; exception when others then return sqlerrm; end $$;
+grant execute on function t.ccount() to public;
+create function t.rc(n text, u text) returns text language plpgsql as $$
+declare pid uuid := t.pid(n); r boolean;
+begin r := public.resolver_compare(pid, u); return coalesce(r::text, 'null'); exception when others then return 'error:' || sqlerrm; end $$;
+grant execute on function t.rc(text, text) to public;
+select t.chk('compare: the token is needed (none, empty, wrong, a prefix) for resolver_list and resolver_compare, as anon and as a signed-in user, and nothing changes',
+  (select bool_and(r) from (
+    select t.ccount() = 'resolver: invalid or missing token' and t.rc('cmp-w1', null) = 'error:resolver: invalid or missing token' and t.rc('cmp-w1', 'https://prisjagt.dk/product.php?p=1') = 'error:resolver: invalid or missing token' as r from (select t.tok(null)) x union all
+    select t.ccount() = 'resolver: invalid or missing token' and t.rc('cmp-w1', null) = 'error:resolver: invalid or missing token' from (select t.tok('')) x union all
+    select t.ccount() = 'resolver: invalid or missing token' and t.rc('cmp-w1', null) = 'error:resolver: invalid or missing token' from (select t.tok('fel')) x union all
+    select t.ccount() = 'resolver: invalid or missing token' and t.rc('cmp-w1', null) = 'error:resolver: invalid or missing token' from (select t.tok(repeat('a', 63))) x) y)
+  and t.q($$select (compare_state = 'wanted' and source_url = 'https://www.adidas.dk/sko/x')::text from public.products where name = 'cmp-w1'$$) = 'true');
+set role anon; select t.tok(null);
+select t.chk('compare: anon without a token: refused', t.ccount() = 'resolver: invalid or missing token' and t.rc('cmp-w1', null) = 'error:resolver: invalid or missing token');
+reset role; set role authenticated; select t.asA(); select t.tok('fel');
+select t.chk('compare: a signed-in user without the token: refused', t.ccount() = 'resolver: invalid or missing token' and t.rc('cmp-w1', null) = 'error:resolver: invalid or missing token');
+reset role;
+select t.chk('compare: grants as the other resolver functions (anon and authenticated may execute, public may not)',
+  has_function_privilege('anon', 'public.resolver_compare(uuid, text)', 'execute') and has_function_privilege('authenticated', 'public.resolver_compare(uuid, text)', 'execute')
+  and has_function_privilege('anon', 'public.resolver_list()', 'execute') and has_function_privilege('authenticated', 'public.resolver_list()', 'execute')
+  and not exists (select 1 from information_schema.routine_privileges where routine_name in ('resolver_list', 'resolver_compare', 'resolver_set', 'resolver_fail') and grantee = 'PUBLIC')
+  and (select count(*) = 1 from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace));
+
+-- ---- resolver_compare
+select t.tok(repeat('a', 64));
+set role anon;
+select t.chk('compare: resolver_compare refuses anything but https://prisjagt.dk/product.php?p=<digits> (www dropped), and changes nothing',
+  t.rc('cmp-w1', 'http://prisjagt.dk/product.php?p=1') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://shop.example.dk/vare') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://prisjagt.dk.evil.com/product.php?p=1') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://evil.com/https://prisjagt.dk/product.php?p=1') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://prisjagt.dk/product.php?p=abc') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://prisjagt.dk/product.php?p=') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://prisjagt.dk/product.php?p=12&x=1') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://prisjagt.dk/product.php?p=12#a') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://prisjagt.dk/search?search=sko') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://user:pw@prisjagt.dk/product.php?p=12') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://prisjagt.dk:8443/product.php?p=12') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'javascript:alert(1)') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', '') like '%not a prisjagt.dk product link%'
+  and t.rc('cmp-w1', 'https://prisjagt.dk/product.php?p=' || repeat('1', 19)) like '%not a prisjagt.dk product link%');
+reset role;
+select t.chk('compare: ... the product is exactly as it was', (select compare_state = 'wanted' and source_url = 'https://www.adidas.dk/sko/x' and shop_url is null and status = 'error' and title = 'Adidas Samba OG' from public.products where name = 'cmp-w1'));
+-- the same product, changed once through the browser's way and once through resolver_compare: the job-written state must end up identical
+update public.products set status = 'tracking', check_note = 'n', last_checked = now(), history = '[{"d":"2026-11-01","p":1,"s":"S","src":"check"}]', tracked_variants = array['shop'],
+  offers = '[{"store":"A","price":1,"inStock":true}]', notified_price = 1, notified_at = now(), backfill_state = '{"result":"done"}', digest_price = 1, digest_at = now() where name in ('cmp-w1', 'cmp-w2');
+-- browser way, on a copy of cmp-w1 owned by A
+insert into public.products (id, user_id, name, source_url, target_type, target_value, shops_always, shops_exclude, shops_only, status, tracked_variants, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked,
+  notified_price, notified_at, backfill_state, digest_price, digest_at, list_id, alternatives, alt_done_at, alt_requested_at, compare_state, compare_at, shop_url)
+  select '00000000-0000-0000-0000-00000000cc01', user_id, 'cmp-cc', source_url, target_type, target_value, shops_always, shops_exclude, shops_only, status, tracked_variants, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked,
+    notified_price, notified_at, backfill_state, digest_price, digest_at, list_id, alternatives, alt_done_at, alt_requested_at, compare_state, compare_at, shop_url from public.products where name = 'cmp-w1';
+set role authenticated; select t.asA();
+update public.products set source_url = 'https://prisjagt.dk/product.php?p=42' where name = 'cmp-cc';
+reset role;
+set role anon;
+select t.chk('compare: resolver_compare switches a waiting product to its Prisjagt page (www dropped); true', t.rc('cmp-w1', ' https://www.prisjagt.dk/product.php?p=42 ') = 'true');
+reset role;
+select t.chk('compare: ... source_url is the Prisjagt page, shop_url the original shop link, compare_state done, compare_at now',
+  (select source_url = 'https://prisjagt.dk/product.php?p=42' and shop_url = 'https://www.adidas.dk/sko/x' and compare_state = 'done' and compare_at > now() - interval '1 minute' from public.products where name = 'cmp-w1'));
+select t.chk('compare: ... the job-written state is reset exactly as a browser link change resets it (same values in every column the guard resets)',
+  (select count(*) = 0 from (
+     select e.key from jsonb_each((select to_jsonb(p) from public.products p where name = 'cmp-w1')) e
+       join jsonb_each((select to_jsonb(p) from public.products p where name = 'cmp-cc')) f using (key)
+      where e.value is distinct from f.value
+        and e.key not in ('id', 'name', 'created_at', 'compare_state', 'compare_at', 'shop_url', 'alternatives', 'alt_done_at', 'alt_requested_at', 'alt_note')) z)
+  and (select status = 'pending' and tracked_variants is null and title is null and variants is null and offers is null and history is null and normal_price is null and verdict is null and warning is null
+        and check_note is null and last_checked is null and notified_price is null and notified_at is null and backfill_state is null and digest_price is null and digest_at is null from public.products where name = 'cmp-w1'));
+select t.chk('compare: ... the person''s fields stay (name, goal, list, shop choices, variants chosen are reset with the page) and so do the alternatives',
+  (select name = 'cmp-w1' and target_type = 'pct' and target_value = 15 and list_id = '00000000-0000-0000-0000-00000000aa0c' and shops_always = array['Proshop'] and active
+     and alternatives -> 0 ->> 'kind' = 'deal' and alt_done_at is not null and alt_requested_at is not null from public.products where name = 'cmp-w1'));
+select t.chk('compare: ... a browser link change drops the alternatives, as before', (select alternatives is null and alt_done_at is null and alt_requested_at is null from public.products where name = 'cmp-cc'));
+delete from public.products where name = 'cmp-cc';
+set role anon;
+select t.chk('compare: a second call for the same product (no longer waiting) returns false and changes nothing',
+  t.rc('cmp-w1', 'https://prisjagt.dk/product.php?p=43') = 'false' and t.rc('cmp-w1', null) = 'false'
+  and t.q($$select (source_url = 'https://prisjagt.dk/product.php?p=42' and compare_state = 'done')::text from public.products where name = 'cmp-w1'$$) = 'true');
+select t.chk('compare: a product that is not waiting (never asked, none, done, prisjagt link) returns false',
+  t.rc('cmp-pj', 'https://prisjagt.dk/product.php?p=9') = 'false' and t.rc('cmp-none-new', 'https://prisjagt.dk/product.php?p=9') = 'false'
+  and t.rc('cmp-none-new', null) = 'false' and t.rc('cmp-navn', 'https://prisjagt.dk/product.php?p=9') = 'false');
+select t.chk('compare: null = not found: compare_state none, compare_at now, nothing else changes',
+  t.rc('cmp-w2', null) = 'true'
+  and t.q($$select (compare_state = 'none' and compare_at > now() - interval '1 minute' and source_url = 'https://proshop.dk/vare/y' and shop_url is null and status = 'tracking' and history is not null and notified_price = 1 and backfill_state is not null and offers is not null
+       )::text from public.products where name = 'cmp-w2'$$) = 'true');
+select t.chk('compare: an unknown product id and an inactive product return false', public.resolver_compare('00000000-0000-0000-0000-00000000ffff', null) = false);
+reset role;
+update public.products set compare_state = 'wanted', active = false where name = 'cmp-w2';
+set role anon;
+select t.chk('compare: ... inactive', t.rc('cmp-w2', null) = 'false' and t.rc('cmp-w2', 'https://prisjagt.dk/product.php?p=3') = 'false');
+reset role;
+-- after the switch the person can go back, the product is then 'none' and is not listed
+set role authenticated; select t.asA();
+select t.chk('compare: after the switch the person can undo it (source_url = shop_url), then it is none and not listed',
+  t.err($$update public.products set source_url = 'https://www.adidas.dk/sko/x' where name = 'cmp-w1'$$) = 'ok1'
+  and t.q($$select (compare_state = 'none' and shop_url is null and status = 'pending' and source_url = 'https://www.adidas.dk/sko/x')::text from public.products where name = 'cmp-w1'$$) = 'true');
+reset role;
+select t.chk('compare: ... going back is a link change like any other: the guard drops the alternatives with it',
+  (select alternatives is null from public.products where name = 'cmp-w1'));
+select t.tok(repeat('a', 64));
+set role anon;
+select t.chk('compare: the list no longer shows the undone product', not exists (select 1 from public.resolver_list() where name = 'cmp-w1'));
+-- resolver_set and resolver_fail are unchanged: they only touch name-only pending products
+reset role;
+set role anon;
+select t.chk('compare: resolver_set / resolver_fail do not touch a compare product',
+  public.resolver_set(t.pid('cmp-null'), 'https://prisjagt.dk/product.php?p=77') = false
+  and public.resolver_fail(t.pid('cmp-null'), 'x') = false
+  and public.resolver_set(t.pid('cmp-navn'), 'https://prisjagt.dk/product.php?p=78') = true);
+reset role;
+select t.tok(null);
+delete from public.products where name ~ '^cmp-';
+delete from public.lists where name = 'Cmp';
 select set_config('request.jwt.claims', '', false);
 
 -- 12. final whole-file run on the populated database

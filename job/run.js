@@ -98,6 +98,9 @@ function trackingPatch(prod, profile, parsed, now) {
   if (prod.status !== 'tracking' && parsed.variants.length > 1 && !parsed.variants.every((v) => tracked.has(v.id))) {
     history = history.filter((x) => x && x.src !== 'page');
   }
+  // The first tracking check after a switch to Prisjagt (compare_state 'done' with the old shop link kept in shop_url, and no check of
+  // ours in the history yet) is silent: the cheapest of many shops being lower than the one shop followed before is no price drop.
+  const firstAfterSwitch = prod.compare_state === 'done' && !!prod.shop_url && !history.some((x) => x && x.src === 'check');
   if (low) history = P.mergeHistory(history, today, low.price, low.store);
 
   const normal = P.normalPrice(history, today);
@@ -106,7 +109,9 @@ function trackingPatch(prod, profile, parsed, now) {
   const warning = P.priceWarning(history, today, low ? low.price : undefined);
   // A bought product is still checked (the person can see what the price did after buying), but never notifies.
   const bought = !!prod.bought_at;
-  const goal = bought ? { hit: false, newHit: false, fields: {}, reason: null } : P.goalOutcome(prod, low, normal, iso, { verdict, history });
+  let goal = bought ? { hit: false, newHit: false, fields: {}, reason: null } : P.goalOutcome(prod, low, normal, iso, { verdict, history });
+  // Silent: a would-be hit is only remembered (notified_price), never announced. Only a later, lower price mails.
+  if (firstAfterSwitch && !bought) goal = { hit: goal.hit, newHit: false, fields: goal.hit && low ? { notified_price: low.price } : { notified_price: null }, reason: null };
 
   const patch = Object.assign({
     status: 'tracking', title: prod.title || parsed.title || null, variants, offers, history, normal_price: normal, verdict, warning,
@@ -122,6 +127,18 @@ function trackingPatch(prod, profile, parsed, now) {
     patch,
     hit: goal.newHit ? { productId: prod.id, userId: prod.user_id, name: prod.name, price: low.price, store: low.store, url: low.url, verdict: verdict.text, warning, reason: goal.reason } : null,
   };
+}
+
+// A single-shop product whose shop cannot be followed asks the AI agent to look for the product on Prisjagt (compare_state 'wanted'),
+// once: only while compare_state is null (never again after 'done' or 'none', whatever the person or the agent decided). The errors that
+// count: the shop refuses or blocks automated requests (401/403/429, a bot-challenge page: kind 'blocked'), the page has no price we can
+// read ('noprice': no structured data, which is what a shop that hides its product data from us looks like, and Prisjagt may still list
+// the product) or a price in another currency ('currency'). Not for a page that is gone (404/410: the product itself may be gone), a
+// timeout or a network error (temporary), and never for a prisjagt.dk link. A row without the key at all means the column has not been
+// added to the database yet: nothing is written then.
+function wantsCompare(prod, target, error) {
+  if (!target || !target.shop || !Object.prototype.hasOwnProperty.call(prod, 'compare_state') || prod.compare_state !== null) return false;
+  return error instanceof PJ.PageError && !!error.shop && ['blocked', 'noprice', 'currency'].indexOf(error.kind) !== -1;
 }
 
 // The page kind of a source_url: {url, shop} or null when the link may not be fetched at all.
@@ -276,7 +293,10 @@ async function run(ctx) {
       results.push({ prod, patch: { status: 'error', check_note: note, last_checked: isoNow(now) }, hit: null }); continue;
     }
     const url = target.url, hostKey = SHOP.registrableDomain(new URL(url).hostname);
-    if (stats.blockedHosts.indexOf(hostKey) !== -1) continue;       // refused earlier in this run: leave the rest of that host alone
+    if (stats.blockedHosts.indexOf(hostKey) !== -1) {                // refused earlier in this run: leave the rest of that host alone
+      if (wantsCompare(prod, target, Object.assign(new PJ.PageError('blocked', 'afvist tidligere i kørslen'), { shop: true }))) results.push({ prod, patch: { compare_state: 'wanted', compare_at: isoNow(now) }, hit: null });
+      continue;
+    }
     if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; continue; }
 
     try {
@@ -295,8 +315,9 @@ async function run(ctx) {
         if (got.error instanceof PJ.PageError && got.error.kind === 'blocked') { stats.blocked = true; if (stats.blockedHosts.indexOf(hostKey) === -1) stats.blockedHosts.push(hostKey); }
         const note = errorNote(got.error);
         log('  ' + (prod.name || prod.id) + ': ' + note);
-        if (todo === 'initial') results.push({ prod, patch: { status: 'error', check_note: note, last_checked: isoNow(now) }, hit: null });
-        else results.push({ prod, patch: { check_note: note }, hit: null });
+        const want = wantsCompare(prod, target, got.error) ? { compare_state: 'wanted', compare_at: isoNow(now) } : {};
+        if (todo === 'initial') results.push({ prod, patch: Object.assign({ status: 'error', check_note: note, last_checked: isoNow(now) }, want), hit: null });
+        else results.push({ prod, patch: Object.assign({ check_note: note }, want), hit: null });
         continue;
       }
       const parsed = got.page;
@@ -452,7 +473,7 @@ async function run(ctx) {
   return { stats, summary, results };
 }
 
-module.exports = { run, initialPatch, trackingPatch, errorNote, classify, backfillDue, MAX_BACKFILL };
+module.exports = { run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, MAX_BACKFILL };
 
 if (require.main === module) {
   const e = process.env;
