@@ -7,16 +7,27 @@ function clean(s, max) {
   return String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max || 160);
 }
 
-// hits: [{name, price, store, url, verdict (text|null), warning (text|null)}]
+// hits: [{name, price, store, url, verdict (text|null), warning (text|null), reason (text|null)}]
+// reason is set for products without a goal of their own (goal "godt tilbud"): one sentence on why the mail is sent.
 function composeMail(hits, siteUrl) {
   const n = hits.length;
-  const subject = n === 1 ? 'Prisvagten: 1 pris har ramt dit mål' : 'Prisvagten: ' + n + ' priser har ramt dit mål';
-  const lines = [n === 1 ? 'Et produkt er nået ned til din målpris:' : n + ' produkter er nået ned til din målpris:', ''];
+  const withReason = hits.filter((h) => h.reason).length;
+  let subject = n === 1 ? 'Prisvagten: 1 pris har ramt dit mål' : 'Prisvagten: ' + n + ' priser har ramt dit mål';
+  let intro = n === 1 ? 'Et produkt er nået ned til din målpris:' : n + ' produkter er nået ned til din målpris:';
+  if (withReason === n) {
+    subject = n === 1 ? 'Prisvagten: 1 godt tilbud' : 'Prisvagten: ' + n + ' gode tilbud';
+    intro = n === 1 ? 'Et produkt har fået en god pris:' : n + ' produkter har fået en god pris:';
+  } else if (withReason) {
+    subject = 'Prisvagten: ' + n + ' priser at kigge på';
+    intro = n + ' produkter har fået en pris, du skal kende til:';
+  }
+  const lines = [intro, ''];
   hits.forEach((h, i) => {
     lines.push((i + 1) + '. ' + clean(h.name, 140));
     lines.push('   Pris: ' + fmtKr(h.price) + ' hos ' + clean(h.store, 80));
     lines.push('   Link til butikken: ' + clean(h.url, 500));
-    if (h.verdict) lines.push('   ' + clean(h.verdict, 300));
+    if (h.reason) lines.push('   Derfor får du besked: ' + clean(h.reason, 300));
+    else if (h.verdict) lines.push('   ' + clean(h.verdict, 300));
     if (h.warning) lines.push('   OBS: ' + clean(h.warning, 300));
     lines.push('');
   });

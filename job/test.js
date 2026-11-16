@@ -70,6 +70,51 @@ test('goal and notify logic', () => {
   assert.strictEqual(P.goalOutcome({ target_type: 'pct', target_value: 25 }, lo(1), null, now).hit, false, 'pct goal needs a normal price');
 });
 
+test("goal 'auto': good verdict, or 10 % under the first price when history is too short; de-duplicated", () => {
+  const now = '2026-11-16T10:00:00Z', today = '2026-11-16';
+  const lo = (p) => ({ price: p, store: 'A' });
+  const auto = { target_type: 'auto', target_value: null, notified_price: null };
+  // a good verdict fires, and the reason is the verdict's own sentence
+  const good = { level: 'good', text: '450 kr. er 10 % under normalprisen (500 kr.) og den laveste pris i 30 dage.' };
+  let g = P.goalOutcome(auto, lo(450), 500, now, { verdict: good, history: [] });
+  assert(g.hit && g.newHit && g.reason === good.text && g.fields.notified_price === 450 && g.fields.notified_at === now);
+  // ok / poor verdicts do not fire, even far below the first price
+  const hist = [{ d: '2026-09-01', p: 1000, s: 'A', src: 'check' }];
+  ['ok', 'poor'].forEach((level) => {
+    g = P.goalOutcome(auto, lo(500), 800, now, { verdict: { level, text: 'x' }, history: hist });
+    assert(!g.hit && !g.newHit && g.reason === null && g.fields.notified_price === null, level);
+  });
+  // too little history (verdict unknown): >= 10 % under the first price fires; 9 % does not
+  const unk = { level: 'unknown', text: 'Der er endnu ikke nok prishistorik til at vurdere prisen.' };
+  g = P.goalOutcome(auto, lo(900), null, now, { verdict: unk, history: [{ d: '2026-11-10', p: 1000 }, { d: '2026-11-15', p: 950 }] });
+  assert(g.hit && g.newHit, 'exactly 10 % under the first price');
+  assert.strictEqual(g.reason, '900 kr. er 10 % under den første pris, vi har set (1.000 kr.).');
+  g = P.goalOutcome(auto, lo(910), null, now, { verdict: unk, history: [{ d: '2026-11-10', p: 1000 }] });
+  assert(!g.hit, '9 % is not enough');
+  g = P.goalOutcome(auto, lo(500), null, now, { verdict: unk, history: [] });
+  assert(!g.hit, 'no history at all: nothing to compare with');
+  g = P.goalOutcome(auto, null, null, now, { verdict: { level: 'unknown', text: 'x' }, history: hist });
+  assert(!g.hit && g.fields.notified_price === null, 'nothing in stock');
+  // the first point is the earliest by date, not by position
+  assert(P.autoReason(lo(80), unk, [{ d: '2026-11-15', p: 200 }, { d: '2026-11-01', p: 100 }]), '80 is 20 % under 100');
+  assert.strictEqual(P.autoReason(lo(95), unk, [{ d: '2026-11-15', p: 200 }, { d: '2026-11-01', p: 100 }]), null);
+  // a verdict with a normal price (ok) never falls back to the first-price rule
+  assert.strictEqual(P.autoReason(lo(1), { level: 'ok', text: 'x' }, hist), null);
+  // de-duplication through notified_price, same as for price goals
+  const prev = Object.assign({}, auto, { notified_price: 450 });
+  g = P.goalOutcome(prev, lo(450), 500, now, { verdict: good, history: [] });
+  assert(g.hit && !g.newHit && g.fields.notified_price === 450 && !('notified_at' in g.fields), 'same price: no second message');
+  g = P.goalOutcome(prev, lo(440), 500, now, { verdict: good, history: [] });
+  assert(g.newHit, 'lower price: announced again');
+  g = P.goalOutcome(prev, lo(520), 500, now, { verdict: { level: 'poor', text: 'x' }, history: [] });
+  assert(!g.hit && g.fields.notified_price === null, 'reset when no longer good');
+  assert.strictEqual(P.targetPrice(auto, 500), null, 'auto has no target price');
+  // today's own verdictFor produces what autoReason expects
+  const v = P.verdictFor(450, 500, [], today, null);
+  assert.strictEqual(v.level, 'good');
+  assert.strictEqual(P.autoReason(lo(450), v, []), v.text);
+});
+
 test('sanity check', () => {
   const prev = [{ store: 'A', price: 1000, inStock: true }];
   assert.strictEqual(P.sanityCheck([], prev), 'Ingen tilbud fundet');
@@ -436,6 +481,19 @@ test('e-mail text for two hits; untrusted text stays plain', () => {
   assert.strictEqual(composeMail([{ name: 'A', price: 1, store: 'S', url: 'https://x' }], '').subject, 'Prisvagten: 1 pris har ramt dit mål');
 });
 
+test("e-mail text for goal 'auto': one sentence on why, own subject; price goals unchanged", () => {
+  const r = 'Prisen er 12 % under den første pris, vi har set (600 kr.).';
+  const m = composeMail([{ name: 'Vare', price: 528, store: 'Shop', url: 'https://shop.dk/x', verdict: 'Der er endnu ikke nok prishistorik til at vurdere prisen.', warning: null, reason: r }], '');
+  assert.strictEqual(m.subject, 'Prisvagten: 1 godt tilbud');
+  assert(m.text.includes('Derfor får du besked: ' + r) && !m.text.includes('ikke nok prishistorik') && !/målpris/.test(m.text), m.text);
+  const two = composeMail([{ name: 'A', price: 1, store: 'S', url: 'https://x', reason: r }, { name: 'B', price: 2, store: 'S', url: 'https://x', reason: r }], '');
+  assert.strictEqual(two.subject, 'Prisvagten: 2 gode tilbud');
+  const mixed = composeMail([{ name: 'A', price: 1, store: 'S', url: 'https://x', reason: r }, { name: 'B', price: 2, store: 'S', url: 'https://x' }], '');
+  assert.strictEqual(mixed.subject, 'Prisvagten: 2 priser at kigge på');
+  assert(mixed.text.includes('Derfor får du besked') && mixed.text.includes('2. B'));
+  assert(!/—/.test(m.text + mixed.text + two.text), 'no em-dash');
+});
+
 // ---------------------------------------------------------------- full run against an in-memory Supabase
 
 const NOW = new Date('2026-11-16T10:00:00Z');
@@ -532,6 +590,40 @@ function ctxFor(db, pages, extra) {
     getPage: async (url) => { fetched.push(url); const f = pages[url]; if (f instanceof Error) throw f; if (!f) throw new PJ.PageError('notfound', 'HTTP 404'); return typeof f === 'function' ? f() : f; },
   }, extra || {});
 }
+
+test("run: goal 'auto' notifies once with the reason; no history gives no mail; price goals need no verdict", async () => {
+  // tracking product with an earlier price of 700 in its history (too short for a normal price); today the shop has 579 (17 % under)
+  const db = newDb();
+  const old = [{ d: '2026-11-01', p: 700, s: 'Bedre Nætter', src: 'check' }];
+  db.products.push(shopProduct('AU', 'u1', BED_URL, { name: 'Mayan', target_type: 'auto', target_value: null, status: 'tracking', tracked_variants: ['shop'], history: old }));
+  const map = { [BED_URL]: shopHtml('shop-jsonld-single') };
+  let res = await R.run(shopCtx(db, map));
+  const A = () => db.products[0];
+  assert.strictEqual(res.stats.hits, 1); assert.strictEqual(A().notified_price, 579); assert(A().notified_at);
+  assert.strictEqual(db.sent.length, 1); assert.strictEqual(db.sent[0].subject, 'Prisvagten: 1 godt tilbud');
+  assert(db.sent[0].text.includes('Derfor får du besked: 579 kr. er 17 % under den første pris, vi har set (700 kr.).'), db.sent[0].text);
+  await R.run(shopCtx(db, map)); assert.strictEqual(db.sent.length, 1, 'same price again: no second e-mail');
+  assert.strictEqual(A().target_type, 'auto');
+  // the next price is lower: one more message
+  map[BED_URL] = shopHtml('shop-jsonld-single').replace('"579.00"', '"489,00"');
+  await R.run(shopCtx(db, map)); assert.strictEqual(db.sent.length, 2); assert.strictEqual(A().notified_price, 489);
+  // new product with no history: first run records the first price, no mail
+  const db2 = newDb();
+  db2.products.push(shopProduct('AU2', 'u1', BED_URL, { target_type: 'auto', target_value: null }));
+  await R.run(shopCtx(db2, { [BED_URL]: shopHtml('shop-jsonld-single') }));
+  assert.strictEqual(db2.products[0].status, 'tracking'); assert.strictEqual(db2.products[0].notified_price, null); assert.strictEqual(db2.sent.length, 0);
+  // only 5 % under the first price: no mail
+  const db3 = newDb();
+  db3.products.push(shopProduct('AU3', 'u1', BED_URL, { target_type: 'auto', target_value: null, status: 'tracking', tracked_variants: ['shop'], history: [{ d: '2026-11-01', p: 610, s: 'x', src: 'check' }] }));
+  await R.run(shopCtx(db3, { [BED_URL]: shopHtml('shop-jsonld-single') }));
+  assert.strictEqual(db3.products[0].notified_price, null); assert.strictEqual(db3.sent.length, 0);
+  // opted out of e-mail: the hit is recorded, nothing is sent
+  const db4 = newDb();
+  db4.products.push(shopProduct('AU4', 'u3', BED_URL, { target_type: 'auto', target_value: null, status: 'tracking', tracked_variants: ['shop'], history: old }));
+  db4.profiles.push({ user_id: 'u3', notify_email: false, shops_always: [], shops_exclude: [], shops_only: false });
+  await R.run(shopCtx(db4, { [BED_URL]: shopHtml('shop-jsonld-single') }));
+  assert.strictEqual(db4.products[0].notified_price, 579); assert.strictEqual(db4.sent.length, 0);
+});
 
 test('full run: pending -> choose -> tracking -> hit -> second run without a new e-mail', async () => {
   const db = newDb();

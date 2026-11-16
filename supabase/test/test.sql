@@ -212,7 +212,7 @@ update public.products set source_url = 'https://shop.example.dk/vare' where sou
 select t.chk('authenticated user can change to a shop link', (select count(*) = 1 from public.products where source_url = 'https://shop.example.dk/vare' and status = 'pending'));
 select t.chk('authenticated user cannot set a bad link', t.ins('http://x.dk/') = 'rejected');
 reset role;
--- resolver_set keeps accepting prisjagt.dk product links only
+-- resolver_set accepts prisjagt.dk links and any https link that passes the source_url rule
 insert into public.products (user_id, name, target_type, target_value) values ('00000000-0000-0000-0000-0000000000a1', 'navn kun', 'price', 5);
 update public.resolver_secret set token = repeat('a', 64);
 select set_config('request.headers', '{"x-resolver-token":"' || repeat('a', 64) || '"}', false);
@@ -221,11 +221,70 @@ declare pid uuid := (select id from public.products where name = 'navn kun'); r 
 begin
   r := public.resolver_set(pid, u); return r::text;
 exception when others then return 'error:' || sqlerrm; end $$;
-select t.chk('resolver_set rejects a shop link', t.rs('https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html') like '%not a prisjagt.dk product link%'
-  and (select source_url is null from public.products where name = 'navn kun'));
-select t.chk('resolver_set rejects other prisjagt pages', t.rs('https://prisjagt.dk/produkt/x') like '%not a prisjagt.dk product link%');
+create function t.nolink() returns boolean language sql as $$ select source_url is null from public.products where name = 'navn kun' $$;
+select t.chk('resolver_set rejects http', t.rs('http://shop.dk/vare') like '%not a usable https link%' and t.nolink());
+select t.chk('resolver_set rejects port', t.rs('https://shop.dk:8443/vare') like '%not a usable https link%' and t.nolink());
+select t.chk('resolver_set rejects user:password@', t.rs('https://bruger:kode@shop.dk/vare') like '%not a usable https link%' and t.nolink());
+select t.chk('resolver_set rejects a host without a dot', t.rs('https://localhost/vare') like '%not a usable https link%' and t.nolink());
+select t.chk('resolver_set rejects a space', t.rs('https://shop.dk/en vare') like '%not a usable https link%' and t.nolink());
+select t.chk('resolver_set rejects javascript:', t.rs('javascript:alert(1)') like '%not a usable https link%' and t.nolink());
+select t.chk('resolver_set rejects 501 characters', t.rs('https://shop.dk/' || repeat('a', 485)) like '%not a usable https link%' and t.nolink());
+select t.chk('resolver_set rejects null', t.rs(null) like '%not a usable https link%' and t.nolink());
+select t.chk('resolver_set accepts a shop link', t.rs('https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html') = 'true');
+select t.chk('and stores a shop link as given', (select source_url = 'https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html' from public.products where name = 'navn kun'));
+select t.chk('a second call finds no name-only product any more (false)', t.rs('https://shop.dk/andet') = 'false');
+update public.products set source_url = null, status = 'pending' where name = 'navn kun';
+select t.chk('resolver_set accepts 500 characters', t.rs('https://shop.dk/' || repeat('a', 484)) = 'true');
+update public.products set source_url = null, status = 'pending' where name = 'navn kun';
 select t.chk('resolver_set accepts a prisjagt product link', t.rs('https://www.prisjagt.dk/product.php?p=42') = 'true');
 select t.chk('and stores it without www', (select source_url = 'https://prisjagt.dk/product.php?p=42' from public.products where name = 'navn kun'));
+update public.products set source_url = null, status = 'pending' where name = 'navn kun';
+-- the token check is unchanged
+select set_config('request.headers', '{"x-resolver-token":"fel"}', false);
+select t.chk('resolver_set still needs the token', t.rs('https://shop.dk/vare') like '%invalid or missing token%' and t.nolink());
+select set_config('request.headers', '{"x-resolver-token":"' || repeat('a', 64) || '"}', false);
+-- and still only touches pending rows without a link
+update public.products set status = 'error' where name = 'navn kun';
+select t.chk('resolver_set returns false for a product that is not pending', t.rs('https://shop.dk/vare') = 'false' and t.nolink());
+delete from public.products where name = 'navn kun';
+
+-- 11b. goal 'auto': constraint migration from the old (live) shape, then the new rules
+alter table public.products drop constraint products_target_type_check;
+alter table public.products drop constraint products_target_value_check;
+alter table public.products alter column target_value set not null;
+alter table public.products add constraint products_target_type_check check (target_type in ('price', 'pct'));
+alter table public.products add constraint products_check check (target_value > 0 and (target_type <> 'pct' or target_value < 100));
+\o /dev/null
+\i :schema
+\i :schema
+\o
+select t.chk('old goal constraints are replaced (twice, idempotent)',
+  (select array_agg(conname::text order by conname) from pg_constraint where conrelid = 'public.products'::regclass and contype = 'c' and pg_get_constraintdef(oid) ~ 'target_')
+  = array['products_target_type_check', 'products_target_value_check']);
+select t.chk('existing price and pct rows are untouched', (select count(*) > 0 from public.products where target_type in ('price', 'pct')));
+create function t.goal(ty text, v numeric) returns text language plpgsql as $$
+begin
+  insert into public.products (user_id, name, target_type, target_value) values ('00000000-0000-0000-0000-0000000000a1', 'maal', ty, v);
+  delete from public.products where name = 'maal';
+  return 'ok';
+exception when check_violation or not_null_violation then return 'rejected'; end $$;
+select t.chk('goal auto with null value accepted', t.goal('auto', null) = 'ok');
+select t.chk('goal auto with a value rejected', t.goal('auto', 5) = 'rejected');
+select t.chk('goal price needs a value', t.goal('price', null) = 'rejected' and t.goal('price', 0) = 'rejected' and t.goal('price', 500) = 'ok');
+select t.chk('goal pct needs 0 < value < 100', t.goal('pct', null) = 'rejected' and t.goal('pct', 100) = 'rejected' and t.goal('pct', 20) = 'ok');
+select t.chk('unknown goal type rejected', t.goal('foo', 5) = 'rejected' and t.goal('foo', null) = 'rejected');
+-- a browser user can switch an existing product to auto and back (the guard does not list goal types)
+insert into public.products (user_id, name, target_type, target_value) values ('00000000-0000-0000-0000-0000000000a1', 'skift', 'price', 5);
+set role authenticated;
+select set_config('request.jwt.claims', '{"email":"mor@familie.dk","sub":"00000000-0000-0000-0000-0000000000a1"}', false);
+update public.products set target_type = 'auto', target_value = null where name = 'skift';
+select t.chk('authenticated user can switch a product to auto', (select target_type = 'auto' and target_value is null from public.products where name = 'skift'));
+insert into public.products (name, target_type) values ('skift2', 'auto');
+select t.chk('authenticated user can insert auto without a value', (select count(*) = 1 from public.products where name = 'skift2' and target_value is null));
+update public.products set target_type = 'price', target_value = 99 where name = 'skift';
+select t.chk('and back to a price goal', (select target_type = 'price' and target_value = 99 from public.products where name = 'skift'));
+reset role;
+delete from public.products where name in ('skift', 'skift2');
 
 -- 12. final whole-file run on the populated database
 \o /dev/null

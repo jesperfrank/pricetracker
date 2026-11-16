@@ -97,7 +97,7 @@ function trackingPatch(prod, profile, parsed, now) {
   const saleSignal = low ? (rows.some((r) => r.saleKnown) ? rows.some((r) => r.inStock && r.price === low.price && r.sale) : null) : null;
   const verdict = P.verdictFor(low ? low.price : null, normal, history, today, saleSignal);
   const warning = P.priceWarning(history, today, low ? low.price : undefined);
-  const goal = P.goalOutcome(prod, low, normal, iso);
+  const goal = P.goalOutcome(prod, low, normal, iso, { verdict, history });
 
   const patch = Object.assign({
     status: 'tracking', title: prod.title || parsed.title || null, variants, offers, history, normal_price: normal, verdict, warning,
@@ -105,7 +105,7 @@ function trackingPatch(prod, profile, parsed, now) {
   }, goal.fields);
   return {
     patch,
-    hit: goal.newHit ? { productId: prod.id, userId: prod.user_id, name: prod.name, price: low.price, store: low.store, url: low.url, verdict: verdict.text, warning } : null,
+    hit: goal.newHit ? { productId: prod.id, userId: prod.user_id, name: prod.name, price: low.price, store: low.store, url: low.url, verdict: verdict.text, warning, reason: goal.reason } : null,
   };
 }
 

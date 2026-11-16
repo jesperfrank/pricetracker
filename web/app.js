@@ -173,7 +173,7 @@
       history: Array.isArray(r.history) ? r.history : [],
       normalPrice: num(r.normal_price), verdict: r.verdict && typeof r.verdict === "object" ? r.verdict : null,
       warning: r.warning || "", checkNote: r.check_note || "", lastChecked: r.last_checked || null,
-      targetType: r.target_type === "pct" ? "pct" : "price", targetValue: num(r.target_value),
+      targetType: r.target_type === "pct" ? "pct" : r.target_type === "auto" ? "auto" : "price", targetValue: num(r.target_value),
       shopsAlways: r.shops_always, shopsExclude: r.shops_exclude, shopsOnly: !!r.shops_only,
       url: r.source_url || null, createdAt: r.created_at || ""
     };
@@ -192,6 +192,7 @@
     return pool.slice().sort(function (a, b) { return a.price - b.price; })[0] || null;
   }
   function targetKr(p) {
+    if (p.targetType === "auto") return null;
     var v = p.targetValue;
     if (typeof v !== "number" || !isFinite(v) || !(v > 0)) return null;
     if (p.targetType === "pct") return typeof p.normalPrice === "number" ? p.normalPrice * (1 - v / 100) : null;
@@ -202,8 +203,26 @@
       return { t: Date.parse(h.d + "T12:00:00"), p: h.p, s: h.s, src: h.src };
     }).filter(function (h) { return isFinite(h.t) && typeof h.p === "number"; }).sort(function (a, b) { return a.t - b.t; });
   }
-  function isHit(p) { var b = bestOf(p), t = targetKr(p); return p.status === "tracking" && !!(b && t != null && b.inStock !== false && b.price <= t); }
+  // Goal "auto" (no goal of the user's own): one short sentence on why this is a good deal, or null. The same rule as the job:
+  // the verdict says "good", or there is too little history for a verdict (no normal price) and the price is at least 10 % under
+  // the first price seen.
+  function autoReason(p) {
+    var b = bestOf(p);
+    if (p.status !== "tracking" || !b || b.inStock === false) return null;
+    var v = p.verdict;
+    if (v && v.level === "good" && v.text) return v.text;
+    if (v && v.level === "unknown" && p.normalPrice == null) {
+      var h = histOf(p).filter(function (x) { return x.p > 0; });
+      if (h.length && b.price * 10 <= h[0].p * 9) return kr(b.price) + " er " + Math.round((1 - b.price / h[0].p) * 100) + " % under den første pris, vi har set (" + kr(h[0].p) + ").";
+    }
+    return null;
+  }
+  function isHit(p) {
+    if (p.targetType === "auto") return autoReason(p) !== null;
+    var b = bestOf(p), t = targetKr(p); return p.status === "tracking" && !!(b && t != null && b.inStock !== false && b.price <= t);
+  }
   function targetText(p) {
+    if (p.targetType === "auto") return "godt tilbud";
     var t = targetKr(p);
     if (p.targetType === "pct") return "mål " + nf.format(p.targetValue) + " %" + (t != null ? " · " + kr(t) : "");
     return "mål " + kr(t);
@@ -271,7 +290,7 @@
     else if (p.status === "error") st = '<span class="warn">' + esc(p.checkNote || "Produktet kunne ikke hentes") + '</span>';
     else if (awaitingFetch(p)) st = "Henter priser for den valgte variant …";
     else if (p.status === "choose") st = '<span class="out">Vælg, hvilken variant du vil følge</span>';
-    else if (isHit(p)) st = '<span class="ok">Mål nået</span> · på lager hos ' + esc(b.store || "en butik");
+    else if (isHit(p)) st = '<span class="ok">' + (p.targetType === "auto" ? "Godt tilbud" : "Mål nået") + '</span> · på lager hos ' + esc(b.store || "en butik");
     else if (!p.lastChecked) st = "Venter på første tjek";
     else if (!b) st = esc(p.checkNote || "Ingen pris fundet");
     else if (!anyStock) st = '<span class="out">Udsolgt alle steder</span> · senest hos ' + esc(b.store || "en butik");
@@ -307,9 +326,13 @@
           '<button type="button" class="link warn" data-act="del-yes" data-id="' + esc(id) + '">Ja, fjern</button>' +
           '<button type="button" class="link" data-act="del-no">Behold</button></span>';
       } else {
-        html += '<form class="edit" data-edit="' + esc(id) + '"><label for="e-' + esc(id) + '">' +
-          (p.targetType === "pct" ? "Rabat i %" : "Højst, kr.") + '</label>' +
-          '<input class="n" type="number" id="e-' + esc(id) + '" min="1" step="1" value="' + esc(p.targetValue) + '" required>' +
+        var auto = p.targetType === "auto";
+        html += '<form class="edit" data-edit="' + esc(id) + '"><label class="vh" for="et-' + esc(id) + '">Mål</label>' +
+          '<select id="et-' + esc(id) + '" data-etype>' +
+          [["auto", "Godt tilbud"], ["price", "Højst, kr."], ["pct", "Rabat i %"]].map(function (o) {
+            return '<option value="' + o[0] + '"' + (p.targetType === o[0] ? " selected" : "") + '>' + o[1] + '</option>';
+          }).join("") + '</select>' +
+          '<input class="n" type="number" id="e-' + esc(id) + '" min="1" step="1" value="' + esc(auto ? "" : p.targetValue) + '" aria-label="Målets værdi"' + (auto ? " hidden" : " required") + '>' +
           '<button class="link" type="submit">Gem</button>' +
           '<button type="button" class="link warn" data-act="del" data-id="' + esc(id) + '">Fjern</button></form>';
       }
@@ -324,6 +347,26 @@
       '<input class="wide" type="url" id="u-' + esc(id) + '" maxlength="500" required placeholder="https://…">' +
       '<button class="link" type="submit">Gem linket</button><span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></form>' : "";
     return '<p class="verdict">' + (afterError ? "Find det selv" : "Har du travlt? Find det selv") + ': ' + a + '</p>' + f;
+  }
+
+  // One-click goals from the product's own history: a price in whole kroner each (shown value = saved value).
+  function suggestions(p, b, low30, lowAll) {
+    var list = [];
+    if (lowAll != null) list.push({ label: "Laveste set", v: Math.round(lowAll) });
+    if (typeof p.normalPrice === "number") list.push({ label: "10 % under normalpris", v: Math.floor(p.normalPrice * 0.9) });
+    else if (b) list.push({ label: "10 % under prisen nu", v: Math.floor(b.price * 0.9) });
+    if (low30 != null) list.push({ label: "Laveste 30 dage", v: Math.round(low30) });
+    var seen = {};
+    return list.filter(function (x) { if (!(x.v > 0) || seen[x.v]) return false; seen[x.v] = true; return true; }).slice(0, 3);
+  }
+  function suggestHtml(p, b, h, low30, lowAll) {
+    if (!state.canWrite || !h.length) return "";
+    var l = suggestions(p, b, low30, lowAll);
+    if (!l.length) return "";
+    return '<div class="sugg"><span class="meta">Sæt målet med ét klik:</span>' + l.map(function (x) {
+      var on = p.targetType === "price" && p.targetValue === x.v;
+      return '<button type="button" class="chip" data-act="goal" data-id="' + esc(p._id) + '" data-v="' + x.v + '" aria-pressed="' + on + '">' + esc(x.label + ": " + kr(x.v)) + '</button>';
+    }).join("") + '</div>';
   }
 
   function bodyHtml(p) {
@@ -359,6 +402,7 @@
     } else if (!p.lastChecked) {
       html += '<p class="verdict">Ved næste kørsel hentes priserne, butikkerne og normalprisen.</p>';
     }
+    if (p.targetType === "auto" && autoReason(p)) html += '<p class="note">Derfor giver vi besked: ' + esc(autoReason(p)) + '</p>';
     if (p.warning) html += '<p class="verdict poor"><b>Pas på førprisen.</b> ' + esc(p.warning) + '</p>';
     if (single) {
       html += '<p class="note">Følger kun denne butik. Indsæt et link fra prisjagt.dk for at sammenligne flere butikker.</p>';
@@ -371,6 +415,7 @@
     var last30 = h.filter(function (x) { return x.t >= now - 30 * DAY; });
     var low30 = last30.length ? Math.min.apply(null, last30.map(function (x) { return x.p; })) : null;
     var lowAll = h.length ? Math.min.apply(null, h.map(function (x) { return x.p; })) : null;
+    html += suggestHtml(p, b, h, low30, lowAll);
     html += '<dl class="stats n">' +
       '<div><dt>Laveste nu</dt><dd>' + esc(b ? kr(b.price) : "–") + '</dd></div>' +
       '<div><dt>Laveste 30 dage</dt><dd>' + esc(kr(low30)) + '</dd></div>' +
@@ -606,6 +651,15 @@
     var act = b.dataset.act, id = b.dataset.id, p = prod(id);
     if (act === "toggle") { state.open[id] = !(p ? isOpen(p) : state.open[id]); state.confirmDel = null; render(); }
     else if (act === "range") { state.range[id] = +b.dataset.r; render(); }
+    else if (act === "goal" && sb && p) {
+      var gv = Number(b.dataset.v);
+      if (!(gv > 0) || (p.targetType === "price" && p.targetValue === gv)) return;
+      b.disabled = true;
+      sb.from("products").update({ target_type: "price", target_value: gv }).eq("id", id).then(function (r) {
+        if (r && r.error) { b.disabled = false; onWriteError(r.error); return; }
+        p.targetType = "price"; p.targetValue = gv; render(); fetchProducts();
+      }, function () { b.disabled = false; });
+    }
     else if (act === "del") { state.confirmDel = id; render(); }
     else if (act === "del-no") { state.confirmDel = null; render(); }
     else if (act === "change") { state.change[id] = true; delete state.pick[id]; delete state.note[id]; render(); }
@@ -620,6 +674,13 @@
     }
   });
   $("list").addEventListener("change", function (ev) {
+    var sel = ev.target.closest("[data-etype]");
+    if (sel) {
+      var inp = sel.form.querySelector("input"), auto = sel.value === "auto";
+      inp.hidden = auto; inp.required = !auto;
+      if (sel.value === "pct") inp.max = "95"; else inp.removeAttribute("max");
+      return;
+    }
     var cb = ev.target.closest("[data-var]"); if (!cb) return;
     var form = cb.closest("[data-choose]"), id = form.dataset.choose;
     state.pick[id] = Array.prototype.map.call(form.querySelectorAll("[data-var]:checked"), function (x) { return x.dataset.var; });
@@ -678,13 +739,15 @@
     }
     var f = ev.target.closest("[data-edit]"); if (!f) return;
     ev.preventDefault();
-    var v = Number(f.querySelector("input").value), id = f.dataset.edit, p = prod(id);
-    if (!p || !(v > 0) || (p.targetType === "pct" && v > 95)) return;
+    var ty = f.querySelector("select").value, v = ty === "auto" ? null : Number(f.querySelector("input").value), id = f.dataset.edit, p = prod(id), patch;
+    if (!p || (ty !== "auto" && (!(v > 0) || (ty === "pct" && v > 95)))) return;
     f.querySelector("input").blur();
-    if (v === p.targetValue) { render(); return; }
-    sb.from("products").update({ target_value: v }).eq("id", id).then(function (r) {
+    if (ty === p.targetType && v === p.targetValue) { render(); return; }
+    // the goal type is only written when it changes
+    patch = ty === p.targetType ? { target_value: v } : { target_type: ty, target_value: v };
+    sb.from("products").update(patch).eq("id", id).then(function (r) {
       if (r && r.error) { onWriteError(r.error); return; }
-      p.targetValue = v; render(); fetchProducts();
+      p.targetType = ty; p.targetValue = v; render(); fetchProducts();
     }, function () {});
   });
   $("list").addEventListener("focusout", function () { setTimeout(function () { if (renderPending) render(); }, 0); });
@@ -769,22 +832,25 @@
 
   // ---- add form ----
   function syncType() {
-    var pct = $("fTypePct").checked;
+    var pct = $("fTypePct").checked, auto = $("fTypeAuto").checked;
+    $("fAmount").hidden = auto; $("addForm").className = "add" + (auto ? " auto" : "");
     $("fValLabel").textContent = pct ? "Mindste rabat i procent" : "Højeste pris i kroner";
     $("fVal").placeholder = pct ? "Mindst" : "Højst";
     $("fVal").max = pct ? "95" : "";
-    $("fHint").textContent = pct
+    $("fHint").textContent = auto
+      ? "Du får besked, når prisen er et godt tilbud: klart under normalprisen og den laveste i 30 dage. Er der for lidt historik, når prisen mindst 10 % under den første pris, vi har set."
+      : pct
       ? "Rabatten regnes fra normalprisen, som findes ved første hentning, ikke fra butikkens egen førpris."
       : "Du får besked, når varen er på lager til den pris eller under.";
   }
   // A value that looks like an address (scheme, www., or a single word with a path) is a link; anything else is a name.
   function looksLikeLink(t) { return /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^(javascript|data|vbscript|file|mailto):/i.test(t) || /^www\./i.test(t) || /^\S+\.\S+\/\S*$/.test(t) || /prisjagt\.dk/i.test(t) && !/\s/.test(t); }
-  $("fTypePrice").addEventListener("change", syncType); $("fTypePct").addEventListener("change", syncType);
+  $("fTypePrice").addEventListener("change", syncType); $("fTypePct").addEventListener("change", syncType); $("fTypeAuto").addEventListener("change", syncType);
   $("addForm").addEventListener("submit", function (ev) {
     ev.preventDefault();
     var msg = $("fMsg"); msg.hidden = true;
     var fail = function (t) { msg.textContent = t; msg.hidden = false; };
-    var raw = $("fMain").value.trim().replace(/\s+/g, " "), v = Number($("fVal").value), pct = $("fTypePct").checked, url = null, name = null;
+    var raw = $("fMain").value.trim().replace(/\s+/g, " "), v = Number($("fVal").value), pct = $("fTypePct").checked, auto = $("fTypeAuto").checked, url = null, name = null;
     if (!raw) { fail("Skriv navnet på varen, eller indsæt et link til den."); return; }
     if (looksLikeLink(raw)) {
       url = parseLink(raw);
@@ -793,11 +859,11 @@
       if (raw.length < 2 || raw.length > 140) { fail("Navnet skal være mellem 2 og 140 tegn."); return; }
       name = raw;
     }
-    if (!(v > 0) || (pct && v > 95)) { fail(pct ? "Skriv en rabat mellem 1 og 95 %." : "Skriv en pris i hele kroner."); return; }
+    if (!auto && (!(v > 0) || (pct && v > 95))) { fail(pct ? "Skriv en rabat mellem 1 og 95 %." : "Skriv en pris i hele kroner."); return; }
     if (!sb) return;
     var btn = $("fSubmit"); btn.disabled = true;
-    var row = url ? { name: PLACEHOLDER, source_url: url, target_type: pct ? "pct" : "price", target_value: v, active: true }
-      : { name: name, target_type: pct ? "pct" : "price", target_value: v };
+    var goal = auto ? { target_type: "auto", target_value: null } : { target_type: pct ? "pct" : "price", target_value: v };
+    var row = url ? Object.assign({ name: PLACEHOLDER, source_url: url }, goal, { active: true }) : Object.assign({ name: name }, goal);
     sb.from("products").insert(row).then(function (r) {
       btn.disabled = false;
       if (r && r.error) {

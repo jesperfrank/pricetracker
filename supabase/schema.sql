@@ -29,8 +29,9 @@ create table if not exists public.products (
   -- written by the user
   name            text not null check (char_length(name) between 1 and 140),
   source_url      text,
-  target_type     text not null check (target_type in ('price', 'pct')),
-  target_value    numeric not null check (target_value > 0 and (target_type <> 'pct' or target_value < 100)),
+  -- the goal: see products_target_* below ('auto' = no goal, notify on a genuinely good deal)
+  target_type     text not null,
+  target_value    numeric,
   tracked_variants text[] check (tracked_variants is null or cardinality(tracked_variants) <= 200),
   shops_always    text[] default '{}',
   shops_exclude   text[] default '{}',
@@ -58,6 +59,26 @@ create table if not exists public.products (
 -- NOT VALID: enforced for every new/changed row without re-checking old rows.
 alter table public.products drop constraint if exists products_name_not_blank;
 alter table public.products add constraint products_name_not_blank check (btrim(name) <> '') not valid;
+
+-- The goal. target_type 'price' (a price in kr.) or 'pct' (a discount in %) needs a target_value; 'auto' means no goal of
+-- the user's own (notify on a good deal) and has target_value null. Older databases have unnamed inline checks and
+-- target_value NOT NULL: every check that mentions the goal columns is dropped (whatever it is called) and the two named
+-- checks are added again, so this is safe to re-run. Existing price/pct rows satisfy the new checks as they are.
+do $$
+declare c record;
+begin
+  for c in select conname from pg_constraint
+           where conrelid = 'public.products'::regclass and contype = 'c'
+             and pg_get_constraintdef(oid) ~ 'target_(type|value)'
+  loop
+    execute format('alter table public.products drop constraint %I', c.conname);
+  end loop;
+end $$;
+alter table public.products alter column target_value drop not null;
+alter table public.products add constraint products_target_type_check check (target_type in ('price', 'pct', 'auto'));
+alter table public.products add constraint products_target_value_check check (
+  (target_type = 'auto' and target_value is null)
+  or (target_type in ('price', 'pct') and target_value is not null and target_value > 0 and (target_type <> 'pct' or target_value < 100)));
 
 -- source_url: a prisjagt.dk page (many shops) or the product page of a single web shop. Any https:// link whose
 -- host contains a dot (no user:password@, no port, no spaces), at most 500 characters. The job guards again before fetching.
@@ -286,8 +307,9 @@ end;
 $$;
 
 -- Writes the link for a product that is still name-only and pending. Status stays 'pending', so the
--- price job does its normal first fetch. Only https://prisjagt.dk/product.php?p=<digits> is accepted
--- (an optional www. is dropped; anything else, including other query parameters or fragments, is rejected).
+-- price job does its normal first fetch. Accepted: any https link that passes the same rule as the
+-- products.source_url check (host with a dot, no port, no user:password@, no spaces, at most 500 characters),
+-- so a prisjagt.dk page or the product page of one web shop. A leading www. on prisjagt.dk is dropped.
 -- Returns true when the product was updated, false when it is no longer in that state.
 create or replace function public.resolver_set(p_id uuid, p_url text)
 returns boolean
@@ -303,8 +325,8 @@ begin
     raise exception 'resolver: invalid or missing token' using errcode = '42501';
   end if;
   u := regexp_replace(u, '^https://www\.prisjagt\.dk/', 'https://prisjagt.dk/');
-  if char_length(u) > 200 or u !~ '^https://prisjagt\.dk/product\.php\?p=[0-9]+$' then
-    raise exception 'resolver: not a prisjagt.dk product link' using errcode = '22023';
+  if char_length(u) > 500 or u !~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$' then
+    raise exception 'resolver: not a usable https link' using errcode = '22023';
   end if;
   update public.products
      set source_url = u, check_note = null

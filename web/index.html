@@ -58,22 +58,23 @@
 
   <!-- signed in -->
   <section id="appView" hidden>
-    <form class="add" id="addForm" autocomplete="off" novalidate>
+    <form class="add auto" id="addForm" autocomplete="off" novalidate>
       <label class="vh" for="fMain">Produktnavn eller link</label>
       <input class="inp url" type="text" id="fMain" maxlength="500" required placeholder="Produktnavn eller link">
-      <div class="amount">
+      <div class="goal" role="radiogroup" aria-label="Hvornår vil du have besked?">
+        <label><input type="radio" name="fType" id="fTypeAuto" value="auto" checked><span>Giv besked ved et godt tilbud</span></label>
+        <label><input type="radio" name="fType" id="fTypePrice" value="price"><span>Pris under … kr.</span></label>
+        <label><input type="radio" name="fType" id="fTypePct" value="pct"><span>Rabat på mindst … %</span></label>
+      </div>
+      <div class="amount" id="fAmount" hidden>
         <label class="vh" for="fVal" id="fValLabel">Højeste pris i kroner</label>
-        <input class="inp n" type="number" id="fVal" min="1" step="1" required inputmode="numeric" placeholder="Højst">
-        <div class="unit" role="radiogroup" aria-label="Mål i kroner eller procent">
-          <label><input type="radio" name="fType" id="fTypePrice" value="price" checked><span>kr.</span></label>
-          <label><input type="radio" name="fType" id="fTypePct" value="pct"><span>%</span></label>
-        </div>
+        <input class="inp n" type="number" id="fVal" min="1" step="1" inputmode="numeric" placeholder="Højst">
       </div>
       <button class="btn" id="fSubmit" type="submit">Hold øje</button>
     </form>
     <p class="msg" id="fMsg" role="alert" hidden></p>
     <p class="hint" id="fHelp">Et link fra prisjagt.dk giver priser fra mange butikker, et link til én butik følger kun den butik, og et navn finder vi produktet til.</p>
-    <p class="hint" id="fHint">Du får besked, når varen er på lager til den pris eller under.</p>
+    <p class="hint" id="fHint">Du får besked, når prisen er et godt tilbud: klart under normalprisen og den laveste i 30 dage. Er der for lidt historik, når prisen mindst 10 % under den første pris, vi har set.</p>
     <p class="notice" id="readonly" hidden>Din adresse har ikke adgang til at gemme endnu. Bed ejeren om at tilføje den.</p>
 
     <section class="list" id="list" aria-live="polite">

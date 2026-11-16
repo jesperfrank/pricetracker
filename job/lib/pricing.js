@@ -226,14 +226,41 @@ function targetPrice(prod, normal) {
   return null;
 }
 
-// hit = lowest in-stock offer at or below the goal. Announce once, again only if the price drops
-// further; reset when no longer a hit. Returns the notified_* fields to write.
-function goalOutcome(prod, low, normal, iso) {
-  const tgt = targetPrice(prod, normal);
-  const hit = !!(low && tgt !== null && low.price <= tgt);
+// Goal 'auto' (no goal of the user's own). Returns one short Danish sentence saying why this is worth a message, or null.
+// 1) the rule-based verdict says the price is genuinely good (verdictFor level 'good'), or
+// 2) there is too little history for a verdict (no normal price) and the lowest price is at least 10 % below the
+//    first price seen in the history. low: the lowest in-stock offer {price} or null.
+function autoReason(low, verdict, history) {
+  if (!low || typeof low.price !== 'number') return null;
+  if (verdict && verdict.level === 'good' && verdict.text) return verdict.text;
+  if (verdict && verdict.level === 'unknown') {
+    const pts = (Array.isArray(history) ? history : [])
+      .filter((x) => x && typeof x.d === 'string' && typeof x.p === 'number' && x.p > 0)
+      .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0));
+    if (!pts.length) return null;
+    const first = pts[0].p;
+    if (low.price * 10 <= first * 9) {
+      return fmtKr(low.price) + ' er ' + Math.round((1 - low.price / first) * 100) + ' % under den første pris, vi har set (' + fmtKr(first) + ').';
+    }
+  }
+  return null;
+}
+
+// hit = lowest in-stock offer at or below the goal (type 'auto': autoReason says so; extra = {verdict, history}).
+// Announce once, again only if the price drops further; reset when no longer a hit.
+// Returns the notified_* fields to write (and reason for type 'auto').
+function goalOutcome(prod, low, normal, iso, extra) {
+  let hit, reason = null;
+  if (prod.target_type === 'auto') {
+    reason = autoReason(low, extra && extra.verdict, extra && extra.history);
+    hit = reason !== null;
+  } else {
+    const tgt = targetPrice(prod, normal);
+    hit = !!(low && tgt !== null && low.price <= tgt);
+  }
   const prevN = prod.notified_price;
   const hasPrev = typeof prevN === 'number';
-  const out = { hit, newHit: false, fields: {} };
+  const out = { hit, newHit: false, fields: {}, reason };
   if (hit) {
     if (!hasPrev || low.price < prevN) {
       out.newHit = true;
@@ -246,5 +273,5 @@ function goalOutcome(prod, low, normal, iso) {
 module.exports = {
   HISTORY_DAYS, MAX_OFFERS, copenhagenDate, dayNum, numDay, fmtKr, normShop, matchShop, anyMatch, mergePrefs, applyPrefs,
   lowestInStock, onePerStore, sanityCheck, mergeHistory, mergePageHistory, dailySeries, normalPrice, verdictFor,
-  priceWarning, targetPrice, goalOutcome,
+  priceWarning, targetPrice, autoReason, goalOutcome,
 };

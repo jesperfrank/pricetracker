@@ -235,6 +235,7 @@ let base;
     const tt = await p.locator('.item[data-status="tracking"] .body').first().textContent();
     check("tracking row: verdict, stats, chart, shops table, goal edit, prefs, change variant", /Laveste nu/.test(tt) && /Normalpris/.test(tt) && /Butikker/.test(tt) && /Skift variant/.test(tt) && /Butikker for dette produkt/.test(tt) && await p.locator(".chart svg").first().isVisible(), tt.slice(0, 200));
     // chart interactions
+    await p.locator(".chart svg").first().scrollIntoViewIfNeeded();
     const box = await p.locator(".chart svg").first().boundingBox();
     await p.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.5);
     check("chart hover tooltip", await p.locator(".chart .tip").first().isVisible());
@@ -288,6 +289,7 @@ let base;
   {
     const p = await open({ products: [], label: "add" });
     await p.waitForSelector("#addForm:not([hidden])");
+    await p.click(".goal label:has(#fTypePrice)");
     check("add: empty list text and how-to line", /Ingen produkter endnu/.test(await p.textContent("#list")) && /Et link fra prisjagt\.dk giver priser fra mange butikker/.test(await p.textContent("#fHelp")) && /link til én butik følger kun den butik/.test(await p.textContent("#fHelp")) && /et navn finder vi produktet til/.test(await p.textContent("#fHelp")) && (await p.getAttribute("#fMain", "placeholder")) === "Produktnavn eller link" && (await p.textContent('label[for="fMain"]')) === "Produktnavn eller link" && (await p.locator("#fName").count()) === 0);
     for (const bad of ["", "http://prisjagt.dk/p/1", "http://www.bedrenaetter.dk/x.html", "ftp://shop.dk/x", "https://prisjagt.dk/", "javascript:alert(1)", "www.example.com/x", "prisjagt.dk.evil.com/p/1", "https://localhost/x", "https://intranet/x", "https://127.0.0.1/x", "https://user:pw@shop.dk/x", "https://shop.dk:8443/x"]) {
       await p.fill("#fMain", bad); await p.fill("#fVal", "1000"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
@@ -305,12 +307,12 @@ let base;
       o.table === "products" && o.op === "insert" && JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://prisjagt.dk/produkt/sony-wh-1000xm5-p123?x=1", target_type: "price", target_value: 1500, active: true }), JSON.stringify(o.payload));
     await p.waitForSelector('.item[data-status="pending"]');
     check("add: new row appears as pending", true);
-    await p.fill("#fMain", "https://prisjagt.dk/product.php?p=555"); await p.click(".unit label:has(#fTypePct)"); await p.fill("#fVal", "20"); await p.click("#fSubmit");
+    await p.fill("#fMain", "https://prisjagt.dk/product.php?p=555"); await p.click(".goal label:has(#fTypePct)"); await p.fill("#fVal", "20"); await p.click("#fSubmit");
     await p.waitForFunction(() => window.__db.writes().length === 2);
     o = (await ops(p))[1];
     check("add: link still works with % goal (placeholder name, source_url)", JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://prisjagt.dk/product.php?p=555", target_type: "pct", target_value: 20, active: true }), JSON.stringify(o.payload));
     // a link to a single shop is accepted as it is (fragment dropped), same row shape as a prisjagt link
-    await p.fill("#fMain", " https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html#reviews "); await p.click(".unit label:has(#fTypePrice)"); await p.fill("#fVal", "450"); await p.click("#fSubmit");
+    await p.fill("#fMain", " https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html#reviews "); await p.click(".goal label:has(#fTypePrice)"); await p.fill("#fVal", "450"); await p.click("#fSubmit");
     await p.waitForFunction(() => window.__db.writes().length === 3);
     o = (await ops(p))[2];
     check("add: single-shop link accepted (name placeholder, source_url, no extra fields)", JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://www.bedrenaetter.dk/mayan-kuvertlagen-180x200-hvid.html", target_type: "price", target_value: 450, active: true }), JSON.stringify(o.payload));
@@ -322,14 +324,14 @@ let base;
       await p.fill("#fMain", bad); await p.fill("#fVal", "500"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
       check("add: name of " + bad.length + " characters rejected", (await ops(p)).length === 3 && /2 og 140/.test(await p.textContent("#fMsg")) && await p.isVisible("#fMsg"));
     }
-    await p.click(".unit label:has(#fTypePrice)");
+    await p.click(".goal label:has(#fTypePrice)");
     await p.fill("#fMain", "  Sony   WH-1000XM5 sort "); await p.fill("#fVal", "1700"); await p.click("#fSubmit");
     await p.waitForFunction(() => window.__db.writes().length === 4);
     o = (await ops(p))[3];
     check("add: name only -> {name, target_type, target_value} without source_url", JSON.stringify(o.payload) === JSON.stringify({ name: "Sony WH-1000XM5 sort", target_type: "price", target_value: 1700 }), JSON.stringify(o.payload));
     await p.waitForFunction(() => /Finder produktet … det kan tage op til en time\./.test(document.getElementById("list").textContent));
     check("add: name-only row shows 'Finder produktet …'", true);
-    await p.fill("#fMain", "https://prisjagt.dk/produkt/x"); await p.fill("#fVal", "99"); await p.click(".unit label:has(#fTypePct)"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
+    await p.fill("#fMain", "https://prisjagt.dk/produkt/x"); await p.fill("#fVal", "99"); await p.click(".goal label:has(#fTypePct)"); await p.evaluate(() => document.getElementById("addForm").requestSubmit());
     check("add: % above 95 rejected", (await ops(p)).length === 4 && /95/.test(await p.textContent("#fMsg")));
     await p.evaluate(() => { window.__db.deny = true; });
     await p.fill("#fVal", "20"); await p.click("#fSubmit");
@@ -377,6 +379,86 @@ let base;
     await p.waitForFunction(() => window.__db.writes().length === 2);
     o = (await ops(p))[1];
     check("name-only error: pasted link writes source_url and the row goes pending", o.payload.source_url === "https://prisjagt.dk/product.php?p=77" && o.filters[0][1] === "n2" && (await p.locator('.item[data-status="pending"]').count()) === 2, JSON.stringify(o));
+    await p.context().close();
+  }
+
+  // 5b. goal "auto" (no goal of your own): the default choice in the add form
+  {
+    const p = await open({ products: [], label: "add-auto" });
+    await p.waitForSelector("#addForm:not([hidden])");
+    check("add auto: default choice is 'Giv besked ved et godt tilbud', amount field hidden",
+      await p.isChecked("#fTypeAuto") && /Giv besked ved et godt tilbud/.test(await p.textContent(".goal")) && !(await p.isVisible("#fAmount")) && /godt tilbud/.test(await p.textContent("#fHint")));
+    await p.fill("#fMain", "Sony WH-1000XM5 sort"); await p.click("#fSubmit");
+    await p.waitForFunction(() => window.__db.writes().length === 1);
+    let o = (await ops(p))[0];
+    check("add auto: name only -> target_type auto, target_value null", JSON.stringify(o.payload) === JSON.stringify({ name: "Sony WH-1000XM5 sort", target_type: "auto", target_value: null }), JSON.stringify(o.payload));
+    await p.fill("#fMain", "https://prisjagt.dk/product.php?p=555"); await p.click("#fSubmit");
+    await p.waitForFunction(() => window.__db.writes().length === 2);
+    o = (await ops(p))[1];
+    check("add auto: link -> placeholder name, source_url, auto goal", JSON.stringify(o.payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://prisjagt.dk/product.php?p=555", target_type: "auto", target_value: null, active: true }), JSON.stringify(o.payload));
+    await p.click(".goal label:has(#fTypePct)");
+    check("add auto: choosing % shows the amount field", await p.isVisible("#fAmount") && /rabat/i.test(await p.textContent("#fValLabel")));
+    await p.fill("#fMain", "https://prisjagt.dk/product.php?p=556"); await p.click("#fSubmit");
+    check("add auto: % without a value is still refused", (await ops(p)).length === 2 && await p.isVisible("#fMsg"));
+    await p.click(".goal label:has(#fTypeAuto)");
+    check("add auto: back to auto hides the amount again", !(await p.isVisible("#fAmount")));
+    await p.context().close();
+  }
+
+  // 5c. goal "auto" in the list and the edit form; suggested goals
+  {
+    const dy = row("test-dyson-v15", { id: "dy", target_type: "auto", target_value: null });
+    const so = row("test-sony-xm5", { id: "x5" });
+    const p = await open({ products: [dy, so], label: "auto-edit" });
+    await p.waitForSelector(".item");
+    const it = p.locator('.item:has(.head[data-id="dy"])');
+    const head = await it.locator(".head").textContent();
+    check("auto goal: head says 'godt tilbud' and the deal is shown as a hit", /godt tilbud/.test(head) && /Godt tilbud/.test(head) && !/mål \d/.test(head) && (await it.getAttribute("class")).indexOf("hit") >= 0, head);
+    await p.locator('.head[data-id="dy"]').click();
+    const body = await p.locator('.item:has(.head[data-id="dy"]) .body').textContent();
+    check("auto goal: one sentence says why", /Derfor giver vi besked: 3\.999 kr\. er 13 % under normalprisen/.test(body), body.slice(0, 300));
+    check("auto goal: edit form has the three choices, auto selected, no number field",
+      (await p.inputValue("#et-dy")) === "auto" && (await p.locator("#et-dy option").count()) === 3 && !(await p.isVisible("#e-dy")));
+    // suggested goals
+    const sg = await p.locator('.item:has(.head[data-id="dy"]) .sugg .chip').allTextContents();
+    check("suggestions: laveste set, 10 % under normalpris (4.600 -> 4.140), laveste 30 dage", sg.length >= 2 && sg.length <= 3 && /^Laveste set: [\d.]+ kr\.$/.test(sg[0]) && sg.indexOf("10 % under normalpris: 4.140 kr.") >= 0, JSON.stringify(sg));
+    await p.locator('[data-act="goal"][data-id="dy"]').nth(1).click();
+    await p.waitForFunction(() => window.__db.writes().length === 1);
+    let o = (await ops(p))[0];
+    check("suggestion click: saves target_type price with that value via update", o.op === "update" && o.filters[0][1] === "dy" && o.payload.target_type === "price" && typeof o.payload.target_value === "number" && o.payload.target_value > 0, JSON.stringify(o));
+    const saved = o.payload.target_value;
+    await p.waitForFunction(() => /mål [\d.]+ kr\./.test(document.querySelector('.head[data-id="dy"]').textContent));
+    check("suggestion click: the goal now shows as a price goal and that chip is pressed",
+      new RegExp("mål " + saved.toLocaleString("da-DK") + " kr\\.").test(await p.textContent('.head[data-id="dy"]')) && (await p.locator('[data-act="goal"][aria-pressed="true"]').count()) >= 1);
+    // edit: price -> auto, then auto -> pct
+    await p.selectOption("#et-dy", "auto");
+    check("edit: choosing auto hides the number field", !(await p.isVisible("#e-dy")));
+    await p.click('[data-edit="dy"] button[type=submit]');
+    await p.waitForFunction(() => window.__db.writes().length === 2);
+    o = (await ops(p))[1];
+    check("edit: to auto -> {target_type auto, target_value null}", JSON.stringify(o.payload) === '{"target_type":"auto","target_value":null}', JSON.stringify(o.payload));
+    await p.waitForFunction(() => /godt tilbud/.test(document.querySelector('.head[data-id="dy"]').textContent));
+    await p.selectOption("#et-dy", "pct");
+    check("edit: choosing % shows the number field", await p.isVisible("#e-dy"));
+    await p.fill("#e-dy", "20"); await p.click('[data-edit="dy"] button[type=submit]');
+    await p.waitForFunction(() => window.__db.writes().length === 3);
+    o = (await ops(p))[2];
+    check("edit: auto -> pct writes both fields", JSON.stringify(o.payload) === '{"target_type":"pct","target_value":20}', JSON.stringify(o.payload));
+    // a product without history shows no suggestions; neither does a read-only user
+    const nh = row("test-dyson-v15", { id: "nh", history: [] });
+    const q = await open({ products: [nh], label: "no-sugg" });
+    await q.waitForSelector(".item"); await q.locator('.head[data-id="nh"]').click();
+    check("suggestions: none without history", (await q.locator(".sugg").count()) === 0);
+    await q.context().close();
+    // too little history for a verdict: 10 % under the first price is a hit, with its reason
+    const thin = row("test-dyson-v15", { id: "th", target_type: "auto", target_value: null, normal_price: null, verdict: { level: "unknown", text: "Der er endnu ikke nok prishistorik til at vurdere prisen." }, history: [{ d: "2026-11-10", p: 5000, s: "A", src: "check" }, { d: "2026-11-16", p: 3999, s: "Elgiganten", src: "check" }] });
+    const r = await open({ products: [thin], label: "auto-thin" });
+    await r.waitForSelector(".item"); await r.locator('.head[data-id="th"]').click();
+    check("auto goal: too little history -> 20 % under the first price is explained", /Derfor giver vi besked: 3\.999 kr\. er 20 % under den første pris, vi har set \(5\.000 kr\.\)\./.test(await r.textContent('.item .body')), (await r.textContent('.item .body')).slice(0, 200));
+    await r.evaluate(() => { var d = window.__db.products[0]; d.history[0].p = 4200; window.__emit(); });
+    await r.waitForFunction(() => !/Derfor giver vi besked/.test(document.querySelector(".item .body").textContent));
+    check("auto goal: only 5 % under the first price -> no hit, no sentence", (await r.getAttribute(".item", "class")).indexOf("hit") < 0);
+    await r.context().close();
     await p.context().close();
   }
 
