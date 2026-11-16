@@ -51,9 +51,14 @@ create table if not exists public.products (
   last_checked    timestamptz,
   notified_price  numeric,
   notified_at     timestamptz,
+  backfill_state  jsonb,
   constraint products_shops_len check (
     coalesce(cardinality(shops_always), 0) <= 100 and coalesce(cardinality(shops_exclude), 0) <= 100)
 );
+
+-- Older prices from the Internet Archive are fetched once per single-shop product. The job records the attempt here
+-- ({at, result: 'done' | 'retry', found, tries}); null = not attempted. Written by the job only (see products_guard).
+alter table public.products add column if not exists backfill_state jsonb;
 
 -- A product may be added by name only (source_url null); the name must then not be blank.
 -- NOT VALID: enforced for every new/changed row without re-checking old rows.
@@ -157,7 +162,7 @@ begin
     new.status := 'pending';
     new.title := null; new.variants := null; new.offers := null; new.history := null;
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
-    new.last_checked := null; new.notified_price := null; new.notified_at := null;
+    new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     return new;
   end if;
 
@@ -167,14 +172,14 @@ begin
   new.title := old.title; new.variants := old.variants; new.offers := old.offers; new.history := old.history;
   new.normal_price := old.normal_price; new.verdict := old.verdict; new.warning := old.warning;
   new.check_note := old.check_note; new.last_checked := old.last_checked;
-  new.notified_price := old.notified_price; new.notified_at := old.notified_at;
+  new.notified_price := old.notified_price; new.notified_at := old.notified_at; new.backfill_state := old.backfill_state;
 
   if new.source_url is distinct from old.source_url then
     new.status := 'pending';
     new.tracked_variants := null;
     new.title := null; new.variants := null; new.offers := null; new.history := null;
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
-    new.last_checked := null; new.notified_price := null; new.notified_at := null;
+    new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
   end if;
   return new;
 end;

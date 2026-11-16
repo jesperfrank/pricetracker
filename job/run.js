@@ -13,6 +13,7 @@ if (require.main === module && !process.env.NODE_USE_ENV_PROXY && (process.env.H
 const P = require('./lib/pricing');
 const PJ = require('./lib/prisjagt');
 const SHOP = require('./lib/shop');
+const WB = require('./lib/wayback');
 const { composeMail, composeOwnerMail, composeApprovedMail, sendResend } = require('./lib/mail');
 const { makeClient } = require('./lib/supabase');
 
@@ -20,6 +21,9 @@ const PAUSE_MS = 1500;
 const MAX_MAILS = 20;
 const ERROR_RETRY_MS = 6 * 3600 * 1000;
 const DEADLINE_MS = 8.5 * 60 * 1000;      // the workflow times out at 10 minutes
+const MAX_BACKFILL = 2;                   // products whose older prices are fetched from the Internet Archive per run
+const BACKFILL_RETRY_MS = 6 * 3600 * 1000;
+const BACKFILL_MAX_TRIES = 2;             // a 429 / 5xx from the archive allows one later retry, then it is given up
 
 const sleepReal = (ms) => new Promise((r) => setTimeout(r, ms));
 const isoNow = (d) => d.toISOString().replace(/\.\d+Z$/, 'Z');
@@ -118,6 +122,43 @@ function classify(src) {
   return u ? { url: u, shop: true } : null;
 }
 
+// Older prices for a single-shop product, once. prod.backfill_state: null = not attempted; {at, result, found, tries}.
+// 'done' = never again; 'retry' = the archive refused us (429 / 5xx / unreachable): one more try after BACKFILL_RETRY_MS.
+// A row without the key at all means the column has not been added to the database yet: nothing is attempted.
+function backfillDue(prod, now) {
+  if (!Object.prototype.hasOwnProperty.call(prod, 'backfill_state')) return false;
+  const st = prod.backfill_state;
+  if (st === null || st === undefined) return true;
+  if (!st || typeof st !== 'object' || st.result !== 'retry') return false;
+  const at = Date.parse(st.at);
+  return (st.tries || 0) < BACKFILL_MAX_TRIES && isFinite(at) && now.getTime() - at >= BACKFILL_RETRY_MS;
+}
+
+function backfillState(prev, res, iso) {
+  const tries = ((prev && prev.tries) || 0) + 1;
+  if (res.status === 'ok') return { at: iso, result: 'done', found: res.points.length, tries };
+  return { at: iso, result: tries >= BACKFILL_MAX_TRIES ? 'done' : 'retry', found: res.points.length, tries };
+}
+
+// Merge archive points into the tracking patch of one product and recompute normal price, verdict and warning from the
+// longer history. Notification safety: the goal outcome (and with it the e-mail) stays what it was BEFORE the archive
+// points; if the longer history alone would now make a new hit, that hit is recorded silently (notified_price set, no
+// e-mail), so old archive data never fires a message by itself. Returns the new {patch, hit}.
+function applyBackfill(r, points, state, now) {
+  const today = P.copenhagenDate(now);
+  const merged = P.mergeBackfill(r.base.history, points, today);
+  const again = trackingPatch(Object.assign({}, r.base, { history: merged }), r.profile, r.parsed, now);
+  const patch = Object.assign({}, r.patch, again.patch, { backfill_state: state });
+  let hit = r.hit;
+  if (!r.hit && again.hit) {
+    patch.notified_price = again.hit.price;                       // silent: remembered as already announced
+    delete patch.notified_at;
+  } else {
+    ['notified_price', 'notified_at'].forEach((k) => { if (k in r.patch) patch[k] = r.patch[k]; else delete patch[k]; });
+  }
+  return { patch, hit };
+}
+
 // ---------------------------------------------------------------- access requests
 
 // Pending requests not yet reported -> ONE e-mail to every admin. Approved requests not yet reported -> one e-mail each.
@@ -179,7 +220,7 @@ async function run(ctx) {
   const fetchImpl = ctx.fetch || fetch;
   const sb = makeClient(ctx.supabaseUrl, ctx.serviceKey, fetchImpl);
   const started = Date.now();
-  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false };
+  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false, backfilled: 0, backfillPoints: 0, waybackStopped: false };
 
   // 1. load (a failure here means Supabase is unreachable: let it throw)
   // Products added by name only (source_url null) wait for a link (from the name-lookup assistant or the user):
@@ -246,16 +287,37 @@ async function run(ctx) {
         if (ip.track) {
           const next = Object.assign({}, prod, ip.patch);
           const tp = trackingPatch(next, profile, parsed, now);
-          results.push({ prod, patch: Object.assign({}, ip.patch, tp.patch), hit: tp.hit });
+          results.push({ prod, patch: Object.assign({}, ip.patch, tp.patch), hit: tp.hit, base: next, parsed, profile, shop: target.shop });
         } else results.push({ prod, patch: ip.patch, hit: null });
       } else {
         const tp = trackingPatch(prod, profile, parsed, now);
-        results.push({ prod, patch: tp.patch, hit: tp.hit });
+        results.push({ prod, patch: tp.patch, hit: tp.hit, base: prod, parsed, profile, shop: target.shop });
       }
     } catch (e) {
       stats.pageFail++;
       log('  ' + (prod.name || prod.id) + ': uventet fejl: ' + (e && e.stack || e));
     }
+  }
+
+  // 4. older prices from the Internet Archive: single-shop products in tracking whose attempt has not been made yet.
+  // After the normal check (same run), at most MAX_BACKFILL products per run, only web.archive.org is contacted.
+  const wbFetch = ctx.waybackFetch || fetchImpl;
+  let backfilled = 0;
+  for (const r of results) {
+    if (backfilled >= MAX_BACKFILL || stats.waybackStopped) break;
+    if (!r.shop || !r.base || r.patch.status !== 'tracking' || !backfillDue(r.prod, now)) continue;
+    if (Date.now() - started > DEADLINE_MS - WB.BUDGET_MS - 10000) { stats.deadline = true; break; }
+    backfilled++; stats.backfilled++;
+    let res;
+    try { res = await WB.backfill(classify(r.prod.source_url).url, { fetch: wbFetch, sleep: ctx.waybackSleep || sleep, today: P.copenhagenDate(now) }); }
+    catch (e) { log('  Internet Archive: uventet fejl for ' + (r.prod.name || r.prod.id) + ': ' + (e && e.message || e)); stats.waybackStopped = true; continue; }
+    if (res.status !== 'ok') stats.waybackStopped = true;       // 429 / 5xx / unreachable: leave the archive alone for the rest of this run
+    stats.backfillPoints += res.points.length;
+    log('  ' + (r.prod.name || r.prod.id) + ': ' + res.points.length + ' ældre priser fra Internet Archive' + (res.status === 'ok' ? '.' : ' (arkivet afbrød, prøver evt. igen senere).'));
+    try {
+      const out = applyBackfill(r, res.points, backfillState(r.prod.backfill_state, res, isoNow(now)), now);
+      r.patch = out.patch; r.hit = out.hit;
+    } catch (e) { log('  Internet Archive: kunne ikke bruge priserne for ' + (r.prod.name || r.prod.id) + ': ' + (e && e.message || e)); }
   }
 
   // 5. e-mail
@@ -300,7 +362,7 @@ async function run(ctx) {
   const summary = [
     'Produkter: ' + stats.total + ' aktive (nye: ' + stats.pending + ', følges: ' + stats.tracking + ', venter på valg: ' + stats.choose + ', fejl: ' + stats.error + ').',
     'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.blockedHosts.length ? ' (afvist af ' + stats.blockedHosts.join(', ') + ': resten derfra sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
-    'Nye hits: ' + stats.hits + '.',
+    'Nye hits: ' + stats.hits + '.' + (stats.backfilled ? ' Ældre priser fra Internet Archive: ' + stats.backfillPoints + ' for ' + stats.backfilled + ' produkt(er).' : ''),
     'E-mails sendt: ' + stats.sent + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte.',
     'Skrevet til databasen: ' + stats.written + ', skrivefejl: ' + stats.writeFail + '. Tid: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s.',
   ];
@@ -308,7 +370,7 @@ async function run(ctx) {
   return { stats, summary, results };
 }
 
-module.exports = { run, initialPatch, trackingPatch, errorNote, classify };
+module.exports = { run, initialPatch, trackingPatch, errorNote, classify, backfillDue, MAX_BACKFILL };
 
 if (require.main === module) {
   const e = process.env;

@@ -15,6 +15,7 @@ const zlib = require('zlib');
 const P = require('./lib/pricing');
 const PJ = require('./lib/prisjagt');
 const SHOP = require('./lib/shop');
+const WB = require('./lib/wayback');
 const { composeMail } = require('./lib/mail');
 const R = require('./run');
 
@@ -880,6 +881,226 @@ test('access requests: one e-mail to the admins, one to each approved person, sa
   const dbm = mk(); dbm.accessPatchFail = true;
   const rm = await R.run(ctxFor(dbm, {}));
   assert.strictEqual(rm.summary.length, 5); assert.strictEqual(dbm.sent.length, 2);
+});
+
+// ---------------------------------------------------------------- Internet Archive backfill (hand-written fixtures: web.archive.org was not reachable when this was written)
+
+const CDX_FIX = fs.readFileSync(path.join(FIX, 'wayback-cdx.json'), 'utf8');
+// capture html: the saved single-shop page with another price / currency
+function capHtml(price, cur) { return shopHtml('shop-jsonld-single').replace('"579.00"', '"' + price + '"').replace('"DKK"', '"' + (cur || 'DKK') + '"'); }
+// what the fake archive answers per timestamp: html string, a number (status), or a function
+function archiveCaptures(priceOf) {
+  const p = priceOf || ((x) => x);
+  return {
+    '20251014101500': () => resp(200, capHtml(p(649))), '20251120083000': () => resp(200, capHtml(p(629))),
+    '20251218120000': () => resp(200, shopHtml('shop-noprice')), '20260110121212': () => resp(200, capHtml(p(79), 'EUR')),
+    '20260215093000': () => resp(200, capHtml(p(599))), '20260312101010': () => resp(404, 'not found'),
+    '20260421120000': () => resp(302, '', { location: '/web/20260421121530id_/' + BED_URL }), '20260421121530': () => resp(200, capHtml(p(589))),
+    '20260915130000': () => resp(200, capHtml(p(560))),
+  };
+}
+// a fake fetch for web.archive.org; calls collects {u, o}; cdx = body for the CDX request (string or function)
+function archiveFake(caps, calls, cdx) {
+  return async (u, o) => {
+    calls.push({ u, o });
+    const x = new URL(u);
+    assert.strictEqual(x.hostname, 'web.archive.org', 'only web.archive.org is contacted: ' + u); assert.strictEqual(x.protocol, 'https:');
+    if (x.pathname === '/cdx/search/cdx') return typeof cdx === 'function' ? cdx(u) : resp(200, cdx === undefined ? CDX_FIX : cdx);
+    const m = /^\/web\/(\d{14})id_\/(.+)$/.exec(x.pathname + x.search);
+    assert(m, 'unexpected archive path ' + u);
+    const f = caps[m[1]]; if (!f) return resp(404, '');
+    return typeof f === 'function' ? f() : resp(200, f);
+  };
+}
+const wbSleeps = () => { const a = []; a.fn = async (ms) => { a.push(ms); }; return a; };
+
+test('wayback: CDX query, header row, empty results, spreading, month window', () => {
+  const u = new URL(WB.cdxUrl(BED_URL, '2026-11-16'));
+  assert.strictEqual(u.origin + u.pathname, 'https://web.archive.org/cdx/search/cdx');
+  assert.strictEqual(u.searchParams.get('url'), BED_URL); assert.strictEqual(u.searchParams.get('output'), 'json');
+  assert.deepStrictEqual(u.searchParams.getAll('filter'), ['statuscode:200', 'mimetype:text/html']);
+  assert.strictEqual(u.searchParams.get('collapse'), 'timestamp:6'); assert.strictEqual(u.searchParams.get('from'), '202510'); assert.strictEqual(u.searchParams.get('limit'), '40');
+  assert(WB.cdxUrl(BED_URL, '2026-11-16').includes('url=' + encodeURIComponent(BED_URL)));
+  assert.strictEqual(WB.fromMonth('2026-01-05'), '202412'); assert.strictEqual(WB.fromMonth('2026-02-28'), '202501'); assert.strictEqual(WB.fromMonth('2026-12-01'), '202511');
+  assert.strictEqual(WB.captureUrl('20251014101500', BED_URL), 'https://web.archive.org/web/20251014101500id_/' + BED_URL);
+  const ts = WB.parseCdx(CDX_FIX); assert.strictEqual(ts.length, 8); assert.strictEqual(ts[0], '20251014101500'); assert(!ts.includes('urlkey') && !ts.includes('timestamp'));
+  assert.deepStrictEqual(WB.parseCdx('[]'), []); assert.deepStrictEqual(WB.parseCdx(''), []); assert.deepStrictEqual(WB.parseCdx('[["urlkey","timestamp","original","mimetype","statuscode","digest","length"]]'), []);
+  assert.strictEqual(WB.parseCdx('<html>nope</html>'), null); assert.strictEqual(WB.parseCdx('{"a":1}'), null);
+  const many = []; for (let i = 0; i < 30; i++) many.push(String(i));
+  const sp = WB.spread(many, 14); assert.strictEqual(sp.length, 14); assert.strictEqual(sp[0], '0'); assert.strictEqual(sp[13], '29'); assert.deepStrictEqual(sp.slice().sort((a, b) => a - b), sp);
+  assert.deepStrictEqual(WB.spread(['a', 'b', 'c'], 14), ['a', 'b', 'c']);
+});
+
+test('wayback: captures are parsed; no price, EUR, 404 are dropped; a redirect inside web.archive.org is followed', async () => {
+  const calls = [], sl = wbSleeps();
+  const r = await WB.backfill(BED_URL, { fetch: archiveFake(archiveCaptures(), calls), sleep: sl.fn, today: '2026-11-16' });
+  assert.strictEqual(r.status, 'ok'); assert.strictEqual(r.captures, 8);
+  assert.deepStrictEqual(r.points, [
+    { d: '2025-10-14', p: 649, s: 'Bedre Nætter', src: 'backfill' }, { d: '2025-11-20', p: 629, s: 'Bedre Nætter', src: 'backfill' },
+    { d: '2026-02-15', p: 599, s: 'Bedre Nætter', src: 'backfill' }, { d: '2026-04-21', p: 589, s: 'Bedre Nætter', src: 'backfill' }, { d: '2026-09-15', p: 560, s: 'Bedre Nætter', src: 'backfill' }]);
+  // 1 CDX + 8 captures + 1 redirect hop; sequential, honest, GET only, pause before every request but the first
+  assert.strictEqual(calls.length, 10); assert.strictEqual(sl.length, 9); assert(sl.every((ms) => ms >= 1000 && ms <= 1500), JSON.stringify(sl));
+  calls.forEach((c) => { assert(c.o.headers['User-Agent'] === PJ.UA); assert(!c.o.method || c.o.method === 'GET'); assert(c.o.signal && c.o.redirect === 'manual'); assert(!('Cookie' in c.o.headers)); });
+  assert(calls[1].u === 'https://web.archive.org/web/20251014101500id_/' + BED_URL);
+  // a redirect to another host is never followed
+  const c2 = [];
+  const r2 = await WB.backfill(BED_URL, { fetch: async (u, o) => { c2.push(u); if (/cdx/.test(u)) return resp(200, CDX_FIX); return resp(302, '', { location: 'https://evil.example.com/x' }); }, sleep: async () => {}, today: '2026-11-16' });
+  assert.deepStrictEqual(r2.points, []); assert(c2.every((u) => /^https:\/\/web\.archive\.org\//.test(u)), 'the foreign location is never requested');
+  // unusable links are not even asked about
+  const c3 = []; const r3 = await WB.backfill('http://127.0.0.1/x', { fetch: async (u) => { c3.push(u); return resp(200, '[]'); }, today: '2026-11-16' }); assert.strictEqual(c3.length, 0); assert.deepStrictEqual(r3.points, []);
+  // empty CDX answer: finished, nothing found, no capture requests
+  const c4 = []; const r4 = await WB.backfill(BED_URL, { fetch: archiveFake({}, c4, '[]'), sleep: async () => {}, today: '2026-11-16' });
+  assert.strictEqual(r4.status, 'ok'); assert.strictEqual(c4.length, 1); assert.deepStrictEqual(r4.points, []);
+});
+
+test('wayback: at most 14 captures; 429 or 5xx stops everything; timeouts and the time budget end it', async () => {
+  // 30 captures in the CDX answer -> 14 fetched, oldest and newest among them
+  const rows = [['urlkey', 'timestamp', 'original', 'mimetype', 'statuscode', 'digest', 'length']]; const caps = {};
+  for (let i = 0; i < 30; i++) { const ts = '2026' + String(1 + (i % 10)).padStart(2, '0') + String(1 + Math.floor(i / 10)).padStart(2, '0') + '120000'; rows.push(['k', ts, BED_URL, 'text/html', '200', 'x', '1']); caps[ts] = () => resp(200, capHtml(500 + i)); }
+  const c1 = []; const r1 = await WB.backfill(BED_URL, { fetch: archiveFake(caps, c1, JSON.stringify(rows)), sleep: async () => {}, today: '2026-11-16' });
+  assert.strictEqual(r1.captures, 14); assert.strictEqual(c1.length, 15);
+  // 429 in the middle: what was found stays, nothing more is requested, no retry
+  for (const st of [429, 500, 503]) {
+    const c = []; const caps2 = archiveCaptures(); caps2['20260215093000'] = () => resp(st, 'slow down');
+    const r = await WB.backfill(BED_URL, { fetch: archiveFake(caps2, c), sleep: async () => {}, today: '2026-11-16' });
+    assert.strictEqual(r.status, 'stopped', 'HTTP ' + st); assert.deepStrictEqual(r.points.map((x) => x.d), ['2025-10-14', '2025-11-20']);
+    assert.strictEqual(c.filter((x) => /20260215093000/.test(x.u)).length, 1, 'no retry'); assert(!c.some((x) => /20260421|20260915/.test(x.u)), 'stopped for good');
+  }
+  // the CDX request itself refused / unreachable / not json / timing out
+  for (const cdx of [() => resp(429, ''), () => resp(503, ''), () => { throw new Error('ECONNRESET'); }, () => { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }, () => resp(200, '<html>maintenance</html>')]) {
+    const c = []; const r = await WB.backfill(BED_URL, { fetch: archiveFake({}, c, cdx), sleep: async () => {}, today: '2026-11-16' });
+    assert.strictEqual(r.status, 'stopped'); assert.strictEqual(c.length, 1); assert.deepStrictEqual(r.points, []);
+  }
+  // one capture timing out is only skipped
+  const caps3 = archiveCaptures(); caps3['20251120083000'] = () => { const e = new Error('aborted'); e.name = 'AbortError'; throw e; };
+  const r3 = await WB.backfill(BED_URL, { fetch: archiveFake(caps3, []), sleep: async () => {}, today: '2026-11-16' });
+  assert.strictEqual(r3.status, 'ok'); assert.strictEqual(r3.points.length, 4);
+  // time budget (fake clock: every request takes 25 s)
+  let t = 0; const c5 = [];
+  const slow = archiveFake(archiveCaptures(), c5); const r5 = await WB.backfill(BED_URL, { fetch: async (u, o) => { t += 25000; return slow(u, o); }, sleep: async (ms) => { t += ms; }, now: () => t, today: '2026-11-16' });
+  assert.strictEqual(r5.status, 'stopped'); assert(c5.length <= 4, 'about 60 s: ' + c5.length);
+  // a per-request timeout is set (20 s)
+  assert.strictEqual(WB.TIMEOUT_MS, 20000); assert.strictEqual(WB.BUDGET_MS, 60000); assert.strictEqual(WB.PAUSE_MS, 1500); assert.strictEqual(WB.MAX_CAPTURES, 14);
+});
+
+test('pricing: archive points merge without overwriting; the first price seen ignores them', () => {
+  const hist = [{ d: '2026-02-15', p: 700, s: 'X', src: 'check' }, { d: '2026-11-16', p: 579, s: 'X', src: 'check' }];
+  const pts = [{ d: '2025-10-14', p: 649, s: 'X' }, { d: '2026-02-15', p: 599, s: 'X' }, { d: '2026-11-16', p: 1, s: 'X' }, { d: '2026-12-01', p: 1, s: 'X' }, { d: '2020-01-01', p: 5, s: 'X' }, { d: '2026-03-01', p: -3, s: 'X' }];
+  const m = P.mergeBackfill(hist, pts, '2026-11-16');
+  assert.deepStrictEqual(m, [{ d: '2025-10-14', p: 649, s: 'X', src: 'backfill' }, { d: '2026-02-15', p: 700, s: 'X', src: 'check' }, { d: '2026-11-16', p: 579, s: 'X', src: 'check' }]);
+  assert.deepStrictEqual(hist.length, 2, 'input untouched');
+  assert.strictEqual(P.autoReason({ price: 570 }, { level: 'unknown' }, [{ d: '2026-01-01', p: 900, s: 'X', src: 'backfill' }, { d: '2026-11-16', p: 579, s: 'X', src: 'check' }]), null, 'archive point is no first price seen');
+  assert(P.autoReason({ price: 570 }, { level: 'unknown' }, [{ d: '2026-11-01', p: 900, s: 'X', src: 'check' }]));
+  // without page points (single shops) existing archive points survive mergePageHistory; real page points replace them
+  assert.strictEqual(P.mergePageHistory(m, [], '2026-11-16').length, 3);
+  assert.strictEqual(P.mergePageHistory(m, [{ d: '2026-11-16', p: 1, s: 'Y' }], '2026-11-16').some((x) => x.src === 'backfill'), false);
+});
+
+// run-level helper: shop products with the new marker column
+function wbProduct(id, url, extra) { return shopProduct(id, 'u1', url, Object.assign({ status: 'tracking', tracked_variants: ['shop'], backfill_state: null, target_value: 1 }, extra || {})); }
+function wbCtx(db, map, wbFetch, extra) { const sl = wbSleeps(); return shopCtx(db, map, Object.assign({ waybackFetch: wbFetch, waybackSleep: sl.fn, wbSleeps: sl }, extra || {})); }
+
+test('run: backfill merges archive points, keeps existing points, marks them, records the attempt once', async () => {
+  const db = newDb();
+  db.products.push(wbProduct('B1', BED_URL, { history: [{ d: '2026-02-15', p: 700, s: 'Bedre Nætter', src: 'check' }, { d: '2026-11-15', p: 579, s: 'Bedre Nætter', src: 'check' }] }));
+  const map = { [BED_URL]: shopHtml('shop-jsonld-single') }, calls = [];
+  let res = await R.run(wbCtx(db, map, archiveFake(archiveCaptures(), calls)));
+  const B = () => db.products[0];
+  assert.strictEqual(res.stats.backfilled, 1); assert.strictEqual(res.stats.backfillPoints, 5); assert(res.summary.length === 5 && /Internet Archive: 5 for 1/.test(res.summary[2]), res.summary[2]);
+  assert.deepStrictEqual(B().history.map((x) => x.d + ':' + x.p + ':' + x.src), ['2025-10-14:649:backfill', '2025-11-20:629:backfill', '2026-02-15:700:check', '2026-04-21:589:backfill', '2026-09-15:560:backfill', '2026-11-15:579:check', '2026-11-16:579:check']);
+  assert.strictEqual(B().backfill_state.result, 'done'); assert.strictEqual(B().backfill_state.found, 5); assert.strictEqual(B().backfill_state.at, '2026-11-16T10:00:00Z');
+  assert.strictEqual(B().normal_price, 560); assert.strictEqual(B().verdict.level, 'poor', 'normal price and verdict are recomputed from the longer history');
+  assert.strictEqual(B().status, 'tracking'); assert.deepStrictEqual(B().tracked_variants, ['shop']); assert.strictEqual(B().offers[0].price, 579);
+  assert(calls.length > 0 && calls.every((c) => new URL(c.u).hostname === 'web.archive.org'));
+  // the attempt is recorded: the next runs never ask the archive again
+  const calls2 = [];
+  await R.run(wbCtx(db, map, archiveFake(archiveCaptures(), calls2))); await R.run(wbCtx(db, map, archiveFake(archiveCaptures(), calls2)));
+  assert.strictEqual(calls2.length, 0); assert.strictEqual(B().history.filter((x) => x.src === 'backfill').length, 4, 'points are still there');
+  // nothing found: also recorded, also never repeated
+  const db2 = newDb(); db2.products.push(wbProduct('B2', BED_URL));
+  const c3 = []; const res2 = await R.run(wbCtx(db2, map, archiveFake({}, c3, '[]')));
+  assert.strictEqual(db2.products[0].backfill_state.result, 'done'); assert.strictEqual(db2.products[0].backfill_state.found, 0); assert.strictEqual(c3.length, 1);
+  await R.run(wbCtx(db2, map, archiveFake({}, c3, '[]'))); assert.strictEqual(c3.length, 1, 'not repeated after an empty result');
+  assert.strictEqual(res2.stats.hits, 0);
+  // a brand-new product goes pending -> tracking and gets its backfill in the same run; the user-owned columns stay untouched
+  const db3 = newDb(); db3.products.push(wbProduct('B3', BED_URL, { status: 'pending', tracked_variants: null }));
+  await R.run(wbCtx(db3, map, archiveFake(archiveCaptures(), [])));
+  assert.strictEqual(db3.products[0].status, 'tracking'); assert.deepStrictEqual(db3.products[0].tracked_variants, ['shop']); assert.strictEqual(db3.products[0].history.length, 6); assert.strictEqual(db3.products[0].backfill_state.result, 'done');
+});
+
+test('run: archive points alone never send a mail; a hit that only the archive creates is recorded silently', async () => {
+  // auto goal, no history yet, archive says it used to cost about 900: the long history makes 579 a good deal, but no mail on this run or the next
+  const db = newDb(); db.products.push(wbProduct('G1', BED_URL, { name: 'Mayan', target_type: 'auto', target_value: null, status: 'pending', tracked_variants: null }));
+  const map = { [BED_URL]: shopHtml('shop-jsonld-single') };
+  const wb = () => archiveFake(archiveCaptures((x) => x + 300), []);
+  await R.run(wbCtx(db, map, wb()));
+  const G = () => db.products[0];
+  assert.strictEqual(G().verdict.level, 'good', 'the verdict uses the archive data'); assert.strictEqual(db.sent.length, 0, 'no mail from archive data');
+  assert.strictEqual(G().notified_price, 579, 'recorded silently'); assert(!G().notified_at);
+  await R.run(wbCtx(db, map, wb())); assert.strictEqual(db.sent.length, 0, 'next run, same price: still no mail');
+  // a real further drop is announced as usual
+  map[BED_URL] = shopHtml('shop-jsonld-single').replace('"579.00"', '"499.00"');
+  await R.run(wbCtx(db, map, wb())); assert.strictEqual(db.sent.length, 1); assert.strictEqual(G().notified_price, 499);
+  // a pct goal: the normal price now exists only thanks to the archive; the goal would be met, but not by archive data alone
+  const db2 = newDb(); db2.products.push(wbProduct('G2', BED_URL, { target_type: 'pct', target_value: 20, status: 'pending', tracked_variants: null }));
+  await R.run(wbCtx(db2, { [BED_URL]: shopHtml('shop-jsonld-single') }, wb()));
+  assert.strictEqual(db2.sent.length, 0); assert.strictEqual(db2.products[0].notified_price, 579);
+  // a hit that the real data already makes (price goal) still mails on the backfill run
+  const db3 = newDb(); db3.products.push(wbProduct('G3', BED_URL, { target_type: 'price', target_value: 600, status: 'pending', tracked_variants: null }));
+  await R.run(wbCtx(db3, { [BED_URL]: shopHtml('shop-jsonld-single') }, wb()));
+  assert.strictEqual(db3.sent.length, 1); assert.strictEqual(db3.products[0].notified_price, 579); assert(db3.products[0].notified_at);
+  // auto with a real earlier price of ours: unchanged behaviour (10 % under the first price WE saw), archive points do not move that first price
+  const db4 = newDb(); db4.products.push(wbProduct('G4', BED_URL, { target_type: 'auto', target_value: null, history: [{ d: '2026-11-01', p: 700, s: 'x', src: 'check' }] }));
+  await R.run(wbCtx(db4, { [BED_URL]: shopHtml('shop-jsonld-single') }, wb()));
+  assert.strictEqual(db4.sent.length, 1, 'real data (700 -> 579) still mails once'); assert(db4.sent[0].text.includes('(700 kr.)'), db4.sent[0].text);
+});
+
+test('run: at most 2 products per run; archive trouble allows one later retry, never more', async () => {
+  const U = ['https://www.butik-a.dk/a', 'https://www.butik-b.dk/b', 'https://www.butik-c.dk/c'];
+  const db = newDb(); U.forEach((u, i) => db.products.push(wbProduct('C' + i, u)));
+  const map = {}; U.forEach((u) => { map[u] = shopHtml('shop-jsonld-single').replace('bedrenaetter', 'x').replace('MAY', 'M'); });
+  const state = () => db.products.map((p) => p.backfill_state && p.backfill_state.result);
+  const calls = [];
+  let res = await R.run(wbCtx(db, map, archiveFake({}, calls, '[]')));
+  assert.strictEqual(res.stats.backfilled, 2); assert.deepStrictEqual(state(), ['done', 'done', null]); assert.strictEqual(calls.length, 2, 'one CDX request per product');
+  await R.run(wbCtx(db, map, archiveFake({}, calls, '[]'))); assert.deepStrictEqual(state(), ['done', 'done', 'done']); assert.strictEqual(calls.length, 3);
+
+  // 429: the first product gets a retry marker, the second is not even tried in this run
+  const db2 = newDb(); U.slice(0, 2).forEach((u, i) => db2.products.push(wbProduct('D' + i, u, { history: null })));
+  const c2 = [];
+  res = await R.run(wbCtx(db2, map, archiveFake({}, c2, () => resp(429, ''))));
+  assert.strictEqual(c2.length, 1, 'stopped for the whole run'); assert.strictEqual(db2.products[0].backfill_state.result, 'retry'); assert.strictEqual(db2.products[0].backfill_state.tries, 1); assert.strictEqual(db2.products[1].backfill_state, null);
+  assert.strictEqual(db2.products[0].status, 'tracking'); assert.strictEqual(db2.products[0].history.length, 1, 'normal check is written regardless');
+  // too soon: no new attempt; after 6 hours: one retry; a second refusal gives up for good
+  await R.run(wbCtx(db2, map, archiveFake({}, c2, () => resp(429, '')))); assert.strictEqual(c2.length, 2, 'only product 2 is tried (its first time), product 1 waits');
+  db2.products[0].backfill_state.at = '2026-11-16T03:00:00Z';
+  const c3 = []; await R.run(wbCtx(db2, map, archiveFake({}, c3, () => resp(503, ''))));
+  assert.strictEqual(db2.products[0].backfill_state.result, 'done'); assert.strictEqual(db2.products[0].backfill_state.tries, 2); assert.strictEqual(c3.length, 1);
+  db2.products[0].backfill_state.at = '2026-11-01T03:00:00Z'; db2.products[1].backfill_state = { at: '2026-11-01T03:00:00Z', result: 'done', found: 0, tries: 1 };
+  const c4 = []; await R.run(wbCtx(db2, map, archiveFake({}, c4, '[]'))); assert.strictEqual(c4.length, 0, 'given up: never again');
+  // a retry that works fills in the points
+  const db5 = newDb(); db5.products.push(wbProduct('E', BED_URL, { backfill_state: { at: '2026-11-15T10:00:00Z', result: 'retry', found: 0, tries: 1 } }));
+  await R.run(wbCtx(db5, { [BED_URL]: shopHtml('shop-jsonld-single') }, archiveFake(archiveCaptures(), [])));
+  assert.strictEqual(db5.products[0].backfill_state.result, 'done'); assert.strictEqual(db5.products[0].history.filter((x) => x.src === 'backfill').length, 5);
+});
+
+test('run: no backfill for prisjagt products, failed checks, missing column, name-only products; the failing archive never breaks the run', async () => {
+  const wbCalls = [];
+  const db = newDb();
+  db.products.push(product('P', 'u1', 'dyson', { status: 'tracking', tracked_variants: [String(fixturePage('dyson').variants[0].id)], backfill_state: null }));
+  db.products.push(wbProduct('N', BED_URL, { status: 'error', tracked_variants: null, last_checked: '2026-11-16T09:59:00Z' }));          // error, retry only after 6 h
+  db.products.push(wbProduct('M', 'https://www.mangler.dk/x', { backfill_state: undefined })); delete db.products[2].backfill_state;      // column not in the database yet
+  db.products.push(wbProduct('F', 'https://www.fejl.dk/y'));                                                                                  // the shop page fails
+  const ctx = wbCtx(db, { [BED_URL]: shopHtml('shop-jsonld-single'), 'https://www.mangler.dk/x': shopHtml('shop-jsonld-single') }, archiveFake({}, wbCalls, '[]'), {});
+  const pages = { [urlOf('dyson')]: pageFor('dyson') }; const gp = ctx.getPage;
+  ctx.getPage = async (u) => (pages[u] ? (ctx.fetched.push(u), pages[u]) : gp(u));
+  await R.run(ctx);
+  assert.strictEqual(wbCalls.length, 0); assert.strictEqual(db.products[0].backfill_state, null); assert(!('backfill_state' in db.products[2]), 'the missing column is never written'); assert.strictEqual(db.products[3].backfill_state, null);
+  // the archive throwing something odd does not stop the normal write
+  const db2 = newDb(); db2.products.push(wbProduct('X', BED_URL));
+  const res = await R.run(wbCtx(db2, { [BED_URL]: shopHtml('shop-jsonld-single') }, async () => { throw new TypeError('boom'); }));
+  assert.strictEqual(res.stats.written, 1); assert.strictEqual(db2.products[0].history.length, 1); assert.strictEqual(db2.products[0].backfill_state.result, 'retry');
+  assert(R.backfillDue({ backfill_state: null }, NOW) && !R.backfillDue({}, NOW) && !R.backfillDue({ backfill_state: { result: 'done' } }, NOW) && R.MAX_BACKFILL === 2);
 });
 
 // ---------------------------------------------------------------- live sanity check (opt-in)

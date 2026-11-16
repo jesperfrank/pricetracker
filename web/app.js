@@ -429,7 +429,7 @@
           return '<button type="button" data-act="range" data-id="' + esc(id) + '" data-r="' + x[0] + '" aria-pressed="' + (r === x[0]) + '">' + x[1] + '</button>';
         }).join("") + '</div></div><div class="chart" data-chart="' + esc(id) + '"></div>';
       if (h.length < 2) html += '<p class="note">Første måling er i hus. Grafen fylder sig ud dag for dag.</p>';
-      else if (h.some(function (x) { return x.src === "backfill"; })) html += '<p class="note">Priser fra før produktet blev tilføjet stammer fra offentlige prisoversigter og kan være mindre præcise.</p>';
+      else if (h.some(function (x) { return x.src === "backfill"; })) html += single ? '<p class="note">Ældre priser stammer fra Internet Archive og kan have huller.</p>' : '<p class="note">Priser fra før produktet blev tilføjet stammer fra offentlige prisoversigter og kan være mindre præcise.</p>';
       if (h.length > 1 && h[0].t > now - r * DAY) html += '<p class="note">Historikken begynder ' + esc(dFmt.format(new Date(h[0].t))) + ' ' + new Date(h[0].t).getFullYear() + ', så der er ikke ældre priser at vise.</p>';
       if (h.length > 1) {
         html += '<details><summary>Vis som tabel</summary><div class="tablewrap"><table class="n"><tbody>' +

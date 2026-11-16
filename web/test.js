@@ -26,7 +26,7 @@ const FAKE = `
   var ticks = [], realSetInterval = window.setInterval;
   window.setInterval = function (fn, ms) { if (ms === 60000) ticks.push(fn); return realSetInterval.apply(window, arguments); };
   window.__tick = function () { ticks.forEach(function (f) { f(); }); };
-  var JOB = ["status","title","variants","offers","history","normal_price","verdict","warning","check_note","last_checked","notified_price","notified_at"];
+  var JOB = ["status","title","variants","offers","history","normal_price","verdict","warning","check_note","last_checked","notified_price","notified_at","backfill_state"];
   function clone(x) { return JSON.parse(JSON.stringify(x)); }
   function builder(table) {
     var q = { op: "select", payload: null, filters: [], single: null };
@@ -263,10 +263,19 @@ let base;
     const bt = await it.locator(".body").textContent();
     check("single-shop detail: quiet line, shop in the table, remark about several variants", /Følger kun denne butik\. Indsæt et link fra prisjagt\.dk for at sammenligne flere butikker\./.test(bt) && /Bedre Nætter/.test(bt) && /flere varianter med forskellige priser/.test(bt) && /579 kr\./.test(bt), bt.slice(0, 300));
     check("single-shop detail: no 'Skift variant', no 'Følger:' line", !/Skift variant/.test(bt) && !/Følger:/.test(bt) && (await it.locator('[data-act="change"]').count()) === 0);
+    check("single-shop with archive points (fixture history): the Internet Archive note, not the prisjagt wording", /Ældre priser stammer fra Internet Archive og kan have huller\./.test(bt) && !/offentlige prisoversigter/.test(bt), bt.slice(0, 300));
     const other = await p.locator('.item[data-status="tracking"]').first().locator(".body");
     await p.locator('.item[data-status="tracking"]').first().locator(".head").click();
     check("prisjagt product still has 'Skift variant' and no single-shop line", /Skift variant/.test(await other.textContent()) && !/Følger kun denne butik/.test(await other.textContent()));
     await p.context().close();
+    // a single-shop product without archive points: no note about older prices
+    const plainRow = Object.assign({}, shopRow, { id: "pl", history: [{ d: "2026-11-10", p: 599, s: "Bedre Nætter", src: "check" }, { d: "2026-11-16", p: 579, s: "Bedre Nætter", src: "check" }] });
+    const pa = await open({ products: [plainRow], label: "single-shop-plain" });
+    await pa.waitForSelector(".item");
+    await pa.locator(".item .head").first().click();
+    const at = await pa.locator(".item .body").first().textContent();
+    check("single-shop without archive points: no note about older prices", !/Internet Archive|offentlige prisoversigter/.test(at), at.slice(0, 400));
+    await pa.context().close();
   }
 
   // 4. choose variants

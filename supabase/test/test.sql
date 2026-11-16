@@ -212,6 +212,24 @@ update public.products set source_url = 'https://shop.example.dk/vare' where sou
 select t.chk('authenticated user can change to a shop link', (select count(*) = 1 from public.products where source_url = 'https://shop.example.dk/vare' and status = 'pending'));
 select t.chk('authenticated user cannot set a bad link', t.ins('http://x.dk/') = 'rejected');
 reset role;
+-- products.backfill_state (Internet Archive attempt marker) is written by the job only
+alter table public.products drop column backfill_state;
+\o /dev/null
+\i :schema
+\o
+select t.chk('migration adds backfill_state idempotently', (select count(*) = 1 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name = 'backfill_state'));
+update public.products set backfill_state = '{"result":"done","found":3}'::jsonb where source_url = 'https://shop.example.dk/vare';
+set role authenticated;
+select set_config('request.jwt.claims', '{"email":"mor@familie.dk","sub":"00000000-0000-0000-0000-0000000000a1"}', false);
+update public.products set backfill_state = null, name = 'omdoebt' where source_url = 'https://shop.example.dk/vare';
+select t.chk('browser user cannot clear or change backfill_state (rest of the update goes through)', (select backfill_state->>'result' = 'done' and name = 'omdoebt' from public.products where source_url = 'https://shop.example.dk/vare'));
+insert into public.products (user_id, name, source_url, target_type, target_value, backfill_state) values ('00000000-0000-0000-0000-0000000000a1', 'bf', 'https://shop.example.dk/bf', 'price', 5, '{"result":"done"}'::jsonb);
+select t.chk('browser insert cannot preset backfill_state', (select backfill_state is null from public.products where name = 'bf'));
+update public.products set source_url = 'https://shop.example.dk/anden' where source_url = 'https://shop.example.dk/vare';
+select t.chk('a new link starts the product over, backfill_state included', (select backfill_state is null and status = 'pending' from public.products where source_url = 'https://shop.example.dk/anden'));
+reset role;
+delete from public.products where name = 'bf';
+update public.products set source_url = 'https://shop.example.dk/vare' where source_url = 'https://shop.example.dk/anden';
 -- resolver_set accepts prisjagt.dk links and any https link that passes the source_url rule
 insert into public.products (user_id, name, target_type, target_value) values ('00000000-0000-0000-0000-0000000000a1', 'navn kun', 'price', 5);
 update public.resolver_secret set token = repeat('a', 64);

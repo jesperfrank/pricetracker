@@ -120,7 +120,22 @@ function mergeHistory(history, today, price, store) {
   return dd;
 }
 
-// page points (src 'page') + existing non-page, non-backfill points; one per date, lower price wins
+// Archive points (src 'backfill') into a history: only dates before today that the history does not have yet
+// (an existing point is never overwritten), inside the 400-day window; sorted by date.
+function mergeBackfill(history, points, today) {
+  const h = Array.isArray(history) ? history.filter((x) => x && typeof x.d === 'string') : [];
+  const have = new Set(h.map((x) => x.d)), cutoff = cutoffDate(today);
+  (points || []).forEach((x) => {
+    if (!x || typeof x.d !== 'string' || typeof x.p !== 'number' || !(x.p > 0) || x.d >= today || x.d < cutoff || have.has(x.d)) return;
+    have.add(x.d);
+    h.push({ d: x.d, p: x.p, s: x.s, src: 'backfill' });
+  });
+  h.sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0));
+  return h;
+}
+
+// page points (src 'page') + existing non-page, non-backfill points; one per date, lower price wins.
+// Without any page points (single shops) nothing replaces the archive points, so they stay.
 function mergePageHistory(existing, pagePoints, today) {
   const cutoff = cutoffDate(today);
   const byDate = {};
@@ -130,7 +145,7 @@ function mergePageHistory(existing, pagePoints, today) {
     if (!cur || x.p < cur.p) byDate[x.d] = { d: x.d, p: x.p, s: x.s, src: 'page' };
   });
   (Array.isArray(existing) ? existing : []).forEach((x) => {
-    if (!x || typeof x.d !== 'string' || x.d < cutoff || x.src === 'backfill' || x.src === 'page') return;
+    if (!x || typeof x.d !== 'string' || x.d < cutoff || (x.src === 'backfill' && (pagePoints || []).length) || x.src === 'page') return;
     const cur = byDate[x.d];
     if (!cur || x.p < cur.p) byDate[x.d] = x;
   });
@@ -229,13 +244,13 @@ function targetPrice(prod, normal) {
 // Goal 'auto' (no goal of the user's own). Returns one short Danish sentence saying why this is worth a message, or null.
 // 1) the rule-based verdict says the price is genuinely good (verdictFor level 'good'), or
 // 2) there is too little history for a verdict (no normal price) and the lowest price is at least 10 % below the
-//    first price seen in the history. low: the lowest in-stock offer {price} or null.
+//    first price seen in the history (archive points do not count as seen by us). low: the lowest in-stock offer {price} or null.
 function autoReason(low, verdict, history) {
   if (!low || typeof low.price !== 'number') return null;
   if (verdict && verdict.level === 'good' && verdict.text) return verdict.text;
   if (verdict && verdict.level === 'unknown') {
     const pts = (Array.isArray(history) ? history : [])
-      .filter((x) => x && typeof x.d === 'string' && typeof x.p === 'number' && x.p > 0)
+      .filter((x) => x && typeof x.d === 'string' && typeof x.p === 'number' && x.p > 0 && x.src !== 'backfill')   // archive prices are no "first price we saw"
       .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0));
     if (!pts.length) return null;
     const first = pts[0].p;
@@ -272,6 +287,6 @@ function goalOutcome(prod, low, normal, iso, extra) {
 
 module.exports = {
   HISTORY_DAYS, MAX_OFFERS, copenhagenDate, dayNum, numDay, fmtKr, normShop, matchShop, anyMatch, mergePrefs, applyPrefs,
-  lowestInStock, onePerStore, sanityCheck, mergeHistory, mergePageHistory, dailySeries, normalPrice, verdictFor,
+  lowestInStock, onePerStore, sanityCheck, cutoffDate, mergeHistory, mergeBackfill, mergePageHistory, dailySeries, normalPrice, verdictFor,
   priceWarning, targetPrice, autoReason, goalOutcome,
 };
