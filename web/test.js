@@ -19,7 +19,7 @@ const server = http.createServer((req, res) => {
 const FAKE = `
 (function () {
   var init = window.__INIT || {};
-  var db = window.__db = { products: init.products || [], profiles: init.profiles || [], ops: [], deny: false, otpError: null,
+  var db = window.__db = { products: init.products || [], lists: init.lists || [], noLists: !!init.noLists, profiles: init.profiles || [], ops: [], deny: false, otpError: null,
     session: init.session || null, seq: 100, admin: !!init.admin, requests: init.requests || [], allowedList: init.allowed || [], rpcs: [], askReply: "requested" };
   var authCb = null, rt = [];
   // the 60-second poll: remember its callback so a test can run it at once
@@ -29,9 +29,9 @@ const FAKE = `
   var JOB = ["status","title","variants","offers","history","normal_price","verdict","warning","check_note","last_checked","notified_price","notified_at","backfill_state"];
   function clone(x) { return JSON.parse(JSON.stringify(x)); }
   function builder(table) {
-    var q = { op: "select", payload: null, filters: [], single: null };
+    var q = { op: "select", payload: null, filters: [], single: null, sel: false };
     var b = {
-      select: function () { return b; }, order: function () { return b; },
+      select: function () { q.sel = true; return b; }, order: function () { return b; },
       eq: function (c, v) { q.filters.push([c, v]); return b; },
       maybeSingle: function () { q.single = "maybe"; return b; }, single: function () { q.single = "one"; return b; },
       insert: function (o) { q.op = "insert"; q.payload = o; return b; },
@@ -44,16 +44,25 @@ const FAKE = `
     function run() {
       return new Promise(function (resolve) { setTimeout(function () {
         if (q.op !== "select") db.ops.push({ table: table, op: q.op, payload: clone(q.payload), filters: clone(q.filters) });
-        var rows = table === "products" ? db.products : db.profiles;
+        var rows = table === "products" ? db.products : table === "lists" ? db.lists : db.profiles;
+        if (table === "lists" && db.noLists) return resolve({ data: null, error: { code: "42P01", message: "relation public.lists does not exist" } });
         if (q.op !== "select" && db.deny) return resolve({ data: null, error: { code: "42501", message: "new row violates row-level security policy" } });
         if (db.failReads && q.op === "select") return resolve({ data: null, error: { message: "boom" } });
         if (q.op === "select") {
           var out = rows.filter(match).map(clone);
           return resolve({ data: q.single ? (out[0] || null) : out, error: null });
         }
+        if (table === "lists" && (q.op === "insert" || q.op === "update")) {   // what the database enforces
+          var nm = String(q.payload.name == null ? "" : q.payload.name).trim(), self = q.op === "update" ? rows.filter(match).map(function (x) { return x.id; }) : [];
+          if (nm.length < 1 || nm.length > 40 || (q.op === "insert" && rows.length >= 30)) return resolve({ data: null, error: { code: "23514", message: "check" } });
+          if (rows.some(function (x) { return self.indexOf(x.id) < 0 && x.name.toLowerCase() === nm.toLowerCase(); })) return resolve({ data: null, error: { code: "23505", message: "duplicate key" } });
+          q.payload.name = nm;
+        }
         if (q.op === "insert") {
           var r = Object.assign({ id: "new-" + (++db.seq), status: "pending", user_id: "u1", created_at: new Date().toISOString(), tracked_variants: null }, clone(q.payload));
-          rows.push(r); return resolve({ data: null, error: null });
+          if (table === "lists") r.id = "l-new-" + db.seq;
+          if (table === "products" && r.list_id && !db.lists.some(function (l) { return l.id === r.list_id; })) return resolve({ data: null, error: { code: "23503", message: "fk" } });
+          rows.push(r); return resolve({ data: q.sel ? clone(r) : null, error: null });
         }
         if (q.op === "update") {
           rows.filter(match).forEach(function (r) {
@@ -69,6 +78,8 @@ const FAKE = `
           return resolve({ data: null, error: null });
         }
         if (q.op === "delete") {
+          var gone = rows.filter(match).map(function (r) { return r.id; });
+          if (table === "lists") db.products.forEach(function (p) { if (gone.indexOf(p.list_id) >= 0) p.list_id = null; });   // on delete set null
           var keep = rows.filter(function (r) { return !match(r); }); rows.length = 0; keep.forEach(function (r) { rows.push(r); });
           return resolve({ data: null, error: null });
         }
@@ -141,7 +152,7 @@ async function open(opts = {}) {
   await page.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
   // config.js in the repo holds the real project's values, so both cases are served from the test, never from the file.
   await page.route(/\/config\.js$/, r => r.fulfill({ contentType: "text/javascript", body: opts.config === false ? "window.PV_CONFIG={supabaseUrl:\"\",supabaseAnonKey:\"\"};" : 'window.PV_CONFIG={supabaseUrl:"https://x.supabase.test",supabaseAnonKey:"anon"};' }));
-  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [] };
+  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [] };
   await page.addInitScript("window.__INIT = " + JSON.stringify(init) + ";");
   if (opts.fake !== false) await page.addInitScript(FAKE);
   if (opts.storage) await page.addInitScript(s => { for (const k in s) localStorage.setItem(k, s[k]); }, opts.storage);
@@ -716,10 +727,199 @@ let base;
     await m.context().close();
   }
 
+  // 10b. lists
+  {
+    const L1 = { id: "l1", user_id: "u1", name: "Elektronik" }, L2 = { id: "l2", user_id: "u1", name: "Bastian" };
+    const mk = () => [row("test-sony-xm5", { id: "x5", list_id: "l1" }), row("test-ps5-pro", { id: "ps", list_id: "l1" }), row("test-dyson-v15", { id: "dy", list_id: "l2" }), row("test-lego-falcon", { id: "lg" })];
+    const chips = p => p.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#chips .lchip"), b => b.innerText.replace(/\s+/g, " ").trim()));
+    const pressed = p => p.evaluate(() => Array.prototype.map.call(document.querySelectorAll('#chips .lchip[aria-pressed="true"]'), b => b.innerText.replace(/\s+/g, " ").trim()));
+    const shown = p => p.evaluate(() => document.querySelectorAll("#list .item").length);
+    const dbq = (p, f) => p.evaluate(f);
+    const settle = p => p.waitForTimeout(150);
+    const lsGet = p => p.evaluate(() => { try { return localStorage.getItem("pv-list"); } catch (e) { return "ERR"; } });
+
+    // zero lists: almost as before
+    {
+      const p = await open({ products: mk().map(r => Object.assign(r, { list_id: null })), label: "lists-zero" });
+      await p.waitForSelector(".item"); await settle(p);
+      check("lists: with no lists only 'Alle' and '+ Ny liste' show, all products listed", JSON.stringify(await chips(p)) === JSON.stringify(["Alle 4", "+ Ny liste"]) && (await shown(p)) === 4, JSON.stringify(await chips(p)));
+      check("lists: no 'Uden liste', no actions, no form, no list picker", !(await p.isVisible("#listAct")) && !(await p.isVisible("#listForm")) && (await p.locator('[data-lsel="none"]').count()) === 0);
+      await p.locator('.head[data-id="x5"]').click();
+      check("lists: with no lists the product view has no 'Liste' select", (await p.locator("[data-listpick]").count()) === 0);
+      // create
+      await p.click('[data-lact="new"]');
+      check("lists: '+ Ny liste' opens a small name field", await p.isVisible("#lfName") && (await p.evaluate(() => document.activeElement.id)) === "lfName");
+      await p.fill("#lfName", "   "); await p.click("#lfSave");
+      check("lists: blank name is refused with a message, nothing written", /mellem 1 og 40/.test(await p.textContent("#listMsg")) && (await dbq(p, () => window.__db.ops.filter(o => o.table === "lists").length)) === 0);
+      await p.fill("#lfName", "Elektronik"); await p.click("#lfSave"); await settle(p);
+      const w = await dbq(p, () => window.__db.ops.filter(o => o.table === "lists"));
+      check("lists: creating writes one lists row with the trimmed name", w.length === 1 && w[0].op === "insert" && w[0].payload.name === "Elektronik", JSON.stringify(w));
+      check("lists: the new list is shown, selected, with count 0; form closed", JSON.stringify(await pressed(p)) === JSON.stringify(["Elektronik 0"]) && !(await p.isVisible("#listForm")), JSON.stringify(await chips(p)));
+      check("lists: an empty list says so", /Ingen produkter på denne liste endnu/.test(await p.textContent("#list")) && (await shown(p)) === 0);
+      const id = await dbq(p, () => window.__db.lists[0].id);
+      check("lists: the choice is remembered in localStorage", (await lsGet(p)) === id, await lsGet(p));
+      // adding into the selected list
+      await p.fill("#fMain", "Bærbar computer"); await p.click("#fSubmit"); await settle(p);
+      let ins = (await ops(p)).filter(o => o.table === "products" && o.op === "insert");
+      check("lists: a product added while a list is selected goes into that list", ins.length === 1 && ins[0].payload.list_id === id, JSON.stringify(ins));
+      check("lists: and shows in that list, count 1", (await shown(p)) === 1 && /Elektronik 1/.test((await chips(p)).join("|")), JSON.stringify(await chips(p)));
+      await p.click('[data-lsel="all"]');
+      await p.fill("#fMain", "Kaffemaskine"); await p.click("#fSubmit"); await settle(p);
+      ins = (await ops(p)).filter(o => o.table === "products" && o.op === "insert");
+      check("lists: added while 'Alle' is selected, no list_id is sent", ins.length === 2 && !("list_id" in ins[1].payload), JSON.stringify(ins[1]));
+      check("lists: 'Uden liste' appears now that a list and an unlisted product exist", /Uden liste 5/.test((await chips(p)).join("|")), JSON.stringify(await chips(p)));
+      await p.click('[data-lsel="none"]');
+      await p.fill("#fMain", "Brødrister"); await p.click("#fSubmit"); await settle(p);
+      ins = (await ops(p)).filter(o => o.table === "products" && o.op === "insert");
+      check("lists: added while 'Uden liste' is selected, no list_id is sent", ins.length === 3 && !("list_id" in ins[2].payload));
+      // duplicate name, case-insensitive
+      await p.click('[data-lact="new"]'); await p.fill("#lfName", "elektronik"); await p.click("#lfSave");
+      check("lists: a name that exists (any case) is refused", /allerede en liste/.test(await p.textContent("#listMsg")) && (await dbq(p, () => window.__db.lists.length)) === 1);
+      await p.keyboard.press("Escape");
+      check("lists: Escape closes the name field", !(await p.isVisible("#listForm")));
+      await p.context().close();
+    }
+
+    // several lists: chips, filter, counts, order
+    {
+      const p = await open({ products: mk(), lists: [L1, L2], label: "lists-many" });
+      await p.waitForSelector(".item"); await settle(p);
+      check("lists: chips in name order with counts, 'Uden liste' last before '+ Ny liste'", JSON.stringify(await chips(p)) === JSON.stringify(["Alle 4", "Bastian 1", "Elektronik 2", "Uden liste 1", "+ Ny liste"]), JSON.stringify(await chips(p)));
+      check("lists: 'Alle' is selected by default and shows everything", JSON.stringify(await pressed(p)) === JSON.stringify(["Alle 4"]) && (await shown(p)) === 4);
+      check("lists: no actions while 'Alle' is selected", !(await p.isVisible("#listAct")));
+      await p.click('[data-lsel="l1"]');
+      check("lists: selecting a chip filters the products", (await shown(p)) === 2 && (await p.locator('.head[data-id="x5"]').count()) === 1 && (await p.locator('.head[data-id="dy"]').count()) === 0);
+      check("lists: 'Omdøb' and 'Slet liste' show for a selected list", /Omdøb/.test(await p.textContent("#listAct")) && /Slet liste/.test(await p.textContent("#listAct")));
+      await p.click('[data-lsel="none"]');
+      check("lists: 'Uden liste' shows the unlisted product", (await shown(p)) === 1 && (await p.locator('.head[data-id="lg"]').count()) === 1 && !(await p.isVisible("#listAct")));
+      check("lists: choice is remembered ('none')", (await lsGet(p)) === "none");
+
+      // moving a product
+      await p.click('[data-lsel="l1"]');
+      await p.locator('.head[data-id="x5"]').click();
+      const opts = await p.locator("#lp-x5 option").allTextContents();
+      check("lists: the product view has a 'Liste' select with 'Ingen liste' and the lists in order", JSON.stringify(opts) === JSON.stringify(["Ingen liste", "Bastian", "Elektronik"]) && (await p.locator("#lp-x5").inputValue()) === "l1", JSON.stringify(opts));
+      await p.selectOption("#lp-x5", "l2"); await settle(p);
+      let up = (await ops(p)).filter(o => o.op === "update");
+      check("lists: moving writes list_id", up.length === 1 && up[0].payload.list_id === "l2" && up[0].filters[0][1] === "x5", JSON.stringify(up));
+      check("lists: the moved product leaves this list view and counts follow", (await shown(p)) === 1 && /Bastian 2/.test((await chips(p)).join("|")) && /Elektronik 1/.test((await chips(p)).join("|")), JSON.stringify(await chips(p)));
+      await p.click('[data-lsel="l2"]');
+      await p.selectOption("#lp-x5", ""); await settle(p);
+      up = (await ops(p)).filter(o => o.op === "update");
+      check("lists: 'Ingen liste' writes list_id null", up.length === 2 && up[1].payload.list_id === null);
+      check("lists: 'Uden liste' count follows", /Uden liste 2/.test((await chips(p)).join("|")), JSON.stringify(await chips(p)));
+
+      // renaming
+      await p.click('[data-lsel="l1"]'); await p.click('[data-lact="rename"]');
+      check("lists: 'Omdøb' opens the field with the current name", (await p.inputValue("#lfName")) === "Elektronik" && /Gem navn/.test(await p.textContent("#lfSave")));
+      await p.fill("#lfName", "Bastian"); await p.click("#lfSave");
+      check("lists: renaming to another list's name is refused", /allerede en liste/.test(await p.textContent("#listMsg")));
+      await p.fill("#lfName", "Teknik"); await p.click("#lfSave"); await settle(p);
+      const rn = (await ops(p)).filter(o => o.table === "lists");
+      check("lists: renaming writes the new name for that list", rn.length === 1 && rn[0].op === "update" && rn[0].payload.name === "Teknik" && rn[0].filters[0][1] === "l1", JSON.stringify(rn));
+      check("lists: renamed chip is shown, re-sorted, still selected", JSON.stringify(await chips(p)).includes('"Bastian 1","Teknik 1"') && JSON.stringify(await pressed(p)) === JSON.stringify(["Teknik 1"]), JSON.stringify(await chips(p)));
+
+      // deleting
+      await p.click('[data-lact="del"]');
+      const ct = await p.textContent("#listAct");
+      check("lists: delete asks first and says the products are kept and moved to 'Uden liste'", /Slet listen Teknik\?/.test(ct) && /Produkterne beholdes/.test(ct) && /Uden liste/.test(ct) && (await dbq(p, () => window.__db.ops.filter(o => o.table === "lists" && o.op === "delete").length)) === 0, ct);
+      await p.click('[data-lact="del-no"]');
+      check("lists: 'Behold' cancels the deletion", !/Slet listen/.test(await p.textContent("#listAct")) && (await dbq(p, () => window.__db.lists.length)) === 2);
+      await p.click('[data-lact="del"]'); await p.click('[data-lact="del-yes"]'); await settle(p);
+      const dw = await ops(p);
+      check("lists: confirmed delete removes only the list row, never a product", dw.filter(o => o.op === "delete").length === 1 && dw.filter(o => o.op === "delete")[0].table === "lists" && dw.filter(o => o.op === "delete")[0].filters[0][1] === "l1", JSON.stringify(dw.filter(o => o.op === "delete")));
+      check("lists: all four products are still there, now without that list", (await dbq(p, () => window.__db.products.length)) === 4 && (await dbq(p, () => window.__db.products.filter(x => x.list_id === "l1").length)) === 0);
+      check("lists: after deleting, 'Alle' is selected and shows all products", JSON.stringify(await pressed(p)) === JSON.stringify(["Alle 4"]) && (await shown(p)) === 4 && (await lsGet(p)) === "all", JSON.stringify(await chips(p)));
+      check("lists: 'Uden liste' counts the products that lost their list", /Uden liste 3/.test((await chips(p)).join("|")), JSON.stringify(await chips(p)));
+      // the 30 cap
+      await p.context().close();
+    }
+
+    // 30 lists: the cap is explained, not just rejected
+    {
+      const many = []; for (let i = 1; i <= 30; i++) many.push({ id: "m" + i, user_id: "u1", name: "Liste " + (i < 10 ? "0" : "") + i });
+      const p = await open({ products: mk().slice(0, 1), lists: many, label: "lists-cap" });
+      await p.waitForSelector(".item"); await settle(p);
+      await p.click('[data-lact="new"]'); await p.fill("#lfName", "En til"); await p.click("#lfSave");
+      check("lists: a 31st list is refused with an explanation", /højst have 30 lister/.test(await p.textContent("#listMsg")) && (await dbq(p, () => window.__db.lists.length)) === 30);
+      await p.context().close();
+    }
+
+    // remembered selection
+    {
+      const p = await open({ products: mk(), lists: [L1, L2], storage: { "pv-list": "l2" }, label: "lists-saved" });
+      await p.waitForSelector(".item"); await settle(p);
+      check("lists: a remembered list is selected on load", JSON.stringify(await pressed(p)) === JSON.stringify(["Bastian 1"]) && (await shown(p)) === 1 && (await p.locator('.head[data-id="dy"]').count()) === 1);
+      await p.context().close();
+
+      const r = await open({ products: mk(), lists: [L1, L2], label: "lists-reload" });
+      await r.waitForSelector(".item"); await settle(r);
+      await r.click('[data-lsel="l1"]'); await r.reload(); await r.waitForSelector(".item"); await settle(r);
+      check("lists: the choice survives a reload", JSON.stringify(await pressed(r)) === JSON.stringify(["Elektronik 2"]) && (await shown(r)) === 2, JSON.stringify(await pressed(r)));
+      await r.context().close();
+
+      const g = await open({ products: mk(), lists: [L1, L2], storage: { "pv-list": "findes-ikke" }, label: "lists-gone" });
+      await g.waitForSelector(".item"); await settle(g);
+      check("lists: a remembered list that no longer exists falls back to 'Alle'", JSON.stringify(await pressed(g)) === JSON.stringify(["Alle 4"]) && (await shown(g)) === 4);
+      await g.context().close();
+
+      const n = await open({ products: mk().map(r => Object.assign(r, { list_id: "l1" })), lists: [L1, L2], storage: { "pv-list": "none" }, label: "lists-none-gone" });
+      await n.waitForSelector(".item"); await settle(n);
+      check("lists: 'Uden liste' remembered but nothing is unlisted: falls back to 'Alle', no such chip", JSON.stringify(await pressed(n)) === JSON.stringify(["Alle 4"]) && (await n.locator('[data-lsel="none"]').count()) === 0);
+      await n.context().close();
+
+      const b = await browser.newContext({ viewport: { width: 900, height: 900 } });
+      const bp = await b.newPage(); bp.on("pageerror", e => pageErrors.push("blocked-storage: " + e.message));
+      await bp.route(/cdn\.jsdelivr\.net/, r => r.fulfill({ contentType: "text/javascript", body: "" }));
+      await bp.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
+      await bp.route(/\/config\.js$/, r => r.fulfill({ contentType: "text/javascript", body: 'window.PV_CONFIG={supabaseUrl:"https://x.supabase.test",supabaseAnonKey:"anon"};' }));
+      await bp.addInitScript("window.__INIT = " + JSON.stringify({ session: { user: { id: "u1", email: "mor@familie.dk" } }, products: mk(), lists: [L1, L2] }) + ";");
+      await bp.addInitScript(FAKE);
+      await bp.addInitScript(() => { const thrower = () => { throw new Error("blocked"); }; Storage.prototype.getItem = thrower; Storage.prototype.setItem = thrower; });
+      await bp.goto(base + "/index.html"); await bp.waitForSelector(".item"); await settle(bp);
+      await bp.click('[data-lsel="l1"]');
+      check("lists: blocked localStorage still works (falls back to 'Alle', selection works for the session)", (await shown(bp)) === 2 && JSON.stringify(await pressed(bp)) === JSON.stringify(["Elektronik 2"]));
+      await b.close();
+    }
+
+    // before schema.sql is run again: no lists table, the page behaves as before
+    {
+      const p = await open({ products: mk().map(r => { delete r.list_id; return r; }), noLists: true, label: "lists-missing" });
+      await p.waitForSelector(".item"); await settle(p);
+      check("lists: without the lists table the chip row stays hidden and all products show", !(await p.isVisible("#listsBox")) && (await shown(p)) === 4);
+      await p.context().close();
+    }
+
+    // read-only user: sees lists, cannot change them
+    {
+      const p = await open({ products: mk(), lists: [L1], label: "lists-readonly" });
+      await p.waitForSelector(".item"); await settle(p);
+      await p.evaluate(() => { window.__db.deny = true; });
+      await p.click('[data-lact="new"]'); await p.fill("#lfName", "Ny"); await p.click("#lfSave"); await settle(p);
+      check("lists: a refused write (no access) shows a message and no list", /ikke adgang/.test(await p.textContent("#listMsg")) && (await dbq(p, () => window.__db.lists.length)) === 1);
+      await p.context().close();
+    }
+
+    // phone width: long names wrap inside the row, no horizontal page scroll
+    {
+      const long = []; for (let i = 1; i <= 8; i++) long.push({ id: "w" + i, user_id: "u1", name: ["Fødselsdagsgaver til hele familien", "Bastian", "Elektronik og tilbehør", "Hus", "Have", "Børnene", "Køkken", "Jul"][i - 1] });
+      const prods = mk(); prods[0].list_id = "w1";
+      const p = await open({ products: prods, lists: long.concat([{ id: "wx", user_id: "u1", name: "Et navn på fyrre tegn som fylder helt " }]), width: 360, label: "lists-phone" });
+      await p.waitForSelector(".item"); await settle(p);
+      await p.click('[data-lact="new"]');
+      await p.click('[data-lsel="w1"]'); await p.click('[data-lact="del"]');
+      const ov = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+      check("lists: no horizontal overflow at 360 px with many long chips and the confirmation open", ov.sw <= ov.cw, JSON.stringify(ov));
+      await p.context().close();
+    }
+  }
+
   // 11. layout at 400px, 12. screenshots
   {
-    const states = all.concat([row("test-lego-falcon", { id: "lg" }), row("test-sonicare", { id: "so" })]);
-    const p = await open({ products: states, width: 400, height: 900, label: "mobile" });
+    const LISTS = [{ id: "l1", user_id: "u1", name: "Elektronik" }, { id: "l2", user_id: "u1", name: "Bastian" }, { id: "l3", user_id: "u1", name: "Hjemmet" }];
+    const inList = { x5: "l1", ps: "l1", so: "l1", lg: "l2", dy: "l3" };
+    const states = all.concat([row("test-lego-falcon", { id: "lg" }), row("test-sonicare", { id: "so" })]).map(r => inList[r.id] ? Object.assign({}, r, { list_id: inList[r.id] }) : r);
+    const p = await open({ products: states, width: 400, height: 900, lists: LISTS, label: "mobile" });
     await p.waitForSelector(".item");
     for (const id of ["x5", "ps", "dy", "lg", "so", "p1", "e1"]) await p.locator('.head[data-id="' + id + '"]').click();
     await p.locator("#settingsBox summary").click();
@@ -733,7 +933,7 @@ let base;
     await p.context().close(); await q.context().close();
 
     for (const scheme of ["light", "dark"]) {
-      const d = await open({ products: states, scheme, label: "shot-" + scheme });
+      const d = await open({ products: states, scheme, lists: LISTS, label: "shot-" + scheme });
       await d.waitForSelector(".item");
       await d.locator('.head[data-id="x5"]').click();
       await d.locator('.head[data-id="x5"]').scrollIntoViewIfNeeded();

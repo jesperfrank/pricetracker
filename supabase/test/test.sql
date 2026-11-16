@@ -304,6 +304,137 @@ select t.chk('and back to a price goal', (select target_type = 'price' and targe
 reset role;
 delete from public.products where name in ('skift', 'skift2');
 
+-- 11b. lists
+insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000b2', 'far@familie.dk');
+\o /dev/null
+\i :schema
+\i :schema
+\o
+select t.chk('lists: table, column, triggers and policy exist after re-runs',
+  (select count(*) = 1 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name = 'list_id')
+  and (select count(*) = 1 from pg_trigger where tgname = 'lists_limit_trg')
+  and (select count(*) = 1 from pg_policies where tablename = 'lists' and policyname = 'lists_own'));
+create function t.asA() returns void language sql as $$ select set_config('request.jwt.claims', '{"email":"mor@familie.dk","sub":"00000000-0000-0000-0000-0000000000a1"}', false) $$;
+create function t.asB() returns void language sql as $$ select set_config('request.jwt.claims', '{"email":"far@familie.dk","sub":"00000000-0000-0000-0000-0000000000b2"}', false) $$;
+create function t.asX() returns void language sql as $$ select set_config('request.jwt.claims', '{"email":"fremmed@x.dk","sub":"00000000-0000-0000-0000-0000000000c3"}', false) $$;
+grant execute on function t.asA(), t.asB(), t.asX() to public;
+-- t.try: run a statement, return 'ok' or a short reason
+create function t.try(q text) returns text language plpgsql as $$
+begin execute q; return 'ok';
+exception when check_violation then return 'check';
+  when unique_violation then return 'unique';
+  when foreign_key_violation then return 'fk';
+  when insufficient_privilege then return 'denied'; end $$;
+grant execute on function t.try(text) to public;
+-- lists of A and B by name, and "put product p into list l" as a statement
+create function t.lid(owner uuid, n text) returns uuid language sql security definer as $$ select id from public.lists where user_id = owner and name = n $$;
+grant execute on function t.lid(uuid, text) to public;
+create function t.put(p text, l uuid) returns text language plpgsql as $$
+begin return t.try(format('update public.products set list_id = %L where name = %L', l, p)); end $$;
+create function t.putnew(p text, l uuid) returns text language plpgsql as $$
+begin return t.try(format('insert into public.products (name, target_type, target_value, list_id) values (%L, ''price'', 5, %L)', p, l)); end $$;
+grant execute on function t.put(text, uuid), t.putnew(text, uuid) to public;
+
+set role authenticated;
+select t.asA();
+insert into public.lists (name) values ('  Elektronik  ');
+select t.chk('list: name is trimmed, user_id defaults to the caller', (select name = 'Elektronik' and user_id = '00000000-0000-0000-0000-0000000000a1' from public.lists));
+select t.chk('list: empty name rejected', t.try($$insert into public.lists (name) values ('')$$) = 'check');
+select t.chk('list: blank name rejected', t.try($$insert into public.lists (name) values ('   ')$$) = 'check');
+select t.chk('list: 40 characters accepted', t.try(format('insert into public.lists (name) values (%L)', repeat('x', 40))) = 'ok');
+select t.chk('list: 41 characters rejected', t.try(format('insert into public.lists (name) values (%L)', repeat('y', 41))) = 'check');
+select t.chk('list: duplicate rejected ignoring case and spaces', t.try($$insert into public.lists (name) values ('ELEKTRONIK')$$) = 'unique'
+  and t.try($$insert into public.lists (name) values (' elektronik ')$$) = 'unique');
+select t.chk('list: rename to an existing name rejected', t.try(format('update public.lists set name = %L where name = %L', 'Elektronik', repeat('x', 40))) = 'unique');
+update public.lists set name = '  Gaver ' where name = repeat('x', 40);
+select t.chk('list: rename works and is trimmed', (select count(*) = 1 from public.lists where name = 'Gaver'));
+select t.chk('list: renaming to blank rejected', t.try($$update public.lists set name = ' ' where name = 'Gaver'$$) = 'check');
+update public.lists set user_id = '00000000-0000-0000-0000-0000000000b2' where name = 'Gaver';
+select t.chk('list: cannot be handed to another user', (select user_id = '00000000-0000-0000-0000-0000000000a1' from public.lists where name = 'Gaver'));
+select t.chk('list: cannot insert for another user (RLS)', t.try($$insert into public.lists (user_id, name) values ('00000000-0000-0000-0000-0000000000b2', 'Snyd')$$) = 'denied');
+reset role;
+select t.chk('list: nothing stored for B by A', (select count(*) = 0 from public.lists where user_id = '00000000-0000-0000-0000-0000000000b2'));
+
+-- B has a list of their own; A and a stranger cannot see, change or delete it
+insert into public.lists (user_id, name) values ('00000000-0000-0000-0000-0000000000b2', 'Elektronik');
+select t.chk('list: same name for another user is fine', (select count(*) = 2 from public.lists where name = 'Elektronik'));
+set role authenticated;
+select t.asA();
+select t.chk('RLS: A sees only own lists', (select count(*) = 2 and bool_and(user_id = '00000000-0000-0000-0000-0000000000a1') from public.lists));
+update public.lists set name = 'Hacket' where user_id = '00000000-0000-0000-0000-0000000000b2';
+delete from public.lists where user_id = '00000000-0000-0000-0000-0000000000b2';
+reset role;
+select t.chk('RLS: A can neither rename nor delete B''s list', (select count(*) = 1 from public.lists where user_id = '00000000-0000-0000-0000-0000000000b2' and name = 'Elektronik'));
+set role authenticated;
+select t.asB();
+select t.chk('RLS: B sees only own list', (select count(*) = 1 and bool_and(user_id = '00000000-0000-0000-0000-0000000000b2') from public.lists));
+select t.asX();
+select t.chk('RLS: a signed-in stranger (not allowed) sees no lists', (select count(*) = 0 from public.lists));
+select t.chk('RLS: a stranger cannot create a list', t.try($$insert into public.lists (name) values ('Fremmed')$$) = 'denied');
+reset role;
+set role anon;
+select t.chk('anon cannot read lists', t.denied('select * from public.lists'));
+reset role;
+
+-- list_id ownership
+insert into public.products (user_id, name, target_type, target_value) values ('00000000-0000-0000-0000-0000000000a1', 'tv', 'price', 5);
+set role authenticated;
+select t.asA();
+select t.chk('list_id: A can put a product in own list', t.put('tv', t.lid('00000000-0000-0000-0000-0000000000a1', 'Elektronik')) = 'ok');
+select t.chk('list_id: and it is stored', (select list_id = t.lid('00000000-0000-0000-0000-0000000000a1', 'Elektronik') from public.products where name = 'tv'));
+select t.chk('list_id: A cannot attach a product to B''s list (update)', t.put('tv', t.lid('00000000-0000-0000-0000-0000000000b2', 'Elektronik')) = 'fk');
+select t.chk('list_id: A cannot create a product in B''s list (insert)', t.putnew('snyd', t.lid('00000000-0000-0000-0000-0000000000b2', 'Elektronik')) = 'fk');
+select t.chk('list_id: a made-up list id is rejected', t.put('tv', gen_random_uuid()) = 'fk');
+select t.chk('list_id: still A''s own list after the failed attempts', (select list_id = t.lid('00000000-0000-0000-0000-0000000000a1', 'Elektronik') from public.products where name = 'tv'));
+update public.products set list_id = null where name = 'tv';
+select t.chk('list_id: can be cleared', (select list_id is null from public.products where name = 'tv'));
+select t.chk('list_id: an insert into an own list works', t.putnew('radio', t.lid('00000000-0000-0000-0000-0000000000a1', 'Elektronik')) = 'ok');
+reset role;
+select t.chk('list_id: the SQL editor is checked too', t.put('tv', t.lid('00000000-0000-0000-0000-0000000000b2', 'Elektronik')) = 'fk');
+select t.chk('list_id: no stray rows', (select count(*) = 0 from public.products where name = 'snyd') and (select list_id is null from public.products where name = 'tv'));
+-- the job (service role) updates a product in a list without touching list_id
+set role service_role;
+update public.products set check_note = 'ok' where name = 'radio';
+select t.chk('service role can still update products in a list', (select check_note = 'ok' and list_id is not null from public.products where name = 'radio'));
+select t.chk('service role selects lists', (select count(*) = 3 from public.lists));
+reset role;
+
+-- deleting a list keeps the products
+set role authenticated;
+select t.asA();
+delete from public.lists where name = 'Elektronik';
+reset role;
+select t.chk('deleting a list keeps its products and sets list_id to null', (select count(*) = 1 and bool_and(list_id is null) from public.products where name = 'radio'));
+select t.chk('deleting A''s list does not touch B''s list', (select count(*) = 2 from public.lists));
+
+-- the cap of 30 per user
+delete from public.lists where user_id = '00000000-0000-0000-0000-0000000000a1';
+set role authenticated;
+select t.asA();
+insert into public.lists (name) select 'L' || g from generate_series(1, 30) g;
+select t.chk('cap: 30 lists accepted', (select count(*) = 30 from public.lists));
+select t.chk('cap: the 31st is rejected', t.try($$insert into public.lists (name) values ('L31')$$) = 'check');
+delete from public.lists where name = 'L30';
+select t.chk('cap: room again after a delete', t.try($$insert into public.lists (name) values ('L31')$$) = 'ok');
+select t.asB();
+select t.chk('cap: counted per user (B unaffected)', t.try($$insert into public.lists (name) values ('B2')$$) = 'ok');
+reset role;
+delete from public.lists;
+delete from public.products where name in ('tv', 'radio');
+
+-- the live shape: a database without lists, then the schema is run (twice)
+drop trigger products_list_check_trg on public.products;
+alter table public.products drop column list_id;
+drop table public.lists cascade;
+\o /dev/null
+\i :schema
+\i :schema
+\o
+select t.chk('lists: migration from a database without lists is clean (twice)',
+  (select count(*) = 1 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name = 'list_id')
+  and (select count(*) = 3 from pg_trigger where tgname in ('lists_guard_trg', 'lists_limit_trg', 'products_list_check_trg')));
+select t.chk('lists: existing products survived the migration', (select count(*) > 0 from public.products));
+
 -- 12. final whole-file run on the populated database
 \o /dev/null
 \i :schema

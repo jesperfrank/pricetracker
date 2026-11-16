@@ -84,6 +84,10 @@ Kør hele `supabase/schema.sql` igen i **SQL Editor** (det er sikkert og kan gen
 - Under **Hvem har adgang** kan du trykke **Fjern adgang** (med bekræftelse). Administratorer kan ikke fjernes her. Personens produkter bliver liggende. Kommer personen tilbage, skal vedkommende bede om adgang igen.
 - Siden kan ikke selv sende mails, så uden Resend skal du selv give besked til dem, du godkender.
 
+## Lister
+
+Kør hele `supabase/schema.sql` igen i **SQL Editor** (det er sikkert og kan gentages), så tabellen `lists` og kolonnen `products.list_id` oprettes. Indtil da vises listerne ikke på siden, og alt andet virker som før. Derefter kan hver person lave op til 30 egne lister (fx "Elektronik" eller "Bastian") med knappen "+ Ny liste" over produkterne og flytte et produkt til en liste i dets egen visning. Sletter man en liste, bliver produkterne liggende og kommer under "Uden liste". Jobbet og mailene er uændrede.
+
 ## Hverdagen
 
 - Ny person: de kan bede om adgang på siden (se ovenfor), eller du tilføjer e-mailen i `allowed_emails` og sender dem linket.

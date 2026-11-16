@@ -210,6 +210,96 @@ create trigger products_limit_trg
   before insert on public.products
   for each row execute function public.products_limit();
 
+-- ---------------------------------------------------------------- lists
+-- A person can split what they track into named lists (fx "Elektronik"). A product belongs to at most one list
+-- (products.list_id, null = no list). Deleting a list keeps its products: they just lose the list.
+
+create table if not exists public.lists (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid() references auth.users on delete cascade,
+  name       text not null check (char_length(btrim(name)) between 1 and 40),
+  created_at timestamptz default now()
+);
+-- One name per person, ignoring case (names are trimmed by lists_guard below).
+create unique index if not exists lists_user_name_key on public.lists (user_id, lower(name));
+
+alter table public.products add column if not exists list_id uuid references public.lists(id) on delete set null;
+create index if not exists products_list_idx on public.products (list_id);
+
+alter table public.lists enable row level security;
+revoke all on public.lists from anon;
+
+drop policy if exists lists_own on public.lists;
+create policy lists_own on public.lists
+  for all to authenticated
+  using ((select auth.uid()) = user_id and public.is_allowed())
+  with check ((select auth.uid()) = user_id and public.is_allowed());
+
+grant select, insert, update, delete on public.lists to authenticated;
+grant select, insert, update, delete on public.lists to service_role;
+
+-- Trims the name (every role), and keeps a browser user from moving a list to someone else.
+create or replace function public.lists_guard()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  new.name := btrim(new.name);
+  if tg_op = 'UPDATE' and current_user in ('authenticated', 'anon') then
+    new.user_id := old.user_id;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists lists_guard_trg on public.lists;
+create trigger lists_guard_trg
+  before insert or update on public.lists
+  for each row execute function public.lists_guard();
+
+-- At most 30 lists per user.
+create or replace function public.lists_limit()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if (select count(*) from public.lists where user_id = new.user_id) >= 30 then
+    raise exception 'Du kan højst have 30 lister. Slet en liste først.' using errcode = 'check_violation';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists lists_limit_trg on public.lists;
+create trigger lists_limit_trg
+  before insert on public.lists
+  for each row execute function public.lists_limit();
+
+-- A product may only point at one of its owner's own lists (checked for every role, the job and the SQL editor included).
+-- SECURITY DEFINER so the check does not depend on the caller's row level security.
+create or replace function public.products_list_check()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.list_id is not null
+     and not exists (select 1 from public.lists l where l.id = new.list_id and l.user_id = new.user_id) then
+    raise exception 'Listen findes ikke.' using errcode = 'foreign_key_violation';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists products_list_check_trg on public.products;
+create trigger products_list_check_trg
+  before insert or update of list_id, user_id on public.products
+  for each row execute function public.products_list_check();
+
 -- ---------------------------------------------------------------- auth hook: Before User Created
 -- Rejects sign-ups (first magic-link login) from e-mail addresses that are not in allowed_emails.
 -- Enable it in the dashboard (see docs/SETUP.md). RLS above is the real protection even if the

@@ -77,6 +77,18 @@
     <p class="hint" id="fHint">Du får besked, når prisen er et godt tilbud: klart under normalprisen og den laveste i 30 dage. Er der for lidt historik, når prisen mindst 10 % under den første pris, vi har set.</p>
     <p class="notice" id="readonly" hidden>Din adresse har ikke adgang til at gemme endnu. Bed ejeren om at tilføje den.</p>
 
+    <nav class="lists" id="listsBox" aria-label="Lister" hidden>
+      <div class="chips" id="chips"></div>
+      <form class="listform" id="listForm" autocomplete="off" novalidate hidden>
+        <label class="vh" for="lfName" id="lfLabel">Navn på den nye liste</label>
+        <input class="inp" type="text" id="lfName" maxlength="40" placeholder="Navn på listen, fx Elektronik">
+        <button class="btn small" id="lfSave" type="submit">Opret liste</button>
+        <button class="link" id="lfCancel" type="button">Annuller</button>
+      </form>
+      <p class="listact" id="listAct" hidden></p>
+      <p class="msg" id="listMsg" role="alert" hidden></p>
+    </nav>
+
     <section class="list" id="list" aria-live="polite">
       <div class="empty"><b>Her kommer dine produkter</b>Laveste pris lige nu, butikkerne der fører varen, og prisen dag for dag.</div>
     </section>

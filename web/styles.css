@@ -110,6 +110,26 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 .access details { margin-top: 12px }
 .access details .meta { margin-top: 8px }
 
+/* lists: a quiet row of chips above the products */
+.lists { margin: 18px 0 14px }
+.chips { display: flex; flex-wrap: wrap; gap: 6px }
+.lchip { background: var(--sunk); border: 1px solid transparent; border-radius: 999px; padding: 5px 12px; font-size: 13px; color: var(--ink2); cursor: pointer; max-width: 100%; text-align: left; overflow-wrap: anywhere }
+.lchip .cnt { color: var(--muted); margin-left: 3px }
+.lchip[aria-pressed="true"] { background: var(--ink); color: var(--bg); font-weight: 600 }
+.lchip[aria-pressed="true"] .cnt { color: var(--bg); opacity: .7; font-weight: 400 }
+.lchip.plus { background: none; border: 1px dashed var(--line); color: var(--muted) }
+.lchip.plus:hover, .lchip.plus[aria-expanded="true"] { color: var(--ink); border-color: var(--muted) }
+.listform { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; margin-top: 10px; max-width: 460px }
+.listform .inp { height: 38px }
+.listform .btn { height: 38px }
+.listact { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; margin: 10px 0 0; font-size: 13px; color: var(--muted) }
+.listact .link { font-size: 13px; font-weight: 400; color: var(--ink2) }
+.listact .link.warn { color: var(--danger) }
+.listact .edit { gap: 4px 14px }
+.lists .msg { margin: 8px 0 0 }
+.listpick { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13.5px; color: var(--muted); margin-bottom: 14px }
+.listpick select { height: 34px; max-width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0 8px; font: inherit; color: var(--ink) }
+
 /* list */
 .list { border-top: 1px solid var(--line) }
 .empty { padding: 40px 0; color: var(--muted); border-bottom: 1px solid var(--line) }
@@ -175,6 +195,7 @@ details.fine summary { margin-top: 0; color: var(--ink2) }
 @media (max-width: 560px) {
   body { padding-block: 28px 64px }
   .add { grid-template-columns: minmax(0, 1fr) auto }
+  .listform { grid-template-columns: auto auto 1fr } .listform .inp { grid-column: 1 / -1 }
   .head { grid-template-columns: minmax(0, 1fr) auto; gap: 12px }
   .spark { display: none }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)) }

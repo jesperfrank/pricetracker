@@ -19,7 +19,7 @@
     return window.supabase.createClient(url, key);
   }
 
-  var state = { products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
+  var state = { lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
     prefs: { always: [], exclude: [], only: false, notify: true }, profileSound: null };
   var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
   var sb = null, user = null, channel = null, pollTimer = null, fetching = false, again = false, lastFetch = 0, fetchSeq = 0;
@@ -175,7 +175,7 @@
       warning: r.warning || "", checkNote: r.check_note || "", lastChecked: r.last_checked || null,
       targetType: r.target_type === "pct" ? "pct" : r.target_type === "auto" ? "auto" : "price", targetValue: num(r.target_value),
       shopsAlways: r.shops_always, shopsExclude: r.shops_exclude, shopsOnly: !!r.shops_only,
-      url: r.source_url || null, createdAt: r.created_at || ""
+      url: r.source_url || null, createdAt: r.created_at || "", listId: r.list_id || null
     };
   }
   function offersOf(p) {
@@ -317,8 +317,17 @@
       '<span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></div></form>';
   }
 
+  function listPickHtml(p) {
+    var id = p._id;
+    if (!state.canWrite || !state.listsOk || !state.lists.length) return "";
+    var known = state.lists.some(function (l) { return l.id === p.listId; });
+    return '<div class="listpick"><label for="lp-' + esc(id) + '">Liste</label><select id="lp-' + esc(id) + '" data-listpick="' + esc(id) + '">' +
+      '<option value="">Ingen liste</option>' + state.lists.map(function (l) {
+        return '<option value="' + esc(l.id) + '"' + (known && p.listId === l.id ? " selected" : "") + '>' + esc(l.name) + '</option>';
+      }).join("") + '</select></div>';
+  }
   function footHtml(p, fixLink) {
-    var id = p._id, link = safeUrl(p.url), html = "";
+    var id = p._id, link = safeUrl(p.url), html = listPickHtml(p);
     html += '<div class="foot"><span>' + (link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">Dit link</a>' : '') + '</span>';
     if (state.canWrite) {
       if (state.confirmDel === id) {
@@ -465,6 +474,114 @@
     return html + footHtml(p);
   }
 
+  // ---- lists: chips above the product list ----
+  // The selection is remembered per browser: "all", "none" (no list) or a list id.
+  try { var savedSel = localStorage.getItem("pv-list"); if (savedSel) state.listSel = savedSel; } catch (e) {}
+  function saveSel() { try { localStorage.setItem("pv-list", state.listSel); } catch (e) {} }
+  function hasUnlisted() { return state.products.some(function (p) { return !listKnown(p.listId); }); }
+  function listKnown(id) { return !!id && state.lists.some(function (l) { return l.id === id; }); }
+  // What is really shown: falls back to "all" when the remembered list is gone or "none" has nothing to show.
+  function curSel() {
+    if (!state.listsOk) return "all";
+    var s = state.listSel;
+    if (s === "none") return (state.lists.length && hasUnlisted()) ? "none" : "all";
+    return listKnown(s) ? s : "all";
+  }
+  function inSel(p, sel) { return sel === "all" || (sel === "none" ? !listKnown(p.listId) : p.listId === sel); }
+  function listCount(sel) { return state.products.filter(function (p) { return inSel(p, sel); }).length; }
+  function listById(id) { return state.lists.filter(function (l) { return l.id === id; })[0]; }
+  function sortLists() { state.lists.sort(function (a, b) { return a.name.localeCompare(b.name, "da") || (a.id < b.id ? -1 : 1); }); }
+  function chipHtml(key, label, n) {
+    return '<button type="button" class="lchip" data-lsel="' + esc(key) + '" aria-pressed="' + (curSel() === key) + '">' + esc(label) +
+      (n != null ? ' <span class="cnt n">' + n + '</span>' : '') + '</button>';
+  }
+  function renderLists() {
+    var box = $("listsBox");
+    var show = !!(user && state.listsOk && (state.lists.length || state.canWrite));
+    box.hidden = !show;
+    if (!show) return;
+    var sel = curSel(), html = chipHtml("all", "Alle", state.products.length);
+    state.lists.forEach(function (l) { html += chipHtml(l.id, l.name, listCount(l.id)); });
+    if (state.lists.length && hasUnlisted()) html += chipHtml("none", "Uden liste", listCount("none"));
+    if (state.canWrite) html += '<button type="button" class="lchip plus" data-lact="new" aria-expanded="' + (state.listForm === "new") + '">+ Ny liste</button>';
+    $("chips").innerHTML = html;
+    var cur = listById(sel), act = "";
+    if (state.listForm) act = "";
+    else if (cur && state.canWrite) {
+      if (state.confirmList === cur.id) {
+        act = '<span class="edit"><span>Slet listen ' + esc(cur.name) + '? Produkterne beholdes og flyttes til Uden liste.</span>' +
+          '<button type="button" class="link warn" data-lact="del-yes">Ja, slet listen</button>' +
+          '<button type="button" class="link" data-lact="del-no">Behold</button></span>';
+      } else {
+        act = '<span class="meta">Nye produkter lægges på denne liste.</span> <button type="button" class="link" data-lact="rename">Omdøb</button>' +
+          '<button type="button" class="link warn" data-lact="del">Slet liste</button>';
+      }
+    }
+    $("listAct").innerHTML = act; $("listAct").hidden = !act;
+    var f = $("listForm"); f.hidden = !state.listForm;
+  }
+  function listMsg(t) { var m = $("listMsg"); m.textContent = t || ""; m.hidden = !t; }
+  function selectList(key) { state.listSel = key; state.confirmList = null; state.listForm = null; listMsg(""); saveSel(); render(); }
+  function openListForm(mode) {
+    var cur = listById(curSel());
+    state.listForm = mode; state.confirmList = null; listMsg("");
+    $("lfName").value = mode === "rename" && cur ? cur.name : "";
+    $("lfSave").textContent = mode === "rename" ? "Gem navn" : "Opret liste";
+    $("lfLabel").textContent = mode === "rename" ? "Nyt navn til listen" : "Navn på den nye liste";
+    render(); $("lfName").focus();
+  }
+  function closeListForm() { state.listForm = null; listMsg(""); render(); }
+  function listError(e) {
+    if (isDenied(e)) { onWriteError(e); return "Du har ikke adgang til at gemme."; }
+    if (e && e.code === "23505") return "Du har allerede en liste med det navn.";
+    if (e && e.code === "23514") return "Navnet skal være mellem 1 og 40 tegn, og du kan højst have 30 lister.";
+    return "Kunne ikke gemme lige nu. Prøv igen om lidt.";
+  }
+  $("chips").addEventListener("click", function (ev) {
+    var c = ev.target.closest("[data-lsel]");
+    if (c) { selectList(c.dataset.lsel); return; }
+    if (ev.target.closest('[data-lact="new"]')) { if (state.listForm === "new") closeListForm(); else openListForm("new"); }
+  });
+  $("listAct").addEventListener("click", function (ev) {
+    var b = ev.target.closest("[data-lact]"); if (!b) return;
+    var act = b.dataset.lact, cur = listById(curSel());
+    if (!cur) return;
+    if (act === "rename") openListForm("rename");
+    else if (act === "del") { state.confirmList = cur.id; render(); }
+    else if (act === "del-no") { state.confirmList = null; render(); }
+    else if (act === "del-yes" && sb) {
+      b.disabled = true;
+      sb.from("lists").delete().eq("id", cur.id).then(function (r) {
+        if (r && r.error) { b.disabled = false; listMsg(listError(r.error)); return; }
+        // the database moves the products out of the list (on delete set null); show that at once
+        state.products.forEach(function (p) { if (p.listId === cur.id) p.listId = null; });
+        state.lists = state.lists.filter(function (l) { return l.id !== cur.id; });
+        state.confirmList = null; state.listSel = "all"; saveSel(); listMsg(""); render(); fetchProducts();
+      }, function () { b.disabled = false; listMsg("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+    }
+  });
+  $("listForm").addEventListener("keydown", function (ev) { if (ev.key === "Escape") { closeListForm(); } });
+  $("lfCancel").addEventListener("click", closeListForm);
+  $("listForm").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    if (!sb || !state.listForm) return;
+    var name = $("lfName").value.replace(/\s+/g, " ").trim(), mode = state.listForm, cur = listById(curSel());
+    if (!name || name.length > 40) { listMsg("Skriv et navn på mellem 1 og 40 tegn."); return; }
+    var dup = state.lists.some(function (l) { return l.name.toLowerCase() === name.toLowerCase() && !(mode === "rename" && cur && l.id === cur.id); });
+    if (dup) { listMsg("Du har allerede en liste med det navn."); return; }
+    if (mode === "new" && state.lists.length >= 30) { listMsg("Du kan højst have 30 lister. Slet en liste først."); return; }
+    var btn = $("lfSave"); btn.disabled = true;
+    var q = mode === "rename" && cur ? sb.from("lists").update({ name: name }).eq("id", cur.id) : sb.from("lists").insert({ name: name });
+    if (mode === "new") q = q.select().single();
+    q.then(function (r) {
+      btn.disabled = false;
+      if (r && r.error) { listMsg(listError(r.error)); return; }
+      if (mode === "rename" && cur) { cur.name = name; sortLists(); }
+      else if (r && r.data && r.data.id) { state.lists.push({ id: r.data.id, name: r.data.name || name }); sortLists(); state.listSel = r.data.id; saveSel(); }
+      state.listForm = null; listMsg(""); render(); fetchLists();
+    }, function () { btn.disabled = false; listMsg("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+  });
+
   var renderPending = false;
   function render() {
     renderStatus();
@@ -473,14 +590,21 @@
     if (a && list.contains(a) && a.tagName === "INPUT" &&
       (a.type === "checkbox" || a.type === "radio" ? a.checked !== a.defaultChecked : a.value !== a.defaultValue)) { renderPending = true; return; }
     renderPending = false;
+    renderLists();
     var rank = function (p) { return isHit(p) ? 0 : (p.status === "choose" && !awaitingFetch(p)) ? 1 : 2; };
-    var ps = state.products.slice().sort(function (x, y) {
+    var sel = curSel();
+    var ps = state.products.filter(function (p) { return inSel(p, sel); }).sort(function (x, y) {
       return (rank(x) - rank(y)) || String(y.createdAt || "").localeCompare(String(x.createdAt || ""));
     });
-    if (!ps.length) {
+    if (!state.products.length) {
       list.innerHTML = '<div class="empty"><b>Ingen produkter endnu</b>' +
         (state.canWrite ? "Skriv navnet på en vare eller indsæt et link til den ovenfor. Så finder og henter vi produktet, du vælger variant, og derefter ser du laveste pris, butikkerne og prisen dag for dag."
           : "Når der er tilføjet produkter, ser du laveste pris, butikker og prisudvikling her.") + '</div>';
+      return;
+    }
+    if (!ps.length) {
+      list.innerHTML = '<div class="empty"><b>' + (sel === "none" ? "Alle produkter er på en liste" : "Ingen produkter på denne liste endnu") + '</b>' +
+        (sel === "none" ? "Her vises de produkter, som ikke er sat på nogen liste." : (state.canWrite ? "Tilføj et produkt ovenfor, så kommer det på listen. Du kan også flytte et eksisterende produkt hertil fra dets egen visning." : "")) + '</div>';
       return;
     }
     list.innerHTML = ps.map(function (p) {
@@ -595,13 +719,24 @@
       } else {
         state.products = (r.data || []).map(norm);
         state.loaded = true;
-        render(); checkSound();
+        render(); checkSound(); fetchLists();
       }
       if (again) { again = false; fetchProducts(); }
     }, function () {
       fetching = false;
       if (!state.loaded) $("status").textContent = "Listen kan ikke hentes lige nu. Den prøves igen om lidt.";
     });
+  }
+  // The lists table only exists once schema.sql has been run again. Until then the list row stays hidden and nothing breaks.
+  function fetchLists() {
+    if (!sb || !user) return;
+    var uid = user.id;
+    sb.from("lists").select("*").order("name", { ascending: true }).then(function (r) {
+      if (!user || user.id !== uid) return;
+      if (r.error) { if (!state.listsOk) { state.lists = []; render(); } return; }
+      state.lists = (r.data || []).map(function (l) { return { id: l.id, name: String(l.name || "") }; });
+      sortLists(); state.listsOk = true; render();
+    }, function () {});
   }
   function refreshSoon() { if (Date.now() - lastFetch > 2500) fetchProducts(); else { again = true; setTimeout(function () { if (again && !fetching) { again = false; fetchProducts(); } }, 2600); } }
   function setPrefs(d) {
@@ -627,6 +762,7 @@
   }
   function startSession() {
     state.loaded = false; state.products = []; state.canWrite = true;
+    state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null;
     $("status").textContent = "Henter listen …";
     loadSounds();
     ensureProfile(); fetchProducts(); fetchAccess();
@@ -638,7 +774,7 @@
   function stopSession() {
     clearInterval(pollTimer); pollTimer = null;
     try { if (channel) sb.removeChannel(channel); } catch (e) {}
-    channel = null; state.products = []; state.loaded = false;
+    channel = null; state.products = []; state.loaded = false; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null;
     access.admin = false; access.requests = []; access.allowed = []; access.confirm = null; access.seq++; accMsg(""); renderAccess();
   }
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && user) fetchProducts(); });
@@ -674,6 +810,17 @@
     }
   });
   $("list").addEventListener("change", function (ev) {
+    var lp = ev.target.closest("[data-listpick]");
+    if (lp) {
+      var lid = lp.dataset.listpick, lp0 = prod(lid), to = lp.value || null;
+      if (!lp0 || !sb || lp0.listId === to) return;
+      lp.disabled = true;
+      sb.from("products").update({ list_id: to }).eq("id", lid).then(function (r) {
+        if (r && r.error) { onWriteError(r.error); render(); fetchProducts(); return; }
+        lp0.listId = to; render(); fetchProducts();
+      }, function () { render(); });
+      return;
+    }
     var sel = ev.target.closest("[data-etype]");
     if (sel) {
       var inp = sel.form.querySelector("input"), auto = sel.value === "auto";
@@ -864,6 +1011,8 @@
     var btn = $("fSubmit"); btn.disabled = true;
     var goal = auto ? { target_type: "auto", target_value: null } : { target_type: pct ? "pct" : "price", target_value: v };
     var row = url ? Object.assign({ name: PLACEHOLDER, source_url: url }, goal, { active: true }) : Object.assign({ name: name }, goal);
+    var into = curSel();
+    if (listKnown(into)) row.list_id = into;   // a selected list: the new product goes straight into it
     sb.from("products").insert(row).then(function (r) {
       btn.disabled = false;
       if (r && r.error) {
