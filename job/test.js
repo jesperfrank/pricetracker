@@ -513,18 +513,28 @@ function makeFake(db) {
       if (db.resendFail) return reply(500, { message: 'boom' });
       db.sent.push(b); return reply(200, { id: 'x' });
     }
+    if (db.web && /(^|\.)(onskeskyen\.dk|gowish\.com)$/.test(u.hostname)) return db.web(url, opts);   // the wish-list site: its own fake
     assert.strictEqual(u.hostname, 'x.supabase.test', 'only the configured Supabase host is called: ' + url);
+    if (db.urls) db.urls.push(url);
     assert.strictEqual(h.apikey, SERVICE_KEY); assert.strictEqual(h.Authorization, 'Bearer ' + SERVICE_KEY);
     let mm;
     if ((mm = /^\/auth\/v1\/admin\/users\/(.+)$/.exec(u.pathname))) {
       const usr = db.users[decodeURIComponent(mm[1])]; return usr ? reply(200, { id: mm[1], email: usr }) : reply(404, { msg: 'not found' });
     }
     if ((mm = /^\/rest\/v1\/(\w+)$/.exec(u.pathname))) {
-      const t = db[mm[1]]; assert(t, 'unknown table ' + mm[1]);
+      const t = db[mm[1]];
+      if (!t) return reply(404, { code: 'PGRST205', message: "Could not find the table 'public." + mm[1] + "' in the schema cache" });   // a table the database does not have (yet)
       const q = u.searchParams;
+      const ownerEq = /^eq\.(.+)$/.exec(q.get('user_id') || '');
       if (m === 'GET') {
         let rows = t.slice();
-        if (mm[1] === 'products') {
+        if (mm[1] === 'imports') {
+          rows = rows.filter((r) => !q.get('status') || r.status === q.get('status').slice(3));
+          rows.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+          if (q.get('limit')) rows = rows.slice(0, Number(q.get('limit')));
+          db.importReads = (db.importReads || 0) + 1;
+        } else if (ownerEq && (mm[1] === 'products' || mm[1] === 'lists')) rows = rows.filter((r) => r.user_id === ownerEq[1]);   // one person's rows (the import step)
+        else if (mm[1] === 'products') {
           assert.strictEqual(q.get('active'), 'eq.true'); assert.strictEqual(q.get('source_url'), 'not.is.null');
           rows = rows.filter((r) => r.active !== false && (r.source_url || db.ignoreLinkFilter));   // db.ignoreLinkFilter: a server that wrongly returns name-only rows
         }
@@ -539,8 +549,39 @@ function makeFake(db) {
         if (q.get('email') && /^eq\./.test(q.get('email'))) rows = rows.filter((r) => r.email === q.get('email').slice(3));
         return reply(200, JSON.parse(JSON.stringify(rows)));
       }
+      if (m === 'POST') {   // inserts, with the database's own rules for the columns the import step writes
+        const body = JSON.parse(opts.body), list = Array.isArray(body) ? body : [body], out = [];
+        if (db.insertFail === mm[1]) return reply(500, { message: 'db error' });
+        for (const r of list) {
+          if (mm[1] === 'products') {
+            assert.strictEqual(h.Prefer, 'return=minimal');
+            const mine = t.filter((x) => x.user_id === r.user_id).length;
+            if (mine >= 40) return reply(400, { code: '23514', message: 'Du kan højst følge 40 produkter. Slet et produkt først.' });
+            if (typeof r.name !== 'string' || r.name.trim() === '' || Array.from(r.name).length > 140) return reply(400, { code: '23514', message: 'name check' });
+            if (r.source_url != null && !(r.source_url.length <= 500 && /^https:\/\/[^/?#@:\s]+\.[^/?#@:\s]+([/?#][^\s]*)?$/.test(r.source_url))) return reply(400, { code: '23514', message: 'source_url check' });
+            if (r.list_id && !(db.lists || []).some((l) => l.id === r.list_id && l.user_id === r.user_id)) return reply(409, { code: '23503', message: 'Listen findes ikke.' });
+            t.push(Object.assign({ id: 'np' + (db.seq = (db.seq || 0) + 1), status: 'pending', active: true, tracked_variants: null, history: null, source_url: null, list_id: null, created_at: NOW.toISOString() }, r));
+          } else if (mm[1] === 'lists') {
+            assert.strictEqual(h.Prefer, 'return=representation');
+            const nm = String(r.name || '').trim();
+            if (!nm || nm.length > 40 || t.filter((x) => x.user_id === r.user_id).length >= 30) return reply(400, { code: '23514', message: 'list check' });
+            if (t.some((x) => x.user_id === r.user_id && x.name.toLowerCase() === nm.toLowerCase())) return reply(409, { code: '23505', message: 'duplicate key' });
+            const row = { id: 'nl' + (db.seq = (db.seq || 0) + 1), user_id: r.user_id, name: nm }; t.push(row); out.push(row);
+          } else return reply(404, { message: 'no insert route ' + mm[1] });
+          (db.inserted = db.inserted || []).push({ table: mm[1], row: r });
+        }
+        return reply(201, h.Prefer === 'return=representation' ? out : undefined);
+      }
       if (m === 'PATCH') {
         assert.strictEqual(h.Prefer, 'return=minimal');
+        if (mm[1] === 'imports') {
+          const id = /^eq\.(.+)$/.exec(q.get('id'))[1], body = JSON.parse(opts.body);
+          assert.deepStrictEqual(Object.keys(body).sort(), ['added', 'done_at', 'found', 'note', 'status'], 'the job writes the result columns only');
+          assert.strictEqual(q.get('status'), 'eq.pending', 'only a still-pending import is marked');
+          const row = t.find((r) => r.id === id && r.status === 'pending'); if (!row) return reply(204);
+          if (db.importPatchFail) return reply(500, { message: 'db error' });
+          Object.assign(row, body); return reply(204);
+        }
         if (mm[1] === 'access_requests') {
           const em = /^eq\.(.+)$/.exec(q.get('email'))[1];
           assert.strictEqual(Object.keys(JSON.parse(opts.body)).length, 1, 'only one *_notified_at column is written');
@@ -1101,6 +1142,409 @@ test('run: no backfill for prisjagt products, failed checks, missing column, nam
   const res = await R.run(wbCtx(db2, { [BED_URL]: shopHtml('shop-jsonld-single') }, async () => { throw new TypeError('boom'); }));
   assert.strictEqual(res.stats.written, 1); assert.strictEqual(db2.products[0].history.length, 1); assert.strictEqual(db2.products[0].backfill_state.result, 'retry');
   assert(R.backfillDue({ backfill_state: null }, NOW) && !R.backfillDue({}, NOW) && !R.backfillDue({ backfill_state: { result: 'done' } }, NOW) && R.MAX_BACKFILL === 2);
+});
+
+// ---------------------------------------------------------------- Onskeskyen: import of a shared wish list
+
+const ONSKE = require('./lib/onskeskyen');
+const { makeClient } = require('./lib/supabase');
+// the real answer of the public page for the test list (12 wishes); our own smaller query returns the same wish fields
+const WISHES = JSON.parse(fs.readFileSync(path.join(FIX, 'onskeskyen-wishes.json'), 'utf8')).data.wishlist.wishes.data
+  .map((w) => ({ id: w.id, title: w.title, price: w.price, currency: w.currency, url: w.url }));
+const LIST_ID = '4seSLtIddxXUVB2Z';
+const HASH_URL = 'https://api.gowish.com/graphql/aa669a674603b59c80ba4bf22e4c64db';
+const jsonResp = (status, obj) => resp(status, typeof obj === 'string' ? obj : JSON.stringify(obj));
+const ALLOWED_HOST = /^((www\.)?(onskeskyen\.dk|gowish\.com)|api\.gowish\.com)$/;
+
+// The wish-list site. /s/<code> redirects (onskeskyen.dk -> gowish.com -> /wishlists/<id>); the API answers 308 to /graphql/<hash>
+// and then JSON by cursor and limit. Every request is recorded; a request to any other host is recorded in .foreign and refused.
+function onskeWeb(o) {
+  o = o || {};
+  const lists = o.lists || { [LIST_ID]: { title: 'Fødselsdagsønsker', accessLevel: 'Public', wishes: WISHES } };
+  const shorts = o.shorts || { e0mfx8: LIST_ID };
+  const calls = [], foreign = [];
+  const fn = async (url, init) => {
+    init = init || {};
+    const u = new URL(url), method = init.method || 'GET';
+    calls.push({ url, method, body: init.body, headers: init.headers || {}, signal: init.signal, redirect: init.redirect });
+    if (!ALLOWED_HOST.test(u.hostname)) { foreign.push(url); return resp(500, ''); }
+    if (o.throws) throw new Error('ECONNRESET');
+    if (o.hang) return new Promise((resolve, reject) => init.signal.addEventListener('abort', () => { const e = new Error('aborted'); e.name = 'AbortError'; reject(e); }));
+    if (u.hostname === 'api.gowish.com') {
+      if (method !== 'POST') return resp(405, '');
+      if (o.apiStatus) return resp(o.apiStatus, o.apiBody || 'nej');
+      if (u.pathname === '/graphql' && !o.noRedirect) return resp(308, '', { location: o.apiLocation || HASH_URL });
+      if (!/^\/graphql(\/[0-9a-f]+)?$/.test(u.pathname)) return resp(404, '');
+      if (o.apiHtml) return resp(200, '<html><title>Just a moment...</title></html>');
+      if (o.apiErrors) return jsonResp(200, { errors: o.apiErrors, data: null });
+      const b = JSON.parse(init.body), L = lists[b.variables.id];
+      if (!L) return jsonResp(200, { errors: [{ message: 'Wishlist with id "{id}" does not exists', path: ['wishlist'], extensions: { code: 404, serviceName: 'wishlists' } }], data: null });
+      if (o.nullList) return jsonResp(200, { data: { wishlist: null } });
+      const c = b.variables.input.cursor, n = b.variables.input.limit, data = L.wishes.slice(c, c + n);
+      return jsonResp(200, { data: { wishlist: { id: b.variables.id, title: L.title, accessLevel: L.accessLevel, wishes: { data, totalCount: L.wishes.length, nextCursor: c + n < L.wishes.length ? c + n : 0 } } } });
+    }
+    if (o.shortStatus) return resp(o.shortStatus, '');
+    const m = /^\/s\/([A-Za-z0-9_-]+)$/.exec(u.pathname);
+    if (!m || !(m[1] in shorts)) return resp(404, '');
+    if (o.shortLocation) return resp(307, '', { location: o.shortLocation });
+    if (o.shortOk) return resp(200, '<html>en side</html>');
+    if (u.hostname.replace(/^www\./, '') === 'onskeskyen.dk') return resp(307, '', { location: o.loop ? 'https://onskeskyen.dk/s/' + m[1] : 'https://gowish.com/s/' + m[1] });
+    return resp(307, '', { location: o.loop ? 'https://onskeskyen.dk/s/' + m[1] : 'https://onskeskyen.dk/wishlists/' + shorts[m[1]] + '?sharedBy=9lflg7q4Ybu7D4cx&utm_source=shortlink&utm_id=' + m[1] });
+  };
+  fn.calls = calls; fn.foreign = foreign;
+  fn.posts = () => calls.filter((c) => c.method === 'POST');
+  fn.gets = () => calls.filter((c) => c.method === 'GET');
+  return fn;
+}
+
+let impSeq = 0;
+function importsDb(web, extra) {
+  const db = newDb();
+  db.imports = []; db.lists = []; db.web = web; db.urls = [];
+  return Object.assign(db, extra || {});
+}
+function impRow(db, url, extra) {
+  const r = Object.assign({ id: 'i' + (++impSeq), user_id: 'u1', list_id: null, url, status: 'pending', note: null, found: null, added: null, created_at: '2026-11-16T09:' + String(impSeq).padStart(2, '0') + ':00Z', done_at: null }, extra || {});
+  db.imports.push(r); return r;
+}
+async function runImp(db, extra) {
+  const pauses = [], logs = [];
+  const stats = await ONSKE.runImports(Object.assign({
+    sb: makeClient('https://x.supabase.test', SERVICE_KEY, makeFake(db)), fetch: makeFake(db), now: () => NOW,
+    sleep: async (ms) => { pauses.push(ms); }, log: (l) => logs.push(l),
+  }, extra || {}));
+  return { stats, pauses, logs };
+}
+const SHARE = 'https://onskeskyen.dk/s/e0mfx8';
+const mine = (db, u) => db.products.filter((p) => p.user_id === (u || 'u1'));
+
+test('onskeskyen: only wish-list links are recognised', () => {
+  const P = ONSKE.parseListUrl;
+  assert.deepStrictEqual(P(SHARE), { short: SHARE });
+  assert.deepStrictEqual(P('https://www.gowish.com/s/e0mfx8?x=1#y'), { short: 'https://www.gowish.com/s/e0mfx8' });
+  assert.deepStrictEqual(P('https://ONSKESKYEN.dk/s/abc_DEF-1/'), { short: 'https://onskeskyen.dk/s/abc_DEF-1/' });
+  for (const u of ['https://onskeskyen.dk/wishlists/' + LIST_ID, 'https://onskeskyen.dk/wishlists/' + LIST_ID + '?sharedBy=9lflg7q4Ybu7D4cx&utm_source=shortlink',
+    'https://onskeskyen.dk/da/wishlists/' + LIST_ID, 'https://www.onskeskyen.dk/da-DK/wishlists/' + LIST_ID + '/', 'https://gowish.com/en/wishlists/' + LIST_ID, 'https://www.gowish.com/wishlists/' + LIST_ID]) {
+    assert.deepStrictEqual(P(u), { id: LIST_ID }, u);
+  }
+  for (const u of ['http://onskeskyen.dk/s/e0mfx8', 'https://onskeskyen.dk.evil.com/s/e0mfx8', 'https://evil.com/onskeskyen.dk/s/e0mfx8', 'https://onskeskyen.dk@evil.com/s/e0mfx8',
+    'https://user:pw@onskeskyen.dk/s/e0mfx8', 'https://onskeskyen.dk:8443/s/e0mfx8', 'https://api.gowish.com/graphql', 'https://shop.onskeskyen.dk/s/e0mfx8', 'https://onskeskyen.dk/',
+    'https://onskeskyen.dk/s/', 'https://onskeskyen.dk/wishlists/', 'https://onskeskyen.dk/profile/abc', 'https://onskeskyen.dk/s/a/b', 'https://onskeskyen.dk/x/y/wishlists/abc',
+    'https://prisjagt.dk/s/e0mfx8', 'https://bedrenaetter.dk/wishlists/abc', 'ftp://onskeskyen.dk/s/abc', 'onskeskyen.dk/s/abc', '', null, undefined, 42]) {
+    assert.strictEqual(P(u), null, String(u));
+  }
+});
+
+test('onskeskyen: wish links, names and the comparison key', () => {
+  const C = ONSKE.cleanWishUrl;
+  assert.strictEqual(C('https://www.toejeksperten.dk/p/x/30-305044lt#queryId=f823ce'), 'https://www.toejeksperten.dk/p/x/30-305044lt', 'fragment removed');
+  assert.strictEqual(C('https://spilforsyningen.dk/products/dice?gad_campaignid=1987&variant=5536&utm_source=a&utm_medium=b&gclid=1&fbclid=2'), 'https://spilforsyningen.dk/products/dice?variant=5536', 'tracking removed, variant kept');
+  assert.strictEqual(C('  https://shop.dk/a b '), 'https://shop.dk/a%20b');
+  for (const u of ['http://shop.dk/x', 'javascript:alert(1)', 'data:text/html,x', 'https://127.0.0.1/x', 'https://10.0.0.1/x', 'https://shop/x', 'https://localhost/x', 'https://user:pw@shop.dk/x', 'https://shop.dk:8080/x',
+    'https://shop.dk/' + 'x'.repeat(500), '', '   ', null, undefined, 5, {}]) assert.strictEqual(C(u), null, String(u).slice(0, 40));
+  assert.strictEqual(C('https://www.prisjagt.dk/produkt/x?utm_source=y'), 'https://prisjagt.dk/produkt/x', 'a prisjagt.dk page is fine, written without www.');
+  assert.strictEqual(C('https://prisjagt.dk/'), null);
+  const K = ONSKE.urlKey;
+  assert.strictEqual(K('https://www.shop.dk/p/1/?utm_source=x#a'), K('https://shop.dk/p/1'));
+  assert.strictEqual(K('https://shop.dk/p?a=1&b=2'), K('https://SHOP.dk/p?b=2&a=1&gclid=9'));
+  assert.notStrictEqual(K('https://shop.dk/p?variant=1'), K('https://shop.dk/p?variant=2'));
+  assert.notStrictEqual(K('https://shop.dk/p/1'), K('https://shop.dk/p/2'));
+  assert.strictEqual(K('not a url'), null);
+  const N = ONSKE.cleanName;
+  assert.strictEqual(N('  <script>alert(1)</script>\n x\t'), '<script>alert(1)</script> x');
+  assert.strictEqual(N('a\u0000b\u0007c d'), 'a b c d');
+  assert.strictEqual(Array.from(N('é'.repeat(200))).length, 140);
+  assert.strictEqual(Array.from(N('😀'.repeat(200))).length, 140, 'counted in characters, not code units');
+  assert.strictEqual(N('x'.repeat(60), 40).length, 40);
+  assert.strictEqual(N(null), ''); assert.strictEqual(N(7), ''); assert.strictEqual(N('   '), '');
+});
+
+test('onskeskyen: a share link becomes products on a new list named after the wish list', async () => {
+  const web = onskeWeb(), db = importsDb(web);
+  const imp = impRow(db, SHARE);
+  db.products.push(product('old', 'u1', 'dyson'), product('other', 'u2', 'dyson'));
+  const { stats, pauses } = await runImp(db);
+  assert.deepStrictEqual(web.calls.map((c) => c.method + ' ' + c.url), ['GET ' + SHARE, 'GET https://gowish.com/s/e0mfx8', 'POST https://api.gowish.com/graphql', 'POST ' + HASH_URL], 'resolve (2 redirects), then the API (308, then the same POST again)');
+  assert.deepStrictEqual(web.foreign, []);
+  web.calls.forEach((c) => { assert.strictEqual(c.redirect, 'manual'); assert(c.signal, 'every request has a timeout'); assert.strictEqual(c.headers['User-Agent'], PJ.UA); assert(!('Cookie' in c.headers) && !('Authorization' in c.headers)); });
+  const body = JSON.parse(web.posts()[1].body);
+  assert.strictEqual(body.operationName, 'getWishlistWishes'); assert.strictEqual(body.variables.id, LIST_ID); assert.deepStrictEqual(body.variables.input, { cursor: 0, limit: 30 });
+  assert.strictEqual(body.query, ONSKE.QUERY); assert(!/u1|supabase|anna/i.test(web.posts()[1].body), 'nothing about the user is sent');
+  assert.deepStrictEqual(pauses, [1000, 1000, 1000], 'a pause before every request but the first');
+  assert.deepStrictEqual(stats, { pending: 1, done: 1, error: 0, added: 12, missing: false });
+  const made = db.lists.filter((l) => l.user_id === 'u1');
+  assert.strictEqual(made.length, 1); assert.strictEqual(made[0].name, 'Fødselsdagsønsker');
+  const added = mine(db).filter((p) => p.id !== 'old');
+  assert.strictEqual(added.length, 12); assert.strictEqual(mine(db, 'u2').length, 1);
+  added.forEach((p, i) => {
+    assert.strictEqual(p.name, WISHES[i].title); assert.strictEqual(p.status, 'pending'); assert.strictEqual(p.target_type, 'auto'); assert.strictEqual(p.target_value, null);
+    assert.strictEqual(p.active, true); assert.strictEqual(p.list_id, made[0].id); assert.strictEqual(p.user_id, 'u1');
+  });
+  assert.strictEqual(added[0].source_url, 'https://www.boozt.com/dk/da/bruun-stengade/bs-izaro-regular-fit-jacket_33035506/231902220');
+  assert.strictEqual(added[1].source_url, 'https://www.toejeksperten.dk/p/lindbergh-overshirt/30-305044/30-305044lt-grey-mix', 'fragment removed');
+  assert.strictEqual(added[4].source_url, 'https://www.toejeksperten.dk/p/lindbergh-chinos/30-005044/30-005044dk-blue', 'gad_campaignid removed');
+  assert.strictEqual(added[7].source_url, 'https://spilforsyningen.dk/products/warhammer-40k-world-eaters-dice?variant=55362212036991', 'the variant stays');
+  assert(added.every((p) => !/#|gad_|utm_|gclid|fbclid/.test(p.source_url)));
+  const r = db.imports[0];
+  assert.strictEqual(r.status, 'done'); assert.strictEqual(r.found, 12); assert.strictEqual(r.added, 12); assert(r.done_at);
+  assert.strictEqual(r.note, 'De er lagt på en ny liste, Fødselsdagsønsker.'); assert.strictEqual(imp.id, r.id);
+});
+
+test('onskeskyen: a /wishlists/<id> link needs no lookup of the id; the API may answer 200 straight away', async () => {
+  for (const u of ['https://onskeskyen.dk/wishlists/' + LIST_ID, 'https://onskeskyen.dk/da/wishlists/' + LIST_ID + '?sharedBy=9lf&utm_source=shortlink', 'https://www.gowish.com/en/wishlists/' + LIST_ID]) {
+    const web = onskeWeb(), db = importsDb(web); impRow(db, u);
+    const { pauses } = await runImp(db);
+    assert.deepStrictEqual(web.gets(), [], 'no page request: ' + u); assert.strictEqual(web.posts().length, 2);
+    assert.deepStrictEqual(pauses, [1000]); assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(mine(db).length, 12);
+  }
+  const web = onskeWeb({ noRedirect: true }), db = importsDb(web); impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  await runImp(db);
+  assert.strictEqual(web.calls.length, 1); assert.strictEqual(web.calls[0].url, 'https://api.gowish.com/graphql'); assert.strictEqual(db.imports[0].added, 12);
+});
+
+test('onskeskyen: redirects are followed only inside the allowed hosts, at most 5, and never to another host', async () => {
+  const bad = async (o, expectNote, expectCalls) => {
+    const web = onskeWeb(o), db = importsDb(web); impRow(db, o.url || SHARE);
+    await runImp(db);
+    assert.deepStrictEqual(web.foreign, [], 'no request to a foreign host: ' + JSON.stringify(Object.keys(o)));
+    assert.strictEqual(db.imports[0].status, 'error'); assert.strictEqual(db.imports[0].note, expectNote); assert.strictEqual(mine(db).length, 0);
+    if (expectCalls != null) assert.strictEqual(web.calls.length, expectCalls);
+    return web;
+  };
+  await bad({ shortLocation: 'https://evil.example.com/wishlists/' + LIST_ID }, ONSKE.NOTE.unavailable, 1);
+  await bad({ shortLocation: 'https://onskeskyen.dk.evil.com/wishlists/' + LIST_ID }, ONSKE.NOTE.unavailable, 1);
+  await bad({ shortLocation: 'http://onskeskyen.dk/wishlists/' + LIST_ID }, ONSKE.NOTE.unavailable, 1);
+  await bad({ shortLocation: 'https://api.gowish.com/graphql' }, ONSKE.NOTE.unavailable, 1);
+  await bad({ shortLocation: 'https://user:pw@onskeskyen.dk/wishlists/' + LIST_ID }, ONSKE.NOTE.unavailable, 1);
+  await bad({ loop: true }, ONSKE.NOTE.unavailable, 6);                           // the first request and 5 redirects, then it gives up
+  await bad({ apiLocation: 'https://evil.example.com/graphql/abc' , url: 'https://onskeskyen.dk/wishlists/' + LIST_ID }, ONSKE.NOTE.unavailable, 1);
+  await bad({ apiLocation: 'https://api.gowish.com.evil.com/graphql/abc', url: 'https://onskeskyen.dk/wishlists/' + LIST_ID }, ONSKE.NOTE.unavailable, 1);
+  await bad({ apiLocation: 'https://onskeskyen.dk/graphql/abc', url: 'https://onskeskyen.dk/wishlists/' + LIST_ID }, ONSKE.NOTE.unavailable, 1);
+  await bad({ shortOk: true }, ONSKE.NOTE.private, 1);                             // a page, no wish list behind it
+  await bad({ shorts: {} }, ONSKE.NOTE.private, 1);                                // 404
+  // a relative Location is resolved against the current page and accepted when it stays on the list hosts
+  const web = onskeWeb({ shortLocation: '/wishlists/' + LIST_ID + '?x=1' }), db = importsDb(web); impRow(db, SHARE);
+  await runImp(db); assert.strictEqual(db.imports[0].status, 'done'); assert.deepStrictEqual(web.foreign, []);
+});
+
+test('onskeskyen: pagination by nextCursor (page size 30), the endpoint from the 308 is reused, at most 60 wishes', async () => {
+  const many = (n) => Array.from({ length: n }, (_, i) => ({ id: 'w' + i, title: 'Ønske ' + i, price: 100 + i, currency: 'DKK', url: 'https://www.butik' + (i % 7) + '.dk/vare-' + i }));
+  let web = onskeWeb({ lists: { [LIST_ID]: { title: 'Mange', accessLevel: 'Public', wishes: many(35) } } }), db = importsDb(web); impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  await runImp(db);
+  assert.deepStrictEqual(web.posts().map((c) => [c.url, JSON.parse(c.body).variables.input.cursor]), [['https://api.gowish.com/graphql', 0], [HASH_URL, 0], [HASH_URL, 30]]);
+  assert.strictEqual(db.imports[0].found, 35); assert.strictEqual(db.imports[0].added, 35); assert.strictEqual(mine(db).length, 35);
+  // 70 wishes: only the first 60 are read (two pages), the rest is said in the note; the cap of 40 products then applies
+  web = onskeWeb({ lists: { [LIST_ID]: { title: 'Mange', accessLevel: 'Public', wishes: many(70) } } }); db = importsDb(web); impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  await runImp(db);
+  assert.deepStrictEqual(web.posts().map((c) => JSON.parse(c.body).variables.input.cursor), [0, 0, 30], 'no third page');
+  assert.strictEqual(db.imports[0].found, 60); assert.strictEqual(db.imports[0].added, 40);
+  assert(/^Der var kun plads til 40 af 60 ønsker\. Du kan højst følge 40 varer\. Kun de første 60 ønsker blev hentet\./.test(db.imports[0].note), db.imports[0].note);
+  // a server that keeps answering the same cursor does not loop
+  web = onskeWeb({ lists: { [LIST_ID]: { title: 'X', accessLevel: 'Public', wishes: many(3) } } });
+  const orig = web; const looping = async (url, init) => { const r = await orig(url, init); return r.status === 200 && init.method === 'POST' ? jsonResp(200, JSON.parse(await r.text(), (k, v) => (k === 'nextCursor' ? 0 : v))) : r; };
+  looping.calls = orig.calls; db = importsDb(looping); impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  await runImp(db); assert.strictEqual(db.imports[0].added, 3);
+});
+
+test('onskeskyen: wishes already followed, or listed twice, are skipped (links compared without tracking, www and fragment)', async () => {
+  const web = onskeWeb({ lists: { [LIST_ID]: { title: 'Dubletter', accessLevel: 'Public', wishes: WISHES.concat([Object.assign({}, WISHES[0], { id: 'again', url: WISHES[0].url + '?utm_medium=mail#x' })]) } } });
+  const db = importsDb(web); impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  db.products.push(product('a', 'u1', 'dyson', { source_url: 'https://proshop.dk/Klimaventilator/Xiaomi-Mi-Air-Purifier-4/3064179?utm_source=x' }));
+  db.products.push(product('b', 'u1', 'dyson', { source_url: 'https://adidas.dk/stan-smith-sko/M20325.html/' }));
+  db.products.push(product('c', 'u2', 'dyson', { source_url: WISHES[2].url }));            // someone else's product does not count
+  db.products.push(product('d', 'u1', 'dyson', { source_url: null, name: 'kun navn', status: 'pending' }));
+  await runImp(db);
+  assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(db.imports[0].found, 13); assert.strictEqual(db.imports[0].added, 10);
+  assert(/^3 ønsker fandtes allerede\./.test(db.imports[0].note), db.imports[0].note);
+  const urls = db.inserted.filter((x) => x.table === 'products').map((x) => x.row.source_url);
+  assert.strictEqual(new Set(urls).size, urls.length, 'no link twice'); assert.strictEqual(urls.filter((u) => /boozt/.test(u)).length, 1);
+  assert(!urls.some((u) => /adidas|Xiaomi/.test(u)));
+  // run again: everything is already followed
+  impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  await runImp(db);
+  const second = db.imports[1]; assert.strictEqual(second.status, 'done'); assert.strictEqual(second.added, 0); assert(/^13 ønsker fandtes allerede\./.test(second.note), second.note);
+  assert.strictEqual(mine(db).length, 3 + 10);
+});
+
+test('onskeskyen: at most 40 products per person; the note says how many fitted', async () => {
+  const web = onskeWeb(), db = importsDb(web); impRow(db, SHARE);
+  for (let i = 0; i < 33; i++) db.products.push(product('m' + i, 'u1', 'dyson', { source_url: i % 3 ? 'https://shop.dk/x' + i : null, active: i % 5 !== 0 }));   // name-only and inactive ones count too
+  for (let i = 0; i < 40; i++) db.products.push(product('o' + i, 'u2', 'dyson'));          // another person at the cap does not matter
+  await runImp(db);
+  assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(db.imports[0].found, 12); assert.strictEqual(db.imports[0].added, 7);
+  assert(db.imports[0].note.indexOf('Der var kun plads til 7 af 12 ønsker. Du kan højst følge 40 varer.') === 0, db.imports[0].note);
+  assert.strictEqual(mine(db).length, 40); assert.strictEqual(db.inserted.filter((x) => x.table === 'products').length, 7);
+  assert.strictEqual(db.inserted.filter((x) => x.table === 'products')[0].row.name, WISHES[0].title, 'the first wishes are the ones added');
+  // one request for all rows
+  // at the cap: an error, nothing added
+  const other = { 'ZZZ': { title: 'En anden', accessLevel: 'Public', wishes: [{ id: 'z', title: 'Noget andet', url: 'https://nyt.dk/a' }] } };
+  const web2 = onskeWeb({ lists: other }); db.web = web2; impRow(db, 'https://onskeskyen.dk/wishlists/ZZZ');
+  await runImp(db);
+  assert.strictEqual(db.imports[1].status, 'error'); assert.strictEqual(db.imports[1].note, ONSKE.NOTE.full); assert.strictEqual(db.imports[1].added, 0); assert.strictEqual(mine(db).length, 40);
+});
+
+test('onskeskyen: the rows are inserted in one request, as a browser would have added them', async () => {
+  const web = onskeWeb(), db = importsDb(web); impRow(db, SHARE);
+  const bodies = []; const f = makeFake(db);
+  await ONSKE.runImports({ sb: makeClient('https://x.supabase.test', SERVICE_KEY, async (u, o) => { if (o && o.method === 'POST' && /\/products$/.test(u)) bodies.push(JSON.parse(o.body)); return f(u, o); }), fetch: f, now: () => NOW, sleep: async () => {}, log: () => {} });
+  assert.strictEqual(bodies.length, 1); assert.strictEqual(bodies[0].length, 12);
+  assert.deepStrictEqual(Object.keys(bodies[0][0]).sort(), ['active', 'list_id', 'name', 'source_url', 'status', 'target_type', 'target_value', 'user_id']);
+});
+
+test('onskeskyen: list choice (given list, reuse by name, 30-list cap, other people\'s lists, long and empty titles)', async () => {
+  const one = (title) => ({ [LIST_ID]: { title, accessLevel: 'Public', wishes: WISHES.slice(0, 2) } });
+  const go = async (o, setup, imp) => { const web = onskeWeb(o), db = importsDb(web); setup && setup(db); impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID, imp); await runImp(db); return db; };
+  // the import has a list: used as it is, no list is created
+  let db = await go({ lists: one('Egen titel') }, (d) => d.lists.push({ id: 'L9', user_id: 'u1', name: 'Julegaver' }), { list_id: 'L9' });
+  assert.deepStrictEqual(mine(db).map((p) => p.list_id), ['L9', 'L9']); assert.strictEqual(db.lists.length, 1); assert.strictEqual(db.imports[0].note, null);
+  // none: a list with the title's name, reused regardless of case
+  db = await go({ lists: one('Fødselsdagsønsker') }, (d) => d.lists.push({ id: 'L1', user_id: 'u1', name: 'FØDSELSDAGSØNSKER' }, { id: 'L2', user_id: 'u1', name: 'Andet' }));
+  assert.deepStrictEqual(mine(db).map((p) => p.list_id), ['L1', 'L1']); assert.strictEqual(db.lists.length, 2);
+  assert.strictEqual(db.imports[0].note, 'De er lagt på listen FØDSELSDAGSØNSKER.');
+  // someone else's list of the same name is not used
+  db = await go({ lists: one('Fødselsdagsønsker') }, (d) => d.lists.push({ id: 'LX', user_id: 'u2', name: 'Fødselsdagsønsker' }));
+  assert.strictEqual(db.lists.length, 2); assert(mine(db).every((p) => /^nl/.test(p.list_id)));
+  // the title is trimmed to 40 characters
+  db = await go({ lists: one('  ' + 'æ'.repeat(60) + '  ') });
+  assert.strictEqual(db.lists[0].name, 'æ'.repeat(40));
+  // an empty title: no list
+  db = await go({ lists: one('   ') });
+  assert.strictEqual(db.lists.length, 0); assert.deepStrictEqual(mine(db).map((p) => p.list_id), [null, null]); assert.strictEqual(db.imports[0].status, 'done');
+  // 30 lists already: the products are added without a list
+  db = await go({ lists: one('Ny titel') }, (d) => { for (let i = 0; i < 30; i++) d.lists.push({ id: 'X' + i, user_id: 'u1', name: 'Liste ' + i }); });
+  assert.strictEqual(db.lists.length, 30); assert.deepStrictEqual(mine(db).map((p) => p.list_id), [null, null]); assert.strictEqual(db.imports[0].added, 2);
+  assert(/30 lister/.test(db.imports[0].note), db.imports[0].note);
+  // nothing to add: no empty list is created
+  db = await go({ lists: one('Tom nu') }, (d) => { d.products.push(product('a', 'u1', 'dyson', { source_url: WISHES[0].url }), product('b', 'u1', 'dyson', { source_url: WISHES[1].url })); });
+  assert.strictEqual(db.lists.length, 0); assert.strictEqual(db.imports[0].added, 0);
+  // creating the list fails: the products are still added, without a list
+  db = await go({ lists: one('Ny') }, (d) => { d.insertFail = 'lists'; });
+  assert.strictEqual(db.imports[0].status, 'done'); assert.deepStrictEqual(mine(db).map((p) => p.list_id), [null, null]);
+});
+
+test('onskeskyen: private, missing, blocked and broken answers become Danish notes; nothing is retried or worked around', async () => {
+  const cases = [
+    ['not found (API error 404)', { lists: {} }, ONSKE.NOTE.private, 2],
+    ['wishlist null', { nullList: true }, ONSKE.NOTE.private, 2],
+    ['not public', { lists: { [LIST_ID]: { title: 'Privat', accessLevel: 'Private', wishes: WISHES } } }, ONSKE.NOTE.private, 2],
+    ['accessLevel LinkOnly', { lists: { [LIST_ID]: { title: 'Privat', accessLevel: 'LinkOnly', wishes: WISHES } } }, ONSKE.NOTE.private, 2],
+    ['API error 403', { apiErrors: [{ message: 'Forbidden', extensions: { code: 403 } }] }, ONSKE.NOTE.private, 2],
+    ['API error 500', { apiErrors: [{ message: 'Internal server error', extensions: { code: 500 } }] }, ONSKE.NOTE.unavailable, 2],
+    ['429', { apiStatus: 429 }, ONSKE.NOTE.unavailable, 1], ['403', { apiStatus: 403 }, ONSKE.NOTE.unavailable, 1], ['401', { apiStatus: 401 }, ONSKE.NOTE.unavailable, 1],
+    ['500', { apiStatus: 500 }, ONSKE.NOTE.unavailable, 1], ['503', { apiStatus: 503, apiBody: 'Vedligehold' }, ONSKE.NOTE.unavailable, 1], ['404 from the API itself', { apiStatus: 404 }, ONSKE.NOTE.unavailable, 1],
+    ['challenge page', { apiHtml: true }, ONSKE.NOTE.unavailable, 2],
+    ['connection error', { throws: true }, ONSKE.NOTE.unavailable, 1],
+  ];
+  for (const [name, o, note, posts] of cases) {
+    const web = onskeWeb(o), db = importsDb(web); impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+    await runImp(db);
+    const r = db.imports[0];
+    assert.strictEqual(r.status, 'error', name); assert.strictEqual(r.note, note, name); assert.strictEqual(r.added, null, name); assert.strictEqual(r.found, null, name); assert(r.done_at, name);
+    assert.strictEqual(web.calls.length, posts, name + ': no retry, no other request'); assert.deepStrictEqual(web.foreign, []);
+    assert.strictEqual(db.products.length, 0, name); assert.strictEqual(db.lists.length, 0, name);
+  }
+  // the share link itself: 429/403/5xx on the page, 404
+  for (const [st, note] of [[429, ONSKE.NOTE.unavailable], [403, ONSKE.NOTE.unavailable], [503, ONSKE.NOTE.unavailable], [404, ONSKE.NOTE.private], [410, ONSKE.NOTE.private]]) {
+    const web = onskeWeb({ shortStatus: st }), db = importsDb(web); impRow(db, SHARE);
+    await runImp(db); assert.strictEqual(db.imports[0].note, note, 'share link ' + st); assert.strictEqual(web.calls.length, 1);
+  }
+  // a request that takes too long is cut off
+  const web = onskeWeb({ hang: true }), db = importsDb(web); impRow(db, SHARE);
+  await runImp(db, { timeoutMs: 20 }); assert.strictEqual(db.imports[0].status, 'error'); assert.strictEqual(db.imports[0].note, ONSKE.NOTE.unavailable); assert.strictEqual(web.calls.length, 1);
+  // an empty wish list
+  const w3 = onskeWeb({ lists: { [LIST_ID]: { title: 'Tom', accessLevel: 'Public', wishes: [] } } }), d3 = importsDb(w3); impRow(d3, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  await runImp(d3); assert.strictEqual(d3.imports[0].status, 'error'); assert.strictEqual(d3.imports[0].note, ONSKE.NOTE.empty); assert.strictEqual(d3.imports[0].found, 0); assert.strictEqual(d3.lists.length, 0);
+  // saving the products fails: an error note, the person can try again
+  const w4 = onskeWeb(), d4 = importsDb(w4, { insertFail: 'products' }); impRow(d4, SHARE);
+  await runImp(d4); assert.strictEqual(d4.imports[0].status, 'error'); assert.strictEqual(d4.imports[0].note, ONSKE.NOTE.saveFail);
+});
+
+test('onskeskyen: titles and links from the wish list are untrusted: only stored as JSON values, cleaned, never in a URL', async () => {
+  const wishes = [
+    { id: '1', title: '<script>alert(1)</script> & "x" \'y\'', url: 'https://shop.dk/p?a=1' },
+    { id: '2', title: 'Uden link', url: 'javascript:alert(1)' },
+    { id: '3', title: 'Http link', url: 'http://shop.dk/x' },
+    { id: '4', title: '   ', url: 'https://shop.dk/skip' },
+    { id: '5', title: null, url: 'https://shop.dk/skip2' },
+    { id: '6', title: 'IP-adresse', url: 'https://10.0.0.1/x' },
+    { id: '7', title: 'Linjeskift\n\u0007og styretegn', url: 'https://shop.dk/q?x=1&utm_source=a' },
+    { id: '8', title: 'L'.repeat(300), url: 'https://shop.dk/' + 'l'.repeat(600) },
+    { id: '9', title: '=1+1', url: { evil: true } },
+    { id: '10', title: 'Rest' },
+    null, 'tekst', 42,
+  ];
+  const web = onskeWeb({ lists: { [LIST_ID]: { title: '<img src=x onerror=alert(1)>', accessLevel: 'Public', wishes } } }), db = importsDb(web); impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  await runImp(db);
+  const rows = db.inserted.filter((x) => x.table === 'products').map((x) => x.row);
+  assert.deepStrictEqual(rows.map((r) => r.name), ['<script>alert(1)</script> & "x" \'y\'', 'Uden link', 'Http link', 'IP-adresse', 'Linjeskift og styretegn', 'L'.repeat(140), '=1+1', 'Rest']);
+  assert.deepStrictEqual(rows.map((r) => r.source_url), ['https://shop.dk/p?a=1', null, null, null, 'https://shop.dk/q?x=1', null, null, null], 'unusable links: the product is added by name only');
+  assert.strictEqual(db.lists[0].name, '<img src=x onerror=alert(1)>'.slice(0, 40), 'the list name is stored as text too');
+  assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(db.imports[0].added, 8);
+  assert(/2 ønsker uden navn blev sprunget over\./.test(db.imports[0].note), db.imports[0].note);
+  assert(!db.urls.some((u) => /script|alert|onerror/i.test(decodeURIComponent(u))), 'no request URL carries wish-list text');
+  assert.deepStrictEqual(web.foreign, []);
+});
+
+test('onskeskyen: at most 3 imports per run, oldest first; out of time leaves them pending', async () => {
+  const web = onskeWeb(), db = importsDb(web);
+  for (let i = 0; i < 5; i++) impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID, { user_id: 'u' + (i + 1) });
+  db.imports.reverse();                                                                  // stored in another order than created_at
+  const { stats } = await runImp(db);
+  assert.strictEqual(stats.pending, 3); assert.strictEqual(stats.done, 3);
+  assert.deepStrictEqual(db.imports.filter((r) => r.status === 'pending').map((r) => r.user_id).sort(), ['u4', 'u5']);
+  assert.strictEqual(ONSKE.MAX_PER_RUN, 3);
+  // no time left: nothing is fetched, the import stays pending
+  const w2 = onskeWeb(), d2 = importsDb(w2); impRow(d2, SHARE);
+  const r2 = await runImp(d2, { deadlineAt: Date.now() - 1 });
+  assert.strictEqual(w2.calls.length, 0); assert.strictEqual(d2.imports[0].status, 'pending'); assert.strictEqual(r2.stats.done, 0);
+  // the result could not be written: it stays pending and is tried again (the products are not added twice: same links)
+  const w3 = onskeWeb(), d3 = importsDb(w3, { importPatchFail: true }); impRow(d3, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  await runImp(d3); assert.strictEqual(d3.imports[0].status, 'pending'); assert.strictEqual(mine(d3).length, 12);
+  d3.importPatchFail = false; await runImp(d3);
+  assert.strictEqual(d3.imports[0].status, 'done'); assert.strictEqual(mine(d3).length, 12, 'no link twice'); assert.strictEqual(d3.imports[0].added, 0);
+});
+
+test('onskeskyen: an import that is not a wish-list link is an error; a user hiding a row while it runs is harmless', async () => {
+  const web = onskeWeb(), db = importsDb(web); impRow(db, 'https://evil.example.com/s/abc');
+  await runImp(db); assert.strictEqual(db.imports[0].status, 'error'); assert.strictEqual(db.imports[0].note, ONSKE.NOTE.badUrl); assert.strictEqual(web.calls.length, 0);
+  const w2 = onskeWeb(), d2 = importsDb(w2); impRow(d2, SHARE); d2.imports[0].status = 'done';
+  const r = await runImp(d2); assert.strictEqual(r.stats.pending, 0); assert.strictEqual(w2.calls.length, 0);
+});
+
+test('run: without the imports table the job runs as before, quietly', async () => {
+  const web = onskeWeb(), db = newDb(); db.web = web;           // no db.imports: PostgREST answers PGRST205
+  db.products.push(product('A', 'u1', 'dyson'));
+  const logs = [];
+  const ctx = ctxFor(db, { [urlOf('dyson')]: pageFor('dyson') }, { log: (l) => logs.push(l) });
+  const res = await R.run(ctx);
+  assert.strictEqual(res.summary.length, 5); assert.strictEqual(res.stats.written, 1); assert.strictEqual(res.stats.imports.missing, true);
+  assert.strictEqual(web.calls.length, 0); assert(!logs.some((l) => /Ønskeliste|import/i.test(l)), logs.join('\n'));
+  // any other trouble reading the imports does not fail the run either
+  const db2 = newDb(); db2.imports = []; db2.products.push(product('A', 'u1', 'dyson'));
+  const f = makeFake(db2);
+  const ctx2 = ctxFor(db2, { [urlOf('dyson')]: pageFor('dyson') }, { fetch: async (u, o) => (/\/imports\?/.test(u) ? resp(500, '{"message":"boom"}') : f(u, o)), log: (l) => logs.push(l) });
+  const r2 = await R.run(ctx2);
+  assert.strictEqual(r2.stats.written, 1); assert(logs.some((l) => /kunne ikke læse importer/.test(l)));
+  assert.strictEqual(ONSKE.isMissingTable(Object.assign(new Error('x'), { status: 404 })), true);
+  assert.strictEqual(ONSKE.isMissingTable(new Error('GET /rest/v1/imports -> HTTP 400 {"code":"42P01"}')), true);
+  assert.strictEqual(ONSKE.isMissingTable(new Error('GET -> HTTP 500 boom')), false);
+});
+
+test('run: imports come first, so the new products get their first price in the same run', async () => {
+  const web = onskeWeb({ lists: { [LIST_ID]: { title: 'Nyt', accessLevel: 'Public', wishes: WISHES.slice(0, 3).concat([{ id: 'n', title: 'Kun navn', url: null }]) } } });
+  const db = importsDb(web); impRow(db, SHARE);
+  const pages = {};
+  WISHES.slice(0, 3).forEach((w) => { pages[ONSKE.cleanWishUrl(w.url)] = pageFor('dyson'); });
+  const ctx = ctxFor(db, pages);
+  const res = await R.run(ctx);
+  assert.strictEqual(res.stats.imports.done, 1); assert.strictEqual(res.stats.imports.added, 4); assert.strictEqual(db.imports[0].status, 'done');
+  assert.strictEqual(res.summary.length, 5);
+  assert.strictEqual(ctx.fetched.length, 3, 'the three new products with a link were fetched in this run: ' + ctx.fetched.join(' '));
+  const withLink = db.products.filter((p) => p.source_url);
+  assert.strictEqual(withLink.length, 3); assert(withLink.every((p) => p.status !== 'pending' && p.last_checked), 'first price fetched');
+  const nameOnly = db.products.filter((p) => !p.source_url);
+  assert.strictEqual(nameOnly.length, 1); assert.strictEqual(nameOnly[0].status, 'pending', 'a name-only product waits for the name lookup');
+  assert(db.products.every((p) => p.target_type === 'auto'));
 });
 
 // ---------------------------------------------------------------- live sanity check (opt-in)

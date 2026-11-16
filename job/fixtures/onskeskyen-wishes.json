@@ -1,0 +1,649 @@
+{
+ "data": {
+  "wishlist": {
+   "id": "4seSLtIddxXUVB2Z",
+   "wishes": {
+    "data": [
+     {
+      "updatedAt": "2026-05-07T18:30:30.662Z",
+      "description": "XL",
+      "id": "oPdV7A8GUlvjJcG7",
+      "price": 750,
+      "quantity": 1,
+      "photos": [
+       "https://img.gowish.com/gowish-prod-storage/files/db/bc/f2/d6/50/12/09/6b/fb/ac/877334ad4d740816b169.jpeg"
+      ],
+      "index": 32,
+      "title": "BS Izaro Regular Fit Jacket - NAVY",
+      "url": "https://www.boozt.com/dk/da/bruun-stengade/bs-izaro-regular-fit-jacket_33035506/231902220",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "qgCvLiSZRfonZ4bR",
+       "index": 31,
+       "__typename": "Wish"
+      },
+      "prev": null,
+      "product": {
+       "id": "Ym9venQuY29tL2RrL2RhL2JydXVuLXN0ZW5nYWRlL2JzLWl6YXJvLXJlZ3VsYXItZml0LWphY2tldF8zMzAzNTUwNi8yMzE5MDIyMjB7aWQ6OnYxfURL",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "Ym9venQuY29tL2RrL2RhL2JydXVuLXN0ZW5nYWRlL2JzLWl6YXJvLXJlZ3VsYXItZml0LWphY2tldF8zMzAzNTUwNi8yMzE5MDIyMjB7aWQ6OnYxfURL",
+       "uurl": "boozt.com/dk/da/bruun-stengade/bs-izaro-regular-fit-jacket_33035506/231902220",
+       "countryCode": "DK",
+       "originalUrl": "https://www.boozt.com/dk/da/bruun-stengade/bs-izaro-regular-fit-jacket_33035506/231902220",
+       "domainName": "boozt.com",
+       "price": 600,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": true,
+       "displayPrice": 600,
+       "brand": {
+        "__typename": "Brand",
+        "id": "HvTrCZTu3r9GyihM",
+        "logo": "https://img.gowish.com/gowish-prod-storage/files/b0/0d/91/d4/f1/2d/75/31/f7/ef/a142bfd1bccb4e7545d0.png",
+        "slug": "dk_boozt",
+        "isPartner": true,
+        "name": "Boozt",
+        "hasBabyCategories": false,
+        "showPriceUpdates": true,
+        "creatorCommission": null
+       }
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2026-05-07T18:25:16.334Z",
+      "description": "Tror jeg er blevet stor nok til en XL..",
+      "id": "qgCvLiSZRfonZ4bR",
+      "price": 799,
+      "quantity": 1,
+      "photos": [
+       "https://img.gowish.com/gowish-prod-storage/files/f9/45/e4/ed/1a/32/29/5a/13/81/681284f176faa2eadcc9.webp"
+      ],
+      "index": 31,
+      "title": "Lindbergh Overshirt",
+      "url": "https://www.toejeksperten.dk/p/lindbergh-overshirt/30-305044/30-305044lt-grey-mix#queryId=f823ce8a16862d599568beeaa47529cf",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "dEb7iRs2br6evbRc",
+       "index": 30,
+       "__typename": "Wish"
+      },
+      "prev": {
+       "id": "oPdV7A8GUlvjJcG7",
+       "index": 32,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "dG9lamVrc3BlcnRlbi5kay9wL2xpbmRiZXJnaC1vdmVyc2hpcnQvMzAtMzA1MDQ0LzMwLTMwNTA0NGx0LWdyZXktbWl4I3F1ZXJ5SWQ9ZjgyM2NlOGExNjg2MmQ1OTk1NjhiZWVhYTQ3NTI5Y2Z7aWQ6OnYxfURL",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "dG9lamVrc3BlcnRlbi5kay9wL2xpbmRiZXJnaC1vdmVyc2hpcnQvMzAtMzA1MDQ0LzMwLTMwNTA0NGx0LWdyZXktbWl4I3F1ZXJ5SWQ9ZjgyM2NlOGExNjg2MmQ1OTk1NjhiZWVhYTQ3NTI5Y2Z7aWQ6OnYxfURL",
+       "uurl": "toejeksperten.dk/p/lindbergh-overshirt/30-305044/30-305044lt-grey-mix#queryId=f823ce8a16862d599568beeaa47529cf",
+       "countryCode": "DK",
+       "originalUrl": "https://www.toejeksperten.dk/p/lindbergh-overshirt/30-305044/30-305044lt-grey-mix#queryId=f823ce8a16862d599568beeaa47529cf",
+       "domainName": "toejeksperten.dk",
+       "price": 399.5,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": false,
+       "displayPrice": null,
+       "brand": {
+        "__typename": "Brand",
+        "id": "tyhdhMePcuMuSMRk",
+        "logo": "https://img.gowish.com/gowish-prod-storage/files/5e/92/04/6d/e6/16/f5/11/d1/be/a0ff83235b50701ec690.png",
+        "slug": "dk_tøjeksperten",
+        "isPartner": true,
+        "name": "Tøjeksperten",
+        "hasBabyCategories": false,
+        "showPriceUpdates": false,
+        "creatorCommission": null
+       }
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2026-05-07T16:15:07.469Z",
+      "description": "Størrelse 43",
+      "id": "TEsvAyw8aaFTnFsp",
+      "price": 899,
+      "quantity": 1,
+      "photos": [
+       "https://img.gowish.com/gowish-prod-storage/files/c4/86/56/2d/f9/ef/65/5c/ed/46/baa198df8911e5917e3a.jpeg"
+      ],
+      "index": 28,
+      "title": "Stan Smith sko",
+      "url": "https://adidas.dk/stan-smith-sko/M20325.html",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "diFEvyvMZt5g04Hj",
+       "index": 27,
+       "__typename": "Wish"
+      },
+      "prev": {
+       "id": "dEb7iRs2br6evbRc",
+       "index": 30,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "YWRpZGFzLmRrL3N0YW4tc21pdGgtc2tvL00yMDMyNS5odG1se2lkOjp2MX1ESw%3D%3D",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "YWRpZGFzLmRrL3N0YW4tc21pdGgtc2tvL00yMDMyNS5odG1se2lkOjp2MX1ESw%3D%3D",
+       "uurl": "adidas.dk/stan-smith-sko/M20325.html",
+       "countryCode": "DK",
+       "originalUrl": "https://adidas.dk/stan-smith-sko/M20325.html",
+       "domainName": "adidas.dk",
+       "price": 899,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": false,
+       "displayPrice": 899,
+       "brand": {
+        "__typename": "Brand",
+        "id": "R8UWoDbRomnoYjPQ",
+        "logo": "https://img.gowish.com/gowish-prod-storage/files/8d/96/e6/e3/f4/a6/94/32/db/aa/bdbf156a6fc05dd556d1.png",
+        "slug": "adidas",
+        "isPartner": true,
+        "name": "adidas",
+        "hasBabyCategories": false,
+        "showPriceUpdates": true,
+        "creatorCommission": null
+       }
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2025-11-24T23:28:41.376Z",
+      "description": "",
+      "id": "diFEvyvMZt5g04Hj",
+      "price": 1059,
+      "quantity": 1,
+      "photos": [],
+      "index": 27,
+      "title": "Xiaomi Mi Air Purifier 4",
+      "url": "https://www.proshop.dk/Klimaventilator/Xiaomi-Mi-Air-Purifier-4/3064179",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "gqVUWWSZNQbxDSCK",
+       "index": 24,
+       "__typename": "Wish"
+      },
+      "prev": {
+       "id": "TEsvAyw8aaFTnFsp",
+       "index": 28,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "cHJvc2hvcC5kay9LbGltYXZlbnRpbGF0b3IvWGlhb21pLU1pLUFpci1QdXJpZmllci00LzMwNjQxNzl7aWQ6OnYxfURL",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "cHJvc2hvcC5kay9LbGltYXZlbnRpbGF0b3IvWGlhb21pLU1pLUFpci1QdXJpZmllci00LzMwNjQxNzl7aWQ6OnYxfURL",
+       "uurl": "proshop.dk/Klimaventilator/Xiaomi-Mi-Air-Purifier-4/3064179",
+       "countryCode": "DK",
+       "originalUrl": "https://www.proshop.dk/Klimaventilator/Xiaomi-Mi-Air-Purifier-4/3064179",
+       "domainName": "proshop.dk",
+       "price": 1499,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": false,
+       "displayPrice": null,
+       "brand": {
+        "__typename": "Brand",
+        "id": "E7VigdhaKlhhYwdF",
+        "logo": "https://img.gowish.com/gowish-prod-storage/files/52/19/8f/30/d2/1b/2b/d3/26/21/af21fa47f2c818ef6344.png",
+        "slug": "proshop",
+        "isPartner": true,
+        "name": "Proshop",
+        "hasBabyCategories": false,
+        "showPriceUpdates": true,
+        "creatorCommission": null
+       }
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2025-11-24T22:34:35.132Z",
+      "description": "W34/L30",
+      "id": "gqVUWWSZNQbxDSCK",
+      "price": 374.25,
+      "quantity": 1,
+      "photos": [
+       "https://img.gowish.com/gowish-prod-storage/files/df/37/53/ee/47/f7/a4/64/49/8a/131647bb7eb331c8c372.jpeg"
+      ],
+      "index": 24,
+      "title": "Lindbergh Chinos",
+      "url": "https://www.toejeksperten.dk/p/lindbergh-chinos/30-005044/30-005044dk-blue?gad_campaignid=18701073086",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "kInokAbsjrt8roAB",
+       "index": 23,
+       "__typename": "Wish"
+      },
+      "prev": {
+       "id": "diFEvyvMZt5g04Hj",
+       "index": 27,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "dG9lamVrc3BlcnRlbi5kay9wL2xpbmRiZXJnaC1jaGlub3MvMzAtMDA1MDQ0LzMwLTAwNTA0NGRrLWJsdWV7aWQ6OnYxfURL",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "dG9lamVrc3BlcnRlbi5kay9wL2xpbmRiZXJnaC1jaGlub3MvMzAtMDA1MDQ0LzMwLTAwNTA0NGRrLWJsdWV7aWQ6OnYxfURL",
+       "uurl": "toejeksperten.dk/p/lindbergh-chinos/30-005044/30-005044dk-blue",
+       "countryCode": "DK",
+       "originalUrl": "https://www.toejeksperten.dk/p/lindbergh-chinos/30-005044/30-005044dk-blue",
+       "domainName": "toejeksperten.dk",
+       "price": 374.25,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": false,
+       "displayPrice": null,
+       "brand": {
+        "__typename": "Brand",
+        "id": "tyhdhMePcuMuSMRk",
+        "logo": "https://img.gowish.com/gowish-prod-storage/files/5e/92/04/6d/e6/16/f5/11/d1/be/a0ff83235b50701ec690.png",
+        "slug": "dk_tøjeksperten",
+        "isPartner": true,
+        "name": "Tøjeksperten",
+        "hasBabyCategories": false,
+        "showPriceUpdates": false,
+        "creatorCommission": null
+       }
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2025-11-24T22:33:49.816Z",
+      "description": "Størrelse W34/L30, slim fit hvis det haves",
+      "id": "kInokAbsjrt8roAB",
+      "price": 374.25,
+      "quantity": 2,
+      "photos": [
+       "https://img.gowish.com/gowish-prod-storage/files/f0/c7/2b/aa/e5/d8/d4/31/57/c5/b419878592c609ad9ec6.jpeg"
+      ],
+      "index": 23,
+      "title": "Lindbergh Performance pants",
+      "url": "https://www.toejeksperten.dk/p/lindbergh-performance-pants/30-006052am/30-006052amblack?gad_campaignid=22921934293",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "6acKg6yWaWVzSE4q",
+       "index": 22,
+       "__typename": "Wish"
+      },
+      "prev": {
+       "id": "gqVUWWSZNQbxDSCK",
+       "index": 24,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "dG9lamVrc3BlcnRlbi5kay9wL2xpbmRiZXJnaC1wZXJmb3JtYW5jZS1wYW50cy8zMC0wMDYwNTJhbS8zMC0wMDYwNTJhbWJsYWNre2lkOjp2MX1ESw%3D%3D",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "dG9lamVrc3BlcnRlbi5kay9wL2xpbmRiZXJnaC1wZXJmb3JtYW5jZS1wYW50cy8zMC0wMDYwNTJhbS8zMC0wMDYwNTJhbWJsYWNre2lkOjp2MX1ESw%3D%3D",
+       "uurl": "toejeksperten.dk/p/lindbergh-performance-pants/30-006052am/30-006052amblack",
+       "countryCode": "DK",
+       "originalUrl": "https://www.toejeksperten.dk/p/lindbergh-performance-pants/30-006052am/30-006052amblack",
+       "domainName": "toejeksperten.dk",
+       "price": 374.25,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": true,
+       "displayPrice": null,
+       "brand": {
+        "__typename": "Brand",
+        "id": "tyhdhMePcuMuSMRk",
+        "logo": "https://img.gowish.com/gowish-prod-storage/files/5e/92/04/6d/e6/16/f5/11/d1/be/a0ff83235b50701ec690.png",
+        "slug": "dk_tøjeksperten",
+        "isPartner": true,
+        "name": "Tøjeksperten",
+        "hasBabyCategories": false,
+        "showPriceUpdates": false,
+        "creatorCommission": null
+       }
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2025-11-09T16:45:17.867Z",
+      "description": "",
+      "id": "RQPEKkY6PGhd2cDX",
+      "price": 296.95,
+      "quantity": 1,
+      "photos": [],
+      "index": 21,
+      "title": "Space Marines - Jump Pack Intercessors - 99120101392",
+      "url": "https://www.kelz0r.dk/magic/space-marines-jump-pack-intercessors-99120101392-p-299510.html",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "wmht0MlmCZebWHdj",
+       "index": 20,
+       "__typename": "Wish"
+      },
+      "prev": {
+       "id": "6acKg6yWaWVzSE4q",
+       "index": 22,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "a2VsejByLmRrL21hZ2ljL3NwYWNlLW1hcmluZXMtanVtcC1wYWNrLWludGVyY2Vzc29ycy05OTEyMDEwMTM5Mi1wLTI5OTUxMC5odG1se2lkOjp2MX1ESw%3D%3D",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "a2VsejByLmRrL21hZ2ljL3NwYWNlLW1hcmluZXMtanVtcC1wYWNrLWludGVyY2Vzc29ycy05OTEyMDEwMTM5Mi1wLTI5OTUxMC5odG1se2lkOjp2MX1ESw%3D%3D",
+       "uurl": "kelz0r.dk/magic/space-marines-jump-pack-intercessors-99120101392-p-299510.html",
+       "countryCode": "DK",
+       "originalUrl": "https://www.kelz0r.dk/magic/space-marines-jump-pack-intercessors-99120101392-p-299510.html",
+       "domainName": "kelz0r.dk",
+       "price": 296,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": true,
+       "displayPrice": 296,
+       "brand": {
+        "__typename": "Brand",
+        "id": "TDShygID2vl9OLrM",
+        "logo": "https://img.gowish.com/gowish-prod-storage/files/66/c7/2f/1b/7f/88/1b/9c/b6/2d/461fabcdc1481ecafb13.png",
+        "slug": "dk_kelz0r",
+        "isPartner": true,
+        "name": "Kelz0r",
+        "hasBabyCategories": false,
+        "showPriceUpdates": true,
+        "creatorCommission": null
+       }
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2025-11-09T16:19:41.604Z",
+      "description": "",
+      "id": "wmht0MlmCZebWHdj",
+      "price": 194.95,
+      "quantity": 1,
+      "photos": [
+       "https://img.gowish.com/gowish-prod-storage/files/a5/04/6d/57/6e/5a/cd/a3/41/3f/e5f4f8003f3f07e78907.webp"
+      ],
+      "index": 20,
+      "title": "Warhammer 40k: World Eaters - Dice",
+      "url": "https://spilforsyningen.dk/products/warhammer-40k-world-eaters-dice?gad_campaignid=19869172487&variant=55362212036991",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "ZhIwM0ixinXVuWA3",
+       "index": 14,
+       "__typename": "Wish"
+      },
+      "prev": {
+       "id": "RQPEKkY6PGhd2cDX",
+       "index": 21,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "c3BpbGZvcnN5bmluZ2VuLmRrL3Byb2R1Y3RzL3dhcmhhbW1lci00MGstd29ybGQtZWF0ZXJzLWRpY2U%2FdmFyaWFudD01NTM2MjIxMjAzNjk5MXtpZDo6djF9REs%3D",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "c3BpbGZvcnN5bmluZ2VuLmRrL3Byb2R1Y3RzL3dhcmhhbW1lci00MGstd29ybGQtZWF0ZXJzLWRpY2U%2FdmFyaWFudD01NTM2MjIxMjAzNjk5MXtpZDo6djF9REs%3D",
+       "uurl": "spilforsyningen.dk/products/warhammer-40k-world-eaters-dice?variant=55362212036991",
+       "countryCode": "DK",
+       "originalUrl": "https://spilforsyningen.dk/products/warhammer-40k-world-eaters-dice?variant=55362212036991",
+       "domainName": "spilforsyningen.dk",
+       "price": 194.95,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": false,
+       "displayPrice": null,
+       "brand": null
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2025-11-20T08:53:19.886Z",
+      "description": "Str. XL i Slimfit, L i regular",
+      "id": "vsNWr5kwHUMR4a3q",
+      "price": 799,
+      "quantity": 1,
+      "photos": [
+       "https://img.gowish.com/gowish-prod-storage/files/e4/f6/b0/81/af/97/f6/55/6a/e1/8e10a2ab26b09ae35cf6.jpeg"
+      ],
+      "index": 8,
+      "title": "Classic Shirt Light Blue Twill Slim",
+      "url": "https://shapingnewtomorrow.dk/collections/the-perfect-shirt/products/classic-shirt-light-blue-twill-slim?variant=39566437253190",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "i0eqpIoF40Yf21gC",
+       "index": 5,
+       "__typename": "Wish"
+      },
+      "prev": {
+       "id": "ZhIwM0ixinXVuWA3",
+       "index": 14,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "c2hhcGluZ25ld3RvbW9ycm93LmRrL2NvbGxlY3Rpb25zL3RoZS1wZXJmZWN0LXNoaXJ0L3Byb2R1Y3RzL2NsYXNzaWMtc2hpcnQtbGlnaHQtYmx1ZS10d2lsbC1zbGltP3ZhcmlhbnQ9Mzk1NjY0MzcyNTMxOTB7aWQ6OnYxfURL",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "c2hhcGluZ25ld3RvbW9ycm93LmRrL2NvbGxlY3Rpb25zL3RoZS1wZXJmZWN0LXNoaXJ0L3Byb2R1Y3RzL2NsYXNzaWMtc2hpcnQtbGlnaHQtYmx1ZS10d2lsbC1zbGltP3ZhcmlhbnQ9Mzk1NjY0MzcyNTMxOTB7aWQ6OnYxfURL",
+       "uurl": "shapingnewtomorrow.dk/collections/the-perfect-shirt/products/classic-shirt-light-blue-twill-slim?variant=39566437253190",
+       "countryCode": "DK",
+       "originalUrl": "https://shapingnewtomorrow.dk/collections/the-perfect-shirt/products/classic-shirt-light-blue-twill-slim?variant=39566437253190",
+       "domainName": "shapingnewtomorrow.dk",
+       "price": 799,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": true,
+       "displayPrice": null,
+       "brand": null
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2025-11-20T08:53:36.622Z",
+      "description": "Str. Large",
+      "id": "i0eqpIoF40Yf21gC",
+      "price": 999,
+      "quantity": 1,
+      "photos": [
+       "https://img.gowish.com/gowish-prod-storage/files/26/60/24/d6/95/d1/38/c9/ea/8d/2adc898a1f48058bb193.webp"
+      ],
+      "index": 5,
+      "title": "Overshirt Midnight Blue",
+      "url": "https://shapingnewtomorrow.dk/collections/the-perfect-shirt/products/overshirt-midnight-blue",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "ghCJK6UC25t84cRP",
+       "index": 1,
+       "__typename": "Wish"
+      },
+      "prev": {
+       "id": "vsNWr5kwHUMR4a3q",
+       "index": 8,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "c2hhcGluZ25ld3RvbW9ycm93LmRrL2NvbGxlY3Rpb25zL3RoZS1wZXJmZWN0LXNoaXJ0L3Byb2R1Y3RzL292ZXJzaGlydC1taWRuaWdodC1ibHVle2lkOjp2MX1ESw%3D%3D",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "c2hhcGluZ25ld3RvbW9ycm93LmRrL2NvbGxlY3Rpb25zL3RoZS1wZXJmZWN0LXNoaXJ0L3Byb2R1Y3RzL292ZXJzaGlydC1taWRuaWdodC1ibHVle2lkOjp2MX1ESw%3D%3D",
+       "uurl": "shapingnewtomorrow.dk/collections/the-perfect-shirt/products/overshirt-midnight-blue",
+       "countryCode": "DK",
+       "originalUrl": "https://shapingnewtomorrow.dk/collections/the-perfect-shirt/products/overshirt-midnight-blue",
+       "domainName": "shapingnewtomorrow.dk",
+       "price": 999,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": true,
+       "displayPrice": null,
+       "brand": null
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2024-11-28T18:11:41.654Z",
+      "description": "",
+      "id": "ghCJK6UC25t84cRP",
+      "price": 379,
+      "quantity": 1,
+      "photos": [
+       "https://img.gowish.com/gowish-prod-storage/files/f2/9c/83/67/d2/54/5b/9f/0b/62/30c3c2cf0b8142fe1d17.jpeg"
+      ],
+      "index": 1,
+      "title": "Bebird M9 S Smart Visual Ear-Clean Ørerenser m/Kamera + Tilbehør (90 minutter)",
+      "url": "https://www.avxperten.dk/hudpleje/bebird-m9-s-smart-visual-ear-clean-oererenser-kamera-behoer-90-minutter.asp",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": {
+       "id": "DqcguKCzKMra2DDu",
+       "index": 0,
+       "__typename": "Wish"
+      },
+      "prev": {
+       "id": "i0eqpIoF40Yf21gC",
+       "index": 5,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "YXZ4cGVydGVuLmRrL2h1ZHBsZWplL2JlYmlyZC1tOS1zLXNtYXJ0LXZpc3VhbC1lYXItY2xlYW4tb2VyZXJlbnNlci1rYW1lcmEtYmVob2VyLTkwLW1pbnV0dGVyLmFzcHtpZDo6djF9REs%3D",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "YXZ4cGVydGVuLmRrL2h1ZHBsZWplL2JlYmlyZC1tOS1zLXNtYXJ0LXZpc3VhbC1lYXItY2xlYW4tb2VyZXJlbnNlci1rYW1lcmEtYmVob2VyLTkwLW1pbnV0dGVyLmFzcHtpZDo6djF9REs%3D",
+       "uurl": "avxperten.dk/hudpleje/bebird-m9-s-smart-visual-ear-clean-oererenser-kamera-behoer-90-minutter.asp",
+       "countryCode": "DK",
+       "originalUrl": "https://www.avxperten.dk/hudpleje/bebird-m9-s-smart-visual-ear-clean-oererenser-kamera-behoer-90-minutter.asp",
+       "domainName": "avxperten.dk",
+       "price": 219,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": true,
+       "displayPrice": null,
+       "brand": null
+      },
+      "__typename": "Wish"
+     },
+     {
+      "updatedAt": "2025-11-24T22:34:03.160Z",
+      "description": "Sorte, størrelse 34/30",
+      "id": "DqcguKCzKMra2DDu",
+      "price": 764,
+      "quantity": 1,
+      "photos": [
+       "https://img.gowish.com/gowish-prod-storage/files/0a/16/3b/bd/2d/77/e0/b7/a3/1b/ea88c29af8d05f922c6f.webp"
+      ],
+      "index": 0,
+      "title": "Essential Pants Slim Black",
+      "url": "https://shapingnewtomorrow.dk/collections/the-perfect-pants/products/essential-pants-slim-black?variant=39527827406918",
+      "currency": "DKK",
+      "labels": null,
+      "redirectUrl": "https://api.gowish.com/click?data=abc",
+      "iPurchasedIt": false,
+      "reservations": [],
+      "next": null,
+      "prev": {
+       "id": "ghCJK6UC25t84cRP",
+       "index": 1,
+       "__typename": "Wish"
+      },
+      "product": {
+       "id": "c2hhcGluZ25ld3RvbW9ycm93LmRrL2NvbGxlY3Rpb25zL3RoZS1wZXJmZWN0LXBhbnRzL3Byb2R1Y3RzL2Vzc2VudGlhbC1wYW50cy1zbGltLWJsYWNrP3ZhcmlhbnQ9Mzk1Mjc4Mjc0MDY5MTh7aWQ6OnYxfURL",
+       "flaggedForScam": false,
+       "__typename": "ExternalProduct"
+      },
+      "productRef": {
+       "__typename": "ProductRef",
+       "id": "c2hhcGluZ25ld3RvbW9ycm93LmRrL2NvbGxlY3Rpb25zL3RoZS1wZXJmZWN0LXBhbnRzL3Byb2R1Y3RzL2Vzc2VudGlhbC1wYW50cy1zbGltLWJsYWNrP3ZhcmlhbnQ9Mzk1Mjc4Mjc0MDY5MTh7aWQ6OnYxfURL",
+       "uurl": "shapingnewtomorrow.dk/collections/the-perfect-pants/products/essential-pants-slim-black?variant=39527827406918",
+       "countryCode": "DK",
+       "originalUrl": "https://shapingnewtomorrow.dk/collections/the-perfect-pants/products/essential-pants-slim-black?variant=39527827406918",
+       "domainName": "shapingnewtomorrow.dk",
+       "price": 999,
+       "currency": "DKK",
+       "crossedOutPrice": null,
+       "inStock": false,
+       "displayPrice": null,
+       "brand": null
+      },
+      "__typename": "Wish"
+     }
+    ],
+    "totalCount": 12,
+    "nextCursor": 0,
+    "__typename": "WishPagination"
+   },
+   "__typename": "Wishlist"
+  }
+ }
+}

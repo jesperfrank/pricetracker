@@ -88,6 +88,10 @@ Kør hele `supabase/schema.sql` igen i **SQL Editor** (det er sikkert og kan gen
 
 Kør hele `supabase/schema.sql` igen i **SQL Editor** (det er sikkert og kan gentages), så tabellen `lists` og kolonnen `products.list_id` oprettes. Indtil da vises listerne ikke på siden, og alt andet virker som før. Derefter kan hver person lave op til 30 egne lister (fx "Elektronik" eller "Bastian") med knappen "+ Ny liste" over produkterne og flytte et produkt til en liste i dets egen visning. Sletter man en liste, bliver produkterne liggende og kommer under "Uden liste". Jobbet og mailene er uændrede.
 
+## Ønskelister fra Ønskeskyen
+
+Indsætter man et delt link fra Ønskeskyen (`onskeskyen.dk/s/…`, eller `gowish.com`) i feltet øverst, henter jobbet ønskerne og tilføjer dem som produkter inden for et kvarter, på den valgte liste, eller på en ny liste med ønskelistens navn. Det virker kun for offentligt delte ønskelister. Det er uofficielt: jobbet bruger de samme offentlige data, som Ønskeskyens egen side henter, så det kan holde op med at virke, hvis Ønskeskyen ændrer sin side. Svarer Ønskeskyen med en blokering eller en fejl, får importen en note, og jobbet forsøger ikke at omgå det. Kør hele `supabase/schema.sql` igen i **SQL Editor**, så tabellen `imports` oprettes; indtil da kan man ikke importere, og alt andet virker som før.
+
 ## Hverdagen
 
 - Ny person: de kan bede om adgang på siden (se ovenfor), eller du tilføjer e-mailen i `allowed_emails` og sender dem linket.

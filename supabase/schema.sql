@@ -300,6 +300,120 @@ create trigger products_list_check_trg
   before insert or update of list_id, user_id on public.products
   for each row execute function public.products_list_check();
 
+-- ---------------------------------------------------------------- imports (shared wish lists from Onskeskyen)
+-- A person pastes a shared wish-list link from Onskeskyen (onskeskyen.dk, internationally gowish.com). That becomes one row
+-- here. The price job (service role) fetches the public list, adds the wishes as products (status 'pending', goal 'auto'),
+-- and marks the row 'done' or 'error' with a note. A browser user can create and delete their own rows and read them, but
+-- can never set status, note, found, added or done_at. list_id = the list the products go into (null: the job decides).
+
+create table if not exists public.imports (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid() references auth.users on delete cascade,
+  list_id    uuid references public.lists(id) on delete set null,
+  url        text not null,
+  status     text not null default 'pending' check (status in ('pending', 'done', 'error')),
+  note       text check (note is null or char_length(note) <= 300),
+  found      integer check (found is null or found >= 0),
+  added      integer check (added is null or added >= 0),
+  created_at timestamptz default now(),
+  done_at    timestamptz
+);
+
+-- Only https links to onskeskyen.dk or gowish.com (optional www.): /s/<code>, or /wishlists/<id> with an optional
+-- locale prefix like /da/ or /da-dk/. Dropped and re-added by name so this can be tightened later and re-run.
+alter table public.imports drop constraint if exists imports_url_check;
+alter table public.imports add constraint imports_url_check check (
+  char_length(url) <= 300
+  and url ~* '^https://(www\.)?(onskeskyen\.dk|gowish\.com)/(s/[a-z0-9_-]{1,64}|([a-z]{2}(-[a-z]{2})?/)?wishlists/[a-z0-9_-]{1,64})/?([?#][^[:space:]]*)?$');
+
+create index if not exists imports_user_idx on public.imports (user_id);
+create index if not exists imports_pending_idx on public.imports (created_at) where status = 'pending';
+
+alter table public.imports enable row level security;
+revoke all on public.imports from anon;
+
+drop policy if exists imports_own on public.imports;
+create policy imports_own on public.imports
+  for all to authenticated
+  using ((select auth.uid()) = user_id and public.is_allowed())
+  with check ((select auth.uid()) = user_id and public.is_allowed());
+
+-- No UPDATE for browser users at all (a row is created, read and deleted; the job does the rest).
+grant select, insert, delete on public.imports to authenticated;
+revoke update on public.imports from authenticated;
+grant select, insert, update, delete on public.imports to service_role;
+
+-- Browser users: a new row always starts as a plain pending request. An UPDATE (should one ever be granted) cannot touch
+-- the job-written columns, the owner or the link. The service role and the SQL editor are not restricted.
+create or replace function public.imports_guard()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if current_user not in ('authenticated', 'anon') then
+    return new;
+  end if;
+  if tg_op = 'INSERT' then
+    new.status := 'pending'; new.note := null; new.found := null; new.added := null; new.done_at := null;
+    return new;
+  end if;
+  new.user_id := old.user_id; new.url := old.url;
+  new.status := old.status; new.note := old.note; new.found := old.found; new.added := old.added; new.done_at := old.done_at;
+  return new;
+end;
+$$;
+
+drop trigger if exists imports_guard_trg on public.imports;
+create trigger imports_guard_trg
+  before insert or update on public.imports
+  for each row execute function public.imports_guard();
+
+-- At most 5 waiting imports and 20 rows per user (the done and failed ones stay until the person hides them).
+create or replace function public.imports_limit()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if (select count(*) from public.imports where user_id = new.user_id) >= 20 then
+    raise exception 'Du kan højst have 20 importer. Skjul de gamle først.' using errcode = 'check_violation';
+  end if;
+  if new.status = 'pending'
+     and (select count(*) from public.imports where user_id = new.user_id and status = 'pending') >= 5 then
+    raise exception 'Du kan højst have 5 ønskelister i gang. Vent, til de er hentet.' using errcode = 'check_violation';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists imports_limit_trg on public.imports;
+create trigger imports_limit_trg
+  before insert on public.imports
+  for each row execute function public.imports_limit();
+
+-- list_id must be one of the owner's own lists (the same idea as products_list_check; checked for every role).
+create or replace function public.imports_list_check()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if new.list_id is not null
+     and not exists (select 1 from public.lists l where l.id = new.list_id and l.user_id = new.user_id) then
+    raise exception 'Listen findes ikke.' using errcode = 'foreign_key_violation';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists imports_list_check_trg on public.imports;
+create trigger imports_list_check_trg
+  before insert or update of list_id, user_id on public.imports
+  for each row execute function public.imports_list_check();
+
 -- ---------------------------------------------------------------- auth hook: Before User Created
 -- Rejects sign-ups (first magic-link login) from e-mail addresses that are not in allowed_emails.
 -- Enable it in the dashboard (see docs/SETUP.md). RLS above is the real protection even if the

@@ -127,6 +127,12 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 .listact .link.warn { color: var(--danger) }
 .listact .edit { gap: 4px 14px }
 .lists .msg { margin: 8px 0 0 }
+.imports { margin: 0 0 14px }
+.imports[hidden] { display: none }
+.impl { margin: 0 0 4px; font-size: 13px; color: var(--muted) }
+.impl.bad { color: var(--ink2) }
+.impl .link { font-size: 13px; font-weight: 400; color: var(--ink2); margin-left: 8px }
+.imports .msg { margin: 4px 0 0 }
 .listpick { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13.5px; color: var(--muted); margin-bottom: 14px }
 .listpick select { height: 34px; max-width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0 8px; font: inherit; color: var(--ink) }
 

@@ -19,7 +19,7 @@ const server = http.createServer((req, res) => {
 const FAKE = `
 (function () {
   var init = window.__INIT || {};
-  var db = window.__db = { products: init.products || [], lists: init.lists || [], noLists: !!init.noLists, profiles: init.profiles || [], ops: [], deny: false, otpError: null,
+  var db = window.__db = { products: init.products || [], lists: init.lists || [], noLists: !!init.noLists, profiles: init.profiles || [], imports: init.imports || [], noImports: !!init.noImports, ops: [], deny: false, otpError: null,
     session: init.session || null, seq: 100, admin: !!init.admin, requests: init.requests || [], allowedList: init.allowed || [], rpcs: [], askReply: "requested" };
   var authCb = null, rt = [];
   // the 60-second poll: remember its callback so a test can run it at once
@@ -42,9 +42,13 @@ const FAKE = `
     };
     function match(r) { return q.filters.every(function (f) { return r[f[0]] === f[1]; }); }
     function run() {
-      return new Promise(function (resolve) { setTimeout(function () {
+      return new Promise(function (resolve, reject) { setTimeout(function () {
+        if (db.netFail && q.op !== "select") return reject(new Error("Failed to fetch"));
         if (q.op !== "select") db.ops.push({ table: table, op: q.op, payload: clone(q.payload), filters: clone(q.filters) });
-        var rows = table === "products" ? db.products : table === "lists" ? db.lists : db.profiles;
+        var rows = table === "products" ? db.products : table === "lists" ? db.lists : table === "imports" ? db.imports : db.profiles;
+        if (table === "imports" && db.noImports) return resolve({ data: null, error: { code: "PGRST205", message: "Could not find the table public.imports in the schema cache" } });
+        if (q.op === "insert" && db.insertError && (table === "products" || table === "imports")) return resolve({ data: null, error: clone(db.insertError) });
+        if (table === "products" && q.op === "insert" && db.oldGoalCheck && q.payload.target_type === "auto") return resolve({ data: null, error: { code: "23514", message: 'new row for relation "products" violates check constraint "products_target_type_check"', details: "Failing row contains (...)." } });
         if (table === "lists" && db.noLists) return resolve({ data: null, error: { code: "42P01", message: "relation public.lists does not exist" } });
         if (q.op !== "select" && db.deny) return resolve({ data: null, error: { code: "42501", message: "new row violates row-level security policy" } });
         if (db.failReads && q.op === "select") return resolve({ data: null, error: { message: "boom" } });
@@ -57,6 +61,15 @@ const FAKE = `
           if (nm.length < 1 || nm.length > 40 || (q.op === "insert" && rows.length >= 30)) return resolve({ data: null, error: { code: "23514", message: "check" } });
           if (rows.some(function (x) { return self.indexOf(x.id) < 0 && x.name.toLowerCase() === nm.toLowerCase(); })) return resolve({ data: null, error: { code: "23505", message: "duplicate key" } });
           q.payload.name = nm;
+        }
+        if (table === "imports" && q.op === "insert") {   // what the database enforces for a new import
+          var iu = String(q.payload.url || ""), irx = new RegExp("^https://(www[.])?(onskeskyen[.]dk|gowish[.]com)/(s/[a-z0-9_-]{1,64}|([a-z]{2}(-[a-z]{2})?/)?wishlists/[a-z0-9_-]{1,64})/?([?#][^ ]*)?$", "i");
+          if (iu.length > 300 || !irx.test(iu)) return resolve({ data: null, error: { code: "23514", message: "check" } });
+          if (rows.length >= 20) return resolve({ data: null, error: { code: "23514", message: "Du kan højst have 20 importer. Skjul de gamle først." } });
+          if (rows.filter(function (x) { return x.status === "pending"; }).length >= 5) return resolve({ data: null, error: { code: "23514", message: "Du kan højst have 5 ønskelister i gang. Vent, til de er hentet." } });
+          if (q.payload.list_id && !db.lists.some(function (l) { return l.id === q.payload.list_id; })) return resolve({ data: null, error: { code: "23503", message: "fk" } });
+          var ir = { id: "im-" + (++db.seq), user_id: "u1", list_id: q.payload.list_id || null, url: iu, status: "pending", note: null, found: null, added: null, created_at: new Date().toISOString(), done_at: null };
+          rows.push(ir); return resolve({ data: null, error: null });
         }
         if (q.op === "insert") {
           var r = Object.assign({ id: "new-" + (++db.seq), status: "pending", user_id: "u1", created_at: new Date().toISOString(), tracked_variants: null }, clone(q.payload));
@@ -152,7 +165,7 @@ async function open(opts = {}) {
   await page.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
   // config.js in the repo holds the real project's values, so both cases are served from the test, never from the file.
   await page.route(/\/config\.js$/, r => r.fulfill({ contentType: "text/javascript", body: opts.config === false ? "window.PV_CONFIG={supabaseUrl:\"\",supabaseAnonKey:\"\"};" : 'window.PV_CONFIG={supabaseUrl:"https://x.supabase.test",supabaseAnonKey:"anon"};' }));
-  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [] };
+  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, imports: opts.imports || [], noImports: !!opts.noImports, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [] };
   await page.addInitScript("window.__INIT = " + JSON.stringify(init) + ";");
   if (opts.fake !== false) await page.addInitScript(FAKE);
   if (opts.storage) await page.addInitScript(s => { for (const k in s) localStorage.setItem(k, s[k]); }, opts.storage);
@@ -910,6 +923,232 @@ let base;
       await p.click('[data-lsel="w1"]'); await p.click('[data-lact="del"]');
       const ov = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
       check("lists: no horizontal overflow at 360 px with many long chips and the confirmation open", ov.sw <= ov.cw, JSON.stringify(ov));
+      await p.context().close();
+    }
+  }
+
+  // 10c. Onskeskyen import and the clearer save errors
+  {
+    const SCHEMA_OLD = "Siden er blevet opdateret, men databasen mangler den nyeste opdatering.";
+    const FIX_IT = "Kør supabase/schema.sql igen i Supabase.";
+    const imp = (id, over) => Object.assign({ id, user_id: "u1", list_id: null, url: "https://onskeskyen.dk/s/e0mfx8", status: "pending", note: null, found: null, added: null, created_at: "2026-11-16T09:00:00Z", done_at: null }, over || {});
+    const writesOf = p => p.evaluate(() => window.__db.writes());
+    const msgOf = p => p.evaluate(() => (document.getElementById("fMsg").hidden ? "" : document.getElementById("fMsg").textContent));
+    const send = async (p, text) => { await p.fill("#fMain", text); await p.click("#fSubmit"); await p.waitForTimeout(160); };
+    const lines = p => p.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#importBox .impl"), e => e.firstChild.textContent));
+    const LISTS = [{ id: "l1", user_id: "u1", name: "Elektronik" }];
+
+    // link detection: an Onskeskyen / gowish list link becomes an import, nothing else does
+    const yes = [
+      ["https://onskeskyen.dk/s/e0mfx8", "https://onskeskyen.dk/s/e0mfx8"],
+      ["  https://www.OnskeSkyen.dk/s/e0mfx8?utm_source=x#y ", "https://www.onskeskyen.dk/s/e0mfx8"],
+      ["onskeskyen.dk/s/e0mfx8", "https://onskeskyen.dk/s/e0mfx8"],
+      ["http://onskeskyen.dk/s/e0mfx8", "https://onskeskyen.dk/s/e0mfx8"],
+      ["https://gowish.com/s/e0mfx8", "https://gowish.com/s/e0mfx8"],
+      ["https://onskeskyen.dk/wishlists/4seSLtIddxXUVB2Z?sharedBy=9lflg7q4Ybu7D4cx&utm_source=shortlink", "https://onskeskyen.dk/wishlists/4seSLtIddxXUVB2Z"],
+      ["https://onskeskyen.dk/da/wishlists/4seSLtIddxXUVB2Z", "https://onskeskyen.dk/da/wishlists/4seSLtIddxXUVB2Z"],
+      ["https://www.gowish.com/en-GB/wishlists/4seSLtIddxXUVB2Z/", "https://www.gowish.com/en-GB/wishlists/4seSLtIddxXUVB2Z/"],
+    ];
+    for (const [typed, stored] of yes) {
+      const p = await open({ products: [], label: "wish-yes" });
+      await p.waitForSelector("#addForm:not([hidden])");
+      await p.click(".goal label:has(#fTypePct)");            // a goal with no amount: irrelevant for a wish list
+      await send(p, typed);
+      const w = await writesOf(p);
+      check("wish link '" + typed.trim().slice(0, 50) + "' -> one import with the clean https address, no product", w.length === 1 && w[0].table === "imports" && w[0].op === "insert" && w[0].payload.url === stored && Object.keys(w[0].payload).join() === "url", JSON.stringify(w));
+      check("wish link: field cleared, no message, status line shows", (await p.inputValue("#fMain")) === "" && (await msgOf(p)) === "" && (await lines(p)).length === 1);
+      await p.context().close();
+    }
+    const no = [
+      ["https://www.bedrenaetter.dk/mayan-kuvertlagen.html", "products"], ["https://prisjagt.dk/produkt/sony-p123", "products"], ["https://www.prisjagt.dk/product.php?p=555", "products"],
+      ["https://onskeskyen.dk.evil.com/s/e0mfx8", "products"], ["https://evil.com/onskeskyen.dk/s/e0mfx8", "products"], ["https://shop.dk/vare?ref=https://onskeskyen.dk/s/e0mfx8", "products"],
+      ["https://gowish.example.dk/s/abc", "products"], ["Ønskeskyen gave til far", "products"], ["gowish", "products"],
+    ];
+    for (const [typed, table] of no) {
+      const p = await open({ products: [], label: "wish-no" });
+      await p.waitForSelector("#addForm:not([hidden])");
+      await p.click(".goal label:has(#fTypePrice)"); await p.fill("#fVal", "100");
+      await send(p, typed);
+      const w = await writesOf(p);
+      check("'" + typed.slice(0, 50) + "' is not an import", w.length === 1 && w[0].table === table, JSON.stringify(w));
+      await p.context().close();
+    }
+    {
+      const p = await open({ products: [], label: "wish-other-path" });
+      await p.waitForSelector("#addForm:not([hidden])");
+      for (const typed of ["https://onskeskyen.dk/profile/abc", "https://onskeskyen.dk/", "https://onskeskyen.dk/s/", "https://user:pw@onskeskyen.dk/s/abc", "https://onskeskyen.dk:8443/s/abc"]) {
+        await send(p, typed);
+        check("other onskeskyen.dk address '" + typed + "': asks for the shared link, writes nothing", /delte link til ønskelisten fra Ønskeskyen/.test(await msgOf(p)) && (await writesOf(p)).length === 0, await msgOf(p));
+      }
+      await p.context().close();
+    }
+
+    // the selected list goes with the import
+    {
+      const p = await open({ products: [], lists: LISTS, storage: { "pv-list": "l1" }, label: "wish-list" });
+      await p.waitForSelector(".lchip");
+      await send(p, "https://onskeskyen.dk/s/e0mfx8");
+      let w = await writesOf(p);
+      check("import: the selected list is sent as list_id", w.length === 1 && w[0].payload.list_id === "l1" && w[0].payload.url === "https://onskeskyen.dk/s/e0mfx8", JSON.stringify(w));
+      await p.context().close();
+      const q = await open({ products: [], lists: LISTS, storage: { "pv-list": "all" }, label: "wish-nolist" });
+      await q.waitForSelector(".lchip");
+      await send(q, "https://onskeskyen.dk/s/e0mfx8");
+      w = await writesOf(q);
+      check("import: no list selected -> no list_id (the job decides)", w.length === 1 && !("list_id" in w[0].payload), JSON.stringify(w));
+      await q.context().close();
+    }
+
+    // status lines
+    {
+      const p = await open({ products: [row("test-sony")], lists: LISTS, label: "wish-lines", imports: [
+        imp("a", { created_at: "2026-11-16T09:00:00Z" }),
+        imp("b", { status: "done", found: 12, added: 12, created_at: "2026-11-16T08:00:00Z", note: "De er lagt på en ny liste, Fødselsdagsønsker." }),
+        imp("c", { status: "done", found: 12, added: 7, created_at: "2026-11-16T07:00:00Z", note: "Der var kun plads til 7 af 12 ønsker. Du kan højst følge 40 varer." }),
+        imp("d", { status: "error", note: "Ønskelisten er ikke offentlig eller findes ikke. Bed ejeren om at dele den offentligt.", created_at: "2026-11-16T06:00:00Z" }),
+        imp("e", { status: "done", found: 1, added: 1, created_at: "2026-11-16T05:00:00Z" }),
+        imp("f", { status: "done", found: 3, added: 0, created_at: "2026-11-16T04:00:00Z", note: "3 ønsker fandtes allerede." }),
+        imp("g", { status: "error", created_at: "2026-11-16T03:00:00Z" }),
+      ] });
+      await p.waitForSelector("#importBox .impl");
+      const ls = await lines(p);
+      check("status lines: pending, done (+ note), done with cap note, error note, singular, zero, error without note; newest first", JSON.stringify(ls) === JSON.stringify([
+        "Henter ønsker fra Ønskeskyen. De er klar inden for et kvarter.",
+        "12 ønsker tilføjet fra Ønskeskyen. De er lagt på en ny liste, Fødselsdagsønsker.",
+        "7 ønsker tilføjet fra Ønskeskyen. Der var kun plads til 7 af 12 ønsker. Du kan højst følge 40 varer.",
+        "Ønskelisten er ikke offentlig eller findes ikke. Bed ejeren om at dele den offentligt.",
+        "1 ønske tilføjet fra Ønskeskyen.",
+        "0 ønsker tilføjet fra Ønskeskyen. 3 ønsker fandtes allerede.",
+        "Ønskerne kunne ikke hentes fra Ønskeskyen.",
+      ]), JSON.stringify(ls));
+      check("status lines: 'Skjul' on done and error lines only, none on the pending one", (await p.locator('#importBox [data-iact="hide"]').count()) === 6 && (await p.locator('#importBox .impl[data-istatus="pending"] button').count()) === 0);
+      check("status lines sit right below the list chips", await p.evaluate(() => document.getElementById("listsBox").nextElementSibling.id === "importBox"));
+      // hide: deletes the row
+      await p.locator('#importBox .impl:nth-child(2) [data-iact="hide"]').click();
+      await p.waitForFunction(() => document.querySelectorAll("#importBox .impl").length === 6);
+      const w = await writesOf(p);
+      check("hide: the import row is deleted (only that one) and the line goes", w.length === 1 && w[0].table === "imports" && w[0].op === "delete" && JSON.stringify(w[0].filters) === JSON.stringify([["id", "b"]]) && !/12 ønsker tilføjet/.test(await p.textContent("#importBox")), JSON.stringify(w));
+      // refresh by the same polling: the job finishes the pending one
+      await p.evaluate(() => { var r = window.__db.imports.filter(function (x) { return x.id === "a"; })[0]; r.status = "done"; r.added = 5; r.found = 5; window.__tick(); });
+      await p.waitForFunction(() => /5 ønsker tilføjet fra Ønskeskyen/.test(document.getElementById("importBox").textContent));
+      check("status line follows the poll: pending turns into done", !/Henter ønsker/.test(await p.textContent("#importBox")));
+      await p.evaluate(() => { window.__db.imports.push({ id: "z", user_id: "u1", list_id: null, url: "https://gowish.com/s/zz", status: "pending", note: null, found: null, added: null, created_at: "2026-11-16T10:00:00Z" }); window.__emit(); });
+      await p.waitForFunction(() => /Henter ønsker fra Ønskeskyen/.test(document.getElementById("importBox").textContent), null, { timeout: 8000 });
+      check("status line follows the realtime event too", true);
+      await p.context().close();
+      const q = await open({ products: [row("test-sony")], label: "wish-none", imports: [] });
+      await q.waitForSelector(".item");
+      check("no imports -> no status line at all", !(await q.isVisible("#importBox")));
+      await q.context().close();
+    }
+
+    // the creating flow: pending line at once, caps
+    {
+      const p = await open({ products: [], label: "wish-flow" });
+      await p.waitForSelector("#addForm:not([hidden])");
+      await send(p, "https://onskeskyen.dk/s/e0mfx8");
+      check("after adding: the pending line is shown", JSON.stringify(await lines(p)) === JSON.stringify(["Henter ønsker fra Ønskeskyen. De er klar inden for et kvarter."]));
+      for (let i = 0; i < 4; i++) await send(p, "https://onskeskyen.dk/s/kode" + i);
+      check("5 pending imports are accepted", (await lines(p)).length === 5);
+      const before = (await writesOf(p)).length;
+      await send(p, "https://onskeskyen.dk/s/sjette");
+      check("a 6th pending import is refused with a Danish message, nothing written", /Du har allerede 5 ønskelister i gang/.test(await msgOf(p)) && (await writesOf(p)).length === before, await msgOf(p));
+      await p.context().close();
+      const r = await open({ products: [], label: "wish-20", imports: Array.from({ length: 20 }, (_, i) => imp("x" + i, { status: "done", added: 1, created_at: "2026-11-15T10:" + String(10 + i) + ":00Z" })) });
+      await r.waitForSelector("#importBox .impl");
+      await send(r, "https://onskeskyen.dk/s/ny");
+      check("20 rows: asks to hide some first", /Skjul nogle af dem først/.test(await msgOf(r)) && (await writesOf(r)).length === 0);
+      await r.context().close();
+      const t = await open({ products: [], label: "wish-server-cap" });
+      await t.waitForSelector("#addForm:not([hidden])");
+      await t.evaluate(() => { window.__db.insertError = { code: "23514", message: "Du kan højst have 5 ønskelister i gang. Vent, til de er hentet." }; });
+      await send(t, "https://onskeskyen.dk/s/e0mfx8");
+      check("the database's own limit message is shown", /^Du kan højst have 5 ønskelister i gang/.test(await msgOf(t)), await msgOf(t));
+      await t.context().close();
+    }
+
+    // the table does not exist yet (schema.sql not run again)
+    {
+      const p = await open({ products: [row("test-sony")], noImports: true, label: "wish-notable" });
+      await p.waitForSelector(".item");
+      check("no imports table: page works, no status line, no message", (await p.locator(".item").count()) === 1 && !(await p.isVisible("#importBox")) && !(await p.isVisible("#fMsg")));
+      await send(p, "https://onskeskyen.dk/s/e0mfx8");
+      check("no imports table: a clear Danish message when someone tries (no fix-it hint for a normal person)", (await msgOf(p)) === SCHEMA_OLD, await msgOf(p));
+      check("no imports table: the field keeps the text so nothing is lost", (await p.inputValue("#fMain")) === "https://onskeskyen.dk/s/e0mfx8");
+      await p.context().close();
+      const a = await open({ products: [row("test-sony")], noImports: true, admin: true, label: "wish-notable-admin" });
+      await a.waitForSelector("#accessBox:not([hidden])");
+      await send(a, "https://onskeskyen.dk/s/e0mfx8");
+      check("no imports table, admin: also told to run schema.sql again", (await msgOf(a)) === SCHEMA_OLD + " " + FIX_IT, await msgOf(a));
+      await a.context().close();
+    }
+
+    // save errors for products: network vs. a database older than the site
+    {
+      const cases = [
+        ["goal 'auto' not allowed yet (23514 on target_type), by name", { code: "23514", message: 'new row for relation "products" violates check constraint "products_target_type_check"', details: "Failing row contains (...)." }, "Sony WH-1000XM5", true],
+        ["goal 'auto' not allowed yet, by link", { code: "23514", message: 'new row for relation "products" violates check constraint "products_target_type_check"' }, "https://www.bedrenaetter.dk/x.html", true],
+        ["target_value NOT NULL (23502)", { code: "23502", message: 'null value in column "target_value" of relation "products" violates not-null constraint' }, "Sony WH-1000XM5", true],
+        ["undefined column 42703", { code: "42703", message: 'column "list_id" of relation "products" does not exist' }, "Sony WH-1000XM5", true],
+        ["undefined column PGRST204", { code: "PGRST204", message: "Could not find the 'list_id' column of 'products' in the schema cache" }, "Sony WH-1000XM5", true],
+        ["undefined table 42P01", { code: "42P01", message: 'relation "public.products" does not exist' }, "Sony WH-1000XM5", true],
+        ["undefined table PGRST205", { code: "PGRST205", message: "Could not find the table 'public.products' in the schema cache" }, "Sony WH-1000XM5", true],
+        ["shop link against the old prisjagt-only check", { code: "23514", message: 'new row for relation "products" violates check constraint "products_source_url_check"' }, "https://www.bedrenaetter.dk/x.html", true],
+        ["network error (no code)", { message: "TypeError: Failed to fetch" }, "Sony WH-1000XM5", false],
+        ["other database error", { code: "XX000", message: "boom" }, "Sony WH-1000XM5", false],
+      ];
+      for (const admin of [false, true]) {
+        for (const [name, err, typed, schema] of cases) {
+          const p = await open({ products: [], admin, label: "save-err" });
+          await p.waitForSelector("#addForm:not([hidden])"); if (admin) await p.waitForSelector("#accessBox:not([hidden])");
+          await p.evaluate(e => { window.__db.insertError = e; }, err);
+          await send(p, typed);
+          const m = await msgOf(p), want = schema ? SCHEMA_OLD + (admin ? " " + FIX_IT : "") : "Kunne ikke gemme lige nu. Prøv igen om lidt.";
+          check("save error (" + (admin ? "admin" : "normal") + "): " + name, m === want, m);
+          await p.context().close();
+        }
+      }
+      // a rejected request (network down) keeps the old text
+      const n = await open({ products: [], label: "save-net" });
+      await n.waitForSelector("#addForm:not([hidden])");
+      await n.evaluate(() => { window.__db.netFail = true; });
+      await send(n, "Sony WH-1000XM5");
+      check("save error: network failure -> 'Kunne ikke gemme lige nu'", (await msgOf(n)) === "Kunne ikke gemme lige nu. Prøv igen om lidt.", await msgOf(n));
+      await send(n, "https://onskeskyen.dk/s/e0mfx8");
+      check("save error: network failure on an import -> the same text", (await msgOf(n)) === "Kunne ikke gemme lige nu. Prøv igen om lidt.", await msgOf(n));
+      await n.context().close();
+      // the real database rules are still reported as before (a name the database refuses, a prisjagt link it refuses)
+      const o = await open({ products: [], label: "save-old-msgs" });
+      await o.waitForSelector("#addForm:not([hidden])");
+      await o.evaluate(() => { window.__db.insertError = { code: "23514", message: 'new row for relation "products" violates check constraint "products_name_not_blank"' }; });
+      await send(o, "Sony WH-1000XM5");
+      check("save error: a refused name keeps its own message", /Databasen afviste navnet eller målet/.test(await msgOf(o)), await msgOf(o));
+      await o.evaluate(() => { window.__db.insertError = { code: "23514", message: 'new row for relation "products" violates check constraint "products_source_url_check"' }; });
+      await send(o, "https://prisjagt.dk/produkt/x");
+      check("save error: a refused prisjagt link keeps its own message", /Databasen afviste linket eller målet/.test(await msgOf(o)), await msgOf(o));
+      await o.context().close();
+    }
+
+    // untrusted text: wish titles (as product names), list names and notes are escaped like any other text
+    {
+      const evil = "<script>window.__xss=1</script><img src=x onerror=window.__xss=2>";
+      const p = await open({ products: [row("test-sony", { id: "h1", name: evil, source_url: "https://shop.dk/x" })], lists: [{ id: "l1", user_id: "u1", name: evil }], label: "wish-xss", imports: [
+        imp("n1", { status: "done", added: 1, found: 1, note: "De er lagt på listen " + evil + "." }), imp("n2", { status: "error", note: evil }),
+      ] });
+      await p.waitForSelector("#importBox .impl"); await p.waitForSelector(".item");
+      await p.locator(".head").first().click();
+      const r = await p.evaluate(() => ({ x: window.__xss, scripts: document.querySelectorAll("#list script, #importBox script, #chips script").length, imgs: document.querySelectorAll("#list img, #importBox img, #chips img").length,
+        item: document.querySelector(".item h2").textContent, note: document.getElementById("importBox").textContent, chip: document.querySelector('#chips .lchip[data-lsel="l1"]').textContent }));
+      check("hostile title: product name, list name and import note are text, no element, no script run", r.x === undefined && r.scripts === 0 && r.imgs === 0 && r.item === evil && r.note.indexOf(evil) >= 0 && r.chip.indexOf(evil) >= 0, JSON.stringify(r));
+      await p.context().close();
+    }
+
+    // the hint under the add field
+    {
+      const p = await open({ products: [], label: "wish-hint" });
+      await p.waitForSelector("#addForm:not([hidden])");
+      const h = await p.textContent("#fHelp");
+      check("hint under the add field mentions Ønskeskyen and keeps the old text", /Et delt link fra Ønskeskyen henter hele ønskelisten\./.test(h) && /et navn finder vi produktet til/.test(h) && !/—/.test(h), h);
       await p.context().close();
     }
   }

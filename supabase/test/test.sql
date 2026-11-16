@@ -435,6 +435,172 @@ select t.chk('lists: migration from a database without lists is clean (twice)',
   and (select count(*) = 3 from pg_trigger where tgname in ('lists_guard_trg', 'lists_limit_trg', 'products_list_check_trg')));
 select t.chk('lists: existing products survived the migration', (select count(*) > 0 from public.products));
 
+-- 11c. imports (shared wish lists). The lists test above dropped lists with cascade (and with it the foreign key from imports):
+-- start from a database where imports is created on top of the existing lists table, as on the live project.
+drop table public.imports cascade;
+\o /dev/null
+\i :schema
+\i :schema
+\o
+select t.chk('imports: table, policy, triggers exist after re-runs',
+  (select count(*) = 1 from pg_policies where tablename = 'imports' and policyname = 'imports_own')
+  and (select count(*) = 3 from pg_trigger where tgname in ('imports_guard_trg', 'imports_limit_trg', 'imports_list_check_trg')));
+create function t.dels(q text) returns integer language plpgsql as $$
+declare n integer; begin execute q; get diagnostics n = row_count; return n; end $$;
+grant execute on function t.dels(text) to public;
+create function t.imp(u text) returns text language plpgsql as $$
+begin return t.try(format('insert into public.imports (url) values (%L)', u)); end $$;
+grant execute on function t.imp(text) to public;
+create function t.impl(u text, l uuid) returns text language plpgsql as $$
+begin return t.try(format('insert into public.imports (url, list_id) values (%L, %L)', u, l)); end $$;
+grant execute on function t.impl(text, uuid) to public;
+delete from public.imports;
+insert into public.lists (name, user_id) values ('Onsker A', '00000000-0000-0000-0000-0000000000a1'), ('Onsker B', '00000000-0000-0000-0000-0000000000b2');
+
+set role authenticated;
+select t.asA();
+select t.chk('imports: share link accepted', t.imp('https://onskeskyen.dk/s/e0mfx8') = 'ok');
+select t.chk('imports: www, gowish.com, /wishlists/<id>, locale prefix, query and trailing slash accepted',
+  t.imp('https://www.onskeskyen.dk/s/abc-DEF_1') = 'ok' and t.imp('https://gowish.com/s/e0mfx8') = 'ok'
+  and t.imp('https://onskeskyen.dk/wishlists/4seSLtIddxXUVB2Z?sharedBy=9lflg7q4Ybu7D4cx&utm_source=shortlink') = 'ok'
+  and t.imp('https://onskeskyen.dk/da/wishlists/4seSLtIddxXUVB2Z') = 'ok');
+delete from public.imports;
+select t.chk('imports: da-dk locale and trailing slash', t.imp('https://gowish.com/da-dk/wishlists/4seSLtIddxXUVB2Z/') = 'ok');
+select t.chk('imports: http is refused', t.imp('http://onskeskyen.dk/s/e0mfx8') = 'check');
+select t.chk('imports: other hosts refused (lookalikes, userinfo, port, subdomain)',
+  t.imp('https://onskeskyen.dk.evil.com/s/e0mfx8') = 'check' and t.imp('https://evil.com/onskeskyen.dk/s/e0mfx8') = 'check'
+  and t.imp('https://onskeskyen.dk@evil.com/s/e0mfx8') = 'check' and t.imp('https://onskeskyen.dk:8443/s/e0mfx8') = 'check'
+  and t.imp('https://api.gowish.com/graphql') = 'check' and t.imp('https://eviLonskeskyen.dk/s/e0mfx8') = 'check'
+  and t.imp('https://prisjagt.dk/s/e0mfx8') = 'check');
+select t.chk('imports: other paths refused', t.imp('https://onskeskyen.dk/') = 'check' and t.imp('https://onskeskyen.dk/s/') = 'check'
+  and t.imp('https://onskeskyen.dk/wishlists/') = 'check' and t.imp('https://onskeskyen.dk/profile/abc') = 'check'
+  and t.imp('https://onskeskyen.dk/s/a/b') = 'check' and t.imp('https://onskeskyen.dk/x/y/wishlists/abc') = 'check');
+select t.chk('imports: spaces, empty, javascript: refused', t.imp('https://onskeskyen.dk/s/e0 mfx8') = 'check' and t.imp('') = 'check'
+  and t.imp('javascript:alert(1)') = 'check' and t.imp('https://onskeskyen.dk/s/e0mfx8 ') = 'check');
+select t.chk('imports: 300 characters accepted, 301 refused',
+  t.imp('https://onskeskyen.dk/s/e0mfx8?' || repeat('x', 300 - length('https://onskeskyen.dk/s/e0mfx8?'))) = 'ok' and t.imp('https://onskeskyen.dk/s/e0mfx8?' || repeat('x', 301 - length('https://onskeskyen.dk/s/e0mfx8?'))) = 'check');
+delete from public.imports;
+
+-- the browser cannot choose the job-written columns
+insert into public.imports (url, status, note, found, added, done_at) values ('https://onskeskyen.dk/s/e0mfx8', 'done', 'falsk', 99, 99, now());
+select t.chk('imports: status, note, found, added, done_at are reset on insert; user_id defaults to the caller',
+  (select status = 'pending' and note is null and found is null and added is null and done_at is null
+     and user_id = '00000000-0000-0000-0000-0000000000a1' and list_id is null and created_at is not null from public.imports));
+select t.chk('imports: cannot be created for someone else', t.try($$insert into public.imports (url, user_id) values ('https://onskeskyen.dk/s/e0mfx8', '00000000-0000-0000-0000-0000000000b2')$$) = 'denied');
+select t.chk('imports: browser users have no UPDATE right', t.try($$update public.imports set status = 'done', added = 5$$) = 'denied');
+select t.chk('imports: ... also not on other columns', t.try($$update public.imports set url = 'https://gowish.com/s/zzz'$$) = 'denied');
+
+-- list_id: only the person's own lists
+select t.chk('imports: own list accepted', t.impl('https://onskeskyen.dk/s/own1', t.lid('00000000-0000-0000-0000-0000000000a1', 'Onsker A')) = 'ok');
+select t.chk('imports: someone else''s list refused', t.impl('https://onskeskyen.dk/s/own2', t.lid('00000000-0000-0000-0000-0000000000b2', 'Onsker B')) = 'fk');
+select t.chk('imports: a list that does not exist refused', t.impl('https://onskeskyen.dk/s/own3', gen_random_uuid()) = 'fk');
+select t.chk('imports: no list is fine', t.imp('https://onskeskyen.dk/s/own4') = 'ok');
+
+-- isolation
+select t.asB();
+select t.chk('imports: B sees none of A''s rows', (select count(*) = 0 from public.imports));
+select t.chk('imports: B cannot delete A''s rows', t.dels('delete from public.imports') = 0);
+select t.chk('imports: B can create their own', t.imp('https://onskeskyen.dk/s/bbb') = 'ok');
+select t.chk('imports: ... and sees exactly that one', (select count(*) = 1 from public.imports));
+select t.asX();
+select t.chk('imports: a person who is not on the allow-list sees nothing and cannot create', (select count(*) = 0 from public.imports) and t.imp('https://onskeskyen.dk/s/xxx') = 'denied');
+reset role;
+set role anon;
+select t.chk('imports: anon is denied', t.try('select * from public.imports') = 'denied' and t.imp('https://onskeskyen.dk/s/anon') = 'denied');
+reset role;
+select t.chk('imports: A has 3, B has 1 (nothing leaked across)', (select count(*) = 3 from public.imports where user_id = '00000000-0000-0000-0000-0000000000a1')
+  and (select count(*) = 1 from public.imports where user_id = '00000000-0000-0000-0000-0000000000b2'));
+
+-- the guard on UPDATE, if UPDATE were ever granted
+grant update on public.imports to authenticated;
+set role authenticated;
+select t.asA();
+update public.imports set status = 'done', note = 'x', found = 9, added = 9, done_at = now(), url = 'https://gowish.com/s/zzz', user_id = '00000000-0000-0000-0000-0000000000b2';
+reset role;
+revoke update on public.imports from authenticated;
+select t.chk('imports guard: an UPDATE cannot change status, note, found, added, done_at, url or owner',
+  (select count(*) = 3 and bool_and(status = 'pending' and note is null and found is null and added is null and done_at is null
+     and user_id = '00000000-0000-0000-0000-0000000000a1' and url like 'https://onskeskyen.dk/s/%') from public.imports where user_id = '00000000-0000-0000-0000-0000000000a1'));
+
+-- cap: 5 pending
+set role authenticated;
+select t.asA();
+select t.chk('imports cap: five pending are accepted', t.imp('https://onskeskyen.dk/s/fill1') = 'ok' and t.imp('https://onskeskyen.dk/s/fill2') = 'ok');
+select t.chk('imports cap: the 6th pending import is refused', t.imp('https://onskeskyen.dk/s/six') = 'check');
+select t.asB();
+select t.chk('imports cap: counted per user (B unaffected)', t.imp('https://onskeskyen.dk/s/bbb2') = 'ok');
+reset role;
+
+-- the job (service role) writes the result
+set role service_role;
+update public.imports set status = 'done', note = 'Der var kun plads til 7 af 12 ønsker. Du kan højst følge 40 varer.', found = 12, added = 7, done_at = now()
+ where url = 'https://onskeskyen.dk/s/own1';
+update public.imports set status = 'error', note = 'Ønskeskyen svarede ikke. Prøv igen senere.', done_at = now() where url = 'https://onskeskyen.dk/s/own4';
+select t.chk('imports: the service role can mark done and error',
+  (select status = 'done' and found = 12 and added = 7 and done_at is not null from public.imports where url = 'https://onskeskyen.dk/s/own1')
+  and (select status = 'error' and added is null from public.imports where url = 'https://onskeskyen.dk/s/own4'));
+select t.chk('imports: status other than pending/done/error refused', t.try($$update public.imports set status = 'weird' where url = 'https://onskeskyen.dk/s/own1'$$) = 'check');
+select t.chk('imports: note over 300 characters refused', t.try(format('update public.imports set note = %L where url = %L', repeat('n', 301), 'https://onskeskyen.dk/s/own1')) = 'check');
+select t.chk('imports: negative found refused', t.try($$update public.imports set found = -1 where url = 'https://onskeskyen.dk/s/own1'$$) = 'check');
+reset role;
+set role authenticated;
+select t.asA();
+select t.chk('imports cap: room for new pending ones when others are done or failed', t.imp('https://onskeskyen.dk/s/seven') = 'ok' and t.imp('https://onskeskyen.dk/s/eight') = 'ok');
+select t.chk('imports cap: ... but still not more than 5 pending', t.imp('https://onskeskyen.dk/s/nine') = 'check');
+select t.chk('imports: the person sees the result written by the job', (select note like 'Der var kun plads til 7 af 12%' and added = 7 from public.imports where url = 'https://onskeskyen.dk/s/own1'));
+reset role;
+
+-- cap: 20 rows
+update public.imports set status = 'done' where user_id = '00000000-0000-0000-0000-0000000000a1';
+set role authenticated;
+select t.asA();
+select t.chk('imports cap: 20 rows in total', (select count(*) from public.imports) = 7);
+insert into public.imports (url) select 'https://onskeskyen.dk/s/r' || g from generate_series(1, 5) g;
+reset role;
+update public.imports set status = 'done' where user_id = '00000000-0000-0000-0000-0000000000a1';
+set role authenticated;
+select t.asA();
+insert into public.imports (url) select 'https://onskeskyen.dk/s/q' || g from generate_series(1, 5) g;
+reset role;
+update public.imports set status = 'error' where user_id = '00000000-0000-0000-0000-0000000000a1';
+set role authenticated;
+select t.asA();
+insert into public.imports (url) select 'https://onskeskyen.dk/s/p' || g from generate_series(1, 3) g;
+select t.chk('imports cap: 20 rows reached', (select count(*) = 20 from public.imports));
+select t.chk('imports cap: the 21st row is refused even if the others are done', t.imp('https://onskeskyen.dk/s/over') = 'check');
+select t.chk('imports cap: hiding (deleting) a row makes room', t.dels($$delete from public.imports where url = 'https://onskeskyen.dk/s/p1'$$) = 1 and t.imp('https://onskeskyen.dk/s/again') = 'ok');
+select t.asB();
+select t.chk('imports cap: B can still create (counted per user)', t.imp('https://onskeskyen.dk/s/bbb3') = 'ok');
+reset role;
+
+-- deleting a list keeps the import, list_id becomes null
+delete from public.imports where user_id = '00000000-0000-0000-0000-0000000000a1';
+set role authenticated;
+select t.asA();
+select t.chk('imports: a row with a list', t.impl('https://onskeskyen.dk/s/withlist', t.lid('00000000-0000-0000-0000-0000000000a1', 'Onsker A')) = 'ok');
+select t.chk('imports: ... and it is stored', (select list_id is not null from public.imports where url = 'https://onskeskyen.dk/s/withlist'));
+delete from public.lists where name = 'Onsker A';
+select t.chk('imports: deleting the list keeps the import and clears list_id', (select count(*) = 1 and bool_and(list_id is null) from public.imports where url = 'https://onskeskyen.dk/s/withlist'));
+reset role;
+
+-- removing a user removes their imports
+insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000d4', 'midlertidig@x.dk');
+insert into public.imports (user_id, url) values ('00000000-0000-0000-0000-0000000000d4', 'https://onskeskyen.dk/s/tmp');
+delete from auth.users where id = '00000000-0000-0000-0000-0000000000d4';
+select t.chk('imports: deleting the user deletes their imports', (select count(*) = 0 from public.imports where user_id = '00000000-0000-0000-0000-0000000000d4'));
+
+-- a database without imports, then the schema (twice)
+drop table public.imports cascade;
+\o /dev/null
+\i :schema
+\i :schema
+\o
+select t.chk('imports: migration from a database without the table is clean (twice)',
+  (select count(*) = 1 from pg_policies where tablename = 'imports' and policyname = 'imports_own')
+  and (select count(*) = 3 from pg_trigger where tgname in ('imports_guard_trg', 'imports_limit_trg', 'imports_list_check_trg'))
+  and not has_table_privilege('authenticated', 'public.imports', 'update') and has_table_privilege('service_role', 'public.imports', 'update'));
+delete from public.imports; delete from public.lists;
+
 -- 12. final whole-file run on the populated database
 \o /dev/null
 \i :schema

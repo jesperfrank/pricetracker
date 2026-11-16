@@ -14,6 +14,7 @@ const P = require('./lib/pricing');
 const PJ = require('./lib/prisjagt');
 const SHOP = require('./lib/shop');
 const WB = require('./lib/wayback');
+const ONSKE = require('./lib/onskeskyen');
 const { composeMail, composeOwnerMail, composeApprovedMail, sendResend } = require('./lib/mail');
 const { makeClient } = require('./lib/supabase');
 
@@ -23,6 +24,7 @@ const ERROR_RETRY_MS = 6 * 3600 * 1000;
 const DEADLINE_MS = 8.5 * 60 * 1000;      // the workflow times out at 10 minutes
 const MAX_BACKFILL = 2;                   // products whose older prices are fetched from the Internet Archive per run
 const BACKFILL_RETRY_MS = 6 * 3600 * 1000;
+const IMPORT_BUDGET_MS = 2 * 60 * 1000;   // wish-list imports (Ønskeskyen) get at most this much of the run; the rest waits
 const BACKFILL_MAX_TRIES = 2;             // a 429 / 5xx from the archive allows one later retry, then it is given up
 
 const sleepReal = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -220,7 +222,14 @@ async function run(ctx) {
   const fetchImpl = ctx.fetch || fetch;
   const sb = makeClient(ctx.supabaseUrl, ctx.serviceKey, fetchImpl);
   const started = Date.now();
-  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false, backfilled: 0, backfillPoints: 0, waybackStopped: false };
+  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null };
+
+  // 0. wish-list imports (Ønskeskyen): before the price checks, so that the new products get their first price in this run.
+  // Own step: it never fails the run, and it is skipped quietly when the imports table does not exist yet.
+  try {
+    stats.imports = await ONSKE.runImports({ sb, fetch: ctx.onskeFetch || fetchImpl, sleep: ctx.onskeSleep || sleep, pauseMs: ctx.onskePauseMs, log, now: ctx.now || (() => now), deadlineAt: started + IMPORT_BUDGET_MS });
+    if (stats.imports.pending) log('Ønskelister: ' + stats.imports.pending + ' behandlet, ' + stats.imports.done + ' færdige, ' + stats.imports.error + ' fejlede, ' + stats.imports.added + ' varer tilføjet.');
+  } catch (e) { log('Ønskelister: ' + (e && e.message || e)); }
 
   // 1. load (a failure here means Supabase is unreachable: let it throw)
   // Products added by name only (source_url null) wait for a link (from the name-lookup assistant or the user):

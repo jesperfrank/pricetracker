@@ -17,13 +17,15 @@ function makeClient(baseUrl, key, fetchImpl) {
         signal: ctl.signal,
       });
       const text = await r.text();
-      if (!r.ok) throw new Error(method + ' ' + path.split('?')[0] + ' -> HTTP ' + r.status + ' ' + text.slice(0, 200));
+      if (!r.ok) { const err = new Error(method + ' ' + path.split('?')[0] + ' -> HTTP ' + r.status + ' ' + text.slice(0, 200)); err.status = r.status; err.body = text.slice(0, 500); throw err; }
       return text ? JSON.parse(text) : null;
     } finally { clearTimeout(t); }
   }
   return {
     select: (table, query) => call('GET', '/rest/v1/' + table + '?' + query),
     patch: (table, filter, body) => call('PATCH', '/rest/v1/' + table + '?' + filter, body, { Prefer: 'return=minimal' }),
+    // rows: one object or an array (one request). returning: true gives the stored rows back (ids), otherwise nothing.
+    insert: (table, rows, returning) => call('POST', '/rest/v1/' + table, rows, { Prefer: returning ? 'return=representation' : 'return=minimal' }),
     authUser: (id) => call('GET', '/auth/v1/admin/users/' + encodeURIComponent(id)),
   };
 }

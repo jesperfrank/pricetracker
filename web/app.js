@@ -19,7 +19,7 @@
     return window.supabase.createClient(url, key);
   }
 
-  var state = { lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
+  var state = { imports: [], importsOk: false, importMsg: "", lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
     prefs: { always: [], exclude: [], only: false, notify: true }, profileSound: null };
   var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
   var sb = null, user = null, channel = null, pollTimer = null, fetching = false, again = false, lastFetch = 0, fetchSeq = 0;
@@ -582,6 +582,45 @@
     }, function () { btn.disabled = false; listMsg("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
   });
 
+  // ---- imports: a shared wish list from Ønskeskyen is read by the price job; a quiet status line per import ----
+  // The imports table only exists once schema.sql has been run again. Until then nothing is shown and nothing breaks.
+  var IMPORT_PENDING = "Henter ønsker fra Ønskeskyen. De er klar inden for et kvarter.";
+  function importLine(im) {
+    var txt;
+    if (im.status === "pending") txt = IMPORT_PENDING;
+    else if (im.status === "done") { var n = im.added || 0; txt = nf.format(n) + (n === 1 ? " ønske" : " ønsker") + " tilføjet fra Ønskeskyen." + (im.note ? " " + im.note : ""); }
+    else txt = im.note || "Ønskerne kunne ikke hentes fra Ønskeskyen.";
+    return '<p class="impl' + (im.status === "error" ? " bad" : "") + '" data-istatus="' + esc(im.status) + '"><span>' + esc(txt) + '</span>' +
+      (im.status !== "pending" && state.canWrite ? ' <button type="button" class="link" data-iact="hide" data-id="' + esc(im.id) + '">Skjul</button>' : "") + '</p>';
+  }
+  function renderImports() {
+    var box = $("importBox"), show = !!(user && state.importsOk && state.imports.length);
+    box.hidden = !show;
+    if (!show) { box.innerHTML = ""; return; }
+    var list = state.imports.slice().sort(function (a, b) { return String(b.createdAt).localeCompare(String(a.createdAt)); });
+    box.innerHTML = list.map(importLine).join("") + (state.importMsg ? '<p class="msg">' + esc(state.importMsg) + '</p>' : "");
+  }
+  function fetchImports() {
+    if (!sb || !user) return;
+    var uid = user.id;
+    sb.from("imports").select("*").order("created_at", { ascending: true }).then(function (r) {
+      if (!user || user.id !== uid) return;
+      if (r.error) return;                                   // no table yet, or a hiccup: keep what is shown, say nothing
+      state.imports = (r.data || []).map(function (x) {
+        return { id: x.id, status: x.status === "done" || x.status === "error" ? x.status : "pending", note: x.note || "", added: num(x.added), found: num(x.found), createdAt: x.created_at || "" };
+      });
+      state.importsOk = true; render();
+    }, function () {});
+  }
+  $("importBox").addEventListener("click", function (ev) {
+    var b = ev.target.closest('[data-iact="hide"]'); if (!b || !sb) return;
+    var id = b.dataset.id; b.disabled = true; state.importMsg = "";
+    sb.from("imports").delete().eq("id", id).then(function (r) {
+      if (r && r.error) { b.disabled = false; state.importMsg = isDenied(r.error) ? "Du har ikke adgang til at gemme." : "Kunne ikke gemme lige nu. Prøv igen om lidt."; onWriteError(r.error); renderImports(); return; }
+      state.imports = state.imports.filter(function (x) { return x.id !== id; }); render(); fetchImports();
+    }, function () { b.disabled = false; state.importMsg = "Kunne ikke gemme lige nu. Prøv igen om lidt."; renderImports(); });
+  });
+
   var renderPending = false;
   function render() {
     renderStatus();
@@ -590,7 +629,7 @@
     if (a && list.contains(a) && a.tagName === "INPUT" &&
       (a.type === "checkbox" || a.type === "radio" ? a.checked !== a.defaultChecked : a.value !== a.defaultValue)) { renderPending = true; return; }
     renderPending = false;
-    renderLists();
+    renderLists(); renderImports();
     var rank = function (p) { return isHit(p) ? 0 : (p.status === "choose" && !awaitingFetch(p)) ? 1 : 2; };
     var sel = curSel();
     var ps = state.products.filter(function (p) { return inSel(p, sel); }).sort(function (x, y) {
@@ -719,7 +758,7 @@
       } else {
         state.products = (r.data || []).map(norm);
         state.loaded = true;
-        render(); checkSound(); fetchLists();
+        render(); checkSound(); fetchLists(); fetchImports();
       }
       if (again) { again = false; fetchProducts(); }
     }, function () {
@@ -762,7 +801,7 @@
   }
   function startSession() {
     state.loaded = false; state.products = []; state.canWrite = true;
-    state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null;
+    state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.imports = []; state.importsOk = false; state.importMsg = "";
     $("status").textContent = "Henter listen …";
     loadSounds();
     ensureProfile(); fetchProducts(); fetchAccess();
@@ -774,7 +813,7 @@
   function stopSession() {
     clearInterval(pollTimer); pollTimer = null;
     try { if (channel) sb.removeChannel(channel); } catch (e) {}
-    channel = null; state.products = []; state.loaded = false; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null;
+    channel = null; state.products = []; state.loaded = false; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.imports = []; state.importsOk = false; state.importMsg = ""; renderImports();
     access.admin = false; access.requests = []; access.allowed = []; access.confirm = null; access.seq++; accMsg(""); renderAccess();
   }
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && user) fetchProducts(); });
@@ -992,6 +1031,34 @@
   }
   // A value that looks like an address (scheme, www., or a single word with a path) is a link; anything else is a name.
   function looksLikeLink(t) { return /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^(javascript|data|vbscript|file|mailto):/i.test(t) || /^www\./i.test(t) || /^\S+\.\S+\/\S*$/.test(t) || /prisjagt\.dk/i.test(t) && !/\s/.test(t); }
+  // A shared wish list from Ønskeskyen (onskeskyen.dk, internationally gowish.com): /s/<code> or /wishlists/<id>, optional locale prefix.
+  // Returns the clean https address (no query, no fragment), or null. A shop link or a prisjagt.dk link is never one.
+  var WISH_HOST = /^(www\.)?(onskeskyen\.dk|gowish\.com)$/;
+  function wishHost(t) { try { var x = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(t) ? t : "https://" + t); return WISH_HOST.test(x.hostname.toLowerCase()) ? x : null; } catch (e) { return null; } }
+  function parseWishlistLink(raw) {
+    var t = String(raw || "").trim();
+    if (!t || /\s/.test(t) || !/^(https?:\/\/)?(www\.)?(onskeskyen\.dk|gowish\.com)(\/|$)/i.test(t)) return null;
+    var x = wishHost(t);
+    if (!x || (x.protocol !== "https:" && x.protocol !== "http:") || x.username || x.password || x.port) return null;
+    if (!/^\/s\/[A-Za-z0-9_-]{1,64}\/?$/.test(x.pathname) && !/^\/([A-Za-z]{2}(-[A-Za-z]{2})?\/)?wishlists\/[A-Za-z0-9_-]{1,64}\/?$/.test(x.pathname)) return null;
+    return "https://" + x.hostname.toLowerCase() + x.pathname;
+  }
+  function isWishHost(raw) { return !/\s/.test(raw) && !!wishHost(raw); }
+  var WISH_HELP = "Brug det delte link til ønskelisten fra Ønskeskyen, fx https://onskeskyen.dk/s/abc123.";
+  // The database is older than the site (schema.sql not run again since the last update): said plainly, with the fix for the owner.
+  var SCHEMA_OLD = "Siden er blevet opdateret, men databasen mangler den nyeste opdatering.";
+  function schemaOld(e, shopLink) {
+    if (!e) return false;
+    var c = String(e.code || ""), m = String(e.message || "") + " " + String(e.details || "");
+    if (c === "42703" || c === "PGRST204" || c === "42P01" || c === "PGRST205") return true;      // missing column or table
+    if (c === "23514" && /target_type/.test(m)) return true;                                       // the goal 'auto' is not allowed yet
+    if (c === "23502" && /target_value/.test(m)) return true;                                      // a goal without a value is not allowed yet
+    if (c === "23514" && shopLink && /source_url/.test(m)) return true;                            // only prisjagt.dk links are allowed yet
+    return false;
+  }
+  function saveError(e, shopLink) {
+    return schemaOld(e, shopLink) ? SCHEMA_OLD + (access.admin ? " Kør supabase/schema.sql igen i Supabase." : "") : null;
+  }
   $("fTypePrice").addEventListener("change", syncType); $("fTypePct").addEventListener("change", syncType); $("fTypeAuto").addEventListener("change", syncType);
   $("addForm").addEventListener("submit", function (ev) {
     ev.preventDefault();
@@ -999,6 +1066,9 @@
     var fail = function (t) { msg.textContent = t; msg.hidden = false; };
     var raw = $("fMain").value.trim().replace(/\s+/g, " "), v = Number($("fVal").value), pct = $("fTypePct").checked, auto = $("fTypeAuto").checked, url = null, name = null;
     if (!raw) { fail("Skriv navnet på varen, eller indsæt et link til den."); return; }
+    var wish = parseWishlistLink(raw);
+    if (!wish && isWishHost(raw)) { fail(WISH_HELP); return; }
+    if (wish) { addImport(wish, fail); return; }
     if (looksLikeLink(raw)) {
       url = parseLink(raw);
       if (!url) { fail(LINK_HELP + " Åbn varen i din browser, og kopier adressen."); return; }
@@ -1017,6 +1087,8 @@
       btn.disabled = false;
       if (r && r.error) {
         if (isDenied(r.error)) { onWriteError(r.error); return; }
+        var old = saveError(r.error, !!url && isShopUrl(url));
+        if (old) { fail(old); return; }
         fail(r.error.code === "23514" ? (url ? "Databasen afviste linket eller målet. Tjek, at linket starter med https:// og er en produktside." : "Databasen afviste navnet eller målet. Tjek dem, og prøv igen.") : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
         return;
       }
@@ -1024,6 +1096,28 @@
       fetchProducts();
     }, function () { btn.disabled = false; fail("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
   });
+
+  function addImport(url, fail) {
+    if (!sb) return;
+    var pend = state.imports.filter(function (x) { return x.status === "pending"; }).length;
+    if (pend >= 5) { fail("Du har allerede 5 ønskelister i gang. Vent, til de er hentet."); return; }
+    if (state.imports.length >= 20) { fail("Du har mange ønskelister liggende. Skjul nogle af dem først."); return; }
+    var btn = $("fSubmit"); btn.disabled = true;
+    var row = { url: url }, into = curSel();
+    if (listKnown(into)) row.list_id = into;
+    sb.from("imports").insert(row).then(function (r) {
+      btn.disabled = false;
+      if (r && r.error) {
+        if (isDenied(r.error)) { onWriteError(r.error); return; }
+        var old = saveError(r.error, false);
+        if (old) { fail(old); return; }
+        fail(r.error.code === "23514" ? (/højst/.test(String(r.error.message || "")) ? String(r.error.message) : "Databasen afviste linket. Brug det delte link til ønskelisten fra Ønskeskyen.") : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
+        return;
+      }
+      $("fMain").value = ""; $("fVal").value = ""; state.importMsg = "";
+      fetchImports();
+    }, function () { btn.disabled = false; fail("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+  }
 
   // ---- settings ----
   $("shopForm").addEventListener("submit", function (ev) {

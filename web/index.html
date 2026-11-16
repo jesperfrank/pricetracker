@@ -73,7 +73,7 @@
       <button class="btn" id="fSubmit" type="submit">Hold øje</button>
     </form>
     <p class="msg" id="fMsg" role="alert" hidden></p>
-    <p class="hint" id="fHelp">Et link fra prisjagt.dk giver priser fra mange butikker, et link til én butik følger kun den butik, og et navn finder vi produktet til.</p>
+    <p class="hint" id="fHelp">Et link fra prisjagt.dk giver priser fra mange butikker, et link til én butik følger kun den butik, og et navn finder vi produktet til. Et delt link fra Ønskeskyen henter hele ønskelisten.</p>
     <p class="hint" id="fHint">Du får besked, når prisen er et godt tilbud: klart under normalprisen og den laveste i 30 dage. Er der for lidt historik, når prisen mindst 10 % under den første pris, vi har set.</p>
     <p class="notice" id="readonly" hidden>Din adresse har ikke adgang til at gemme endnu. Bed ejeren om at tilføje den.</p>
 
@@ -88,6 +88,8 @@
       <p class="listact" id="listAct" hidden></p>
       <p class="msg" id="listMsg" role="alert" hidden></p>
     </nav>
+
+    <div class="imports" id="importBox" aria-live="polite" hidden></div>
 
     <section class="list" id="list" aria-live="polite">
       <div class="empty"><b>Her kommer dine produkter</b>Laveste pris lige nu, butikkerne der fører varen, og prisen dag for dag.</div>
