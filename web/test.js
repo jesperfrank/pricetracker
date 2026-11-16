@@ -19,7 +19,7 @@ const server = http.createServer((req, res) => {
 const FAKE = `
 (function () {
   var init = window.__INIT || {};
-  var db = window.__db = { products: init.products || [], lists: init.lists || [], noLists: !!init.noLists, profiles: init.profiles || [], imports: init.imports || [], noImports: !!init.noImports, ops: [], deny: false, otpError: null,
+  var db = window.__db = { products: init.products || [], lists: init.lists || [], noLists: !!init.noLists, profiles: init.profiles || [], imports: init.imports || [], noImports: !!init.noImports, members: init.members || [], people: init.people || {}, noMembers: !!init.noMembers, shareAnswer: "ok", ops: [], deny: false, otpError: null,
     session: init.session || null, seq: 100, admin: !!init.admin, requests: init.requests || [], allowedList: init.allowed || [], rpcs: [], askReply: "requested" };
   var authCb = null, rt = [];
   // the 60-second poll: remember its callback so a test can run it at once
@@ -45,7 +45,8 @@ const FAKE = `
       return new Promise(function (resolve, reject) { setTimeout(function () {
         if (db.netFail && q.op !== "select") return reject(new Error("Failed to fetch"));
         if (q.op !== "select") db.ops.push({ table: table, op: q.op, payload: clone(q.payload), filters: clone(q.filters) });
-        var rows = table === "products" ? db.products : table === "lists" ? db.lists : table === "imports" ? db.imports : db.profiles;
+        var rows = table === "products" ? db.products : table === "lists" ? db.lists : table === "imports" ? db.imports : table === "list_members" ? db.members : db.profiles;
+        if (table === "list_members" && db.noMembers) return resolve({ data: null, error: { code: "PGRST205", message: "Could not find the table public.list_members in the schema cache" } });
         if (table === "imports" && db.noImports) return resolve({ data: null, error: { code: "PGRST205", message: "Could not find the table public.imports in the schema cache" } });
         if (q.op === "insert" && db.insertError && (table === "products" || table === "imports")) return resolve({ data: null, error: clone(db.insertError) });
         if (table === "products" && q.op === "insert" && db.oldGoalCheck && q.payload.target_type === "auto") return resolve({ data: null, error: { code: "23514", message: 'new row for relation "products" violates check constraint "products_target_type_check"', details: "Failing row contains (...)." } });
@@ -111,6 +112,27 @@ const FAKE = `
       var ADMIN = ["admin_list_requests", "admin_decide", "admin_list_allowed", "admin_remove_allowed"];
       if (ADMIN.indexOf(name) >= 0 && !db.admin) return resolve({ data: null, error: { code: "42501", message: "admin only" } });
       if (db.rpcFail && name !== "admin_list_requests" && name !== "admin_list_allowed") return resolve({ data: null, error: { message: "boom" } });
+      if (name === "list_members_named") return resolve({ data: clone(db.people[args.p_list] || []), error: null });
+      if (name === "share_list") {
+        if (db.shareError) return resolve({ data: null, error: clone(db.shareError) });
+        if (db.shareAnswer === "ok") { var nm = String(args.p_email).split("@")[0]; nm = nm.charAt(0).toUpperCase() + nm.slice(1); var nid = "m-" + (++db.seq);
+          db.members.push({ list_id: args.p_list, user_id: nid }); (db.people[args.p_list] = db.people[args.p_list] || [{ user_id: "u1", name: "Mor", role: "owner", email: null }]).push({ user_id: nid, name: nm, role: "member", email: String(args.p_email).toLowerCase() }); }
+        return resolve({ data: db.shareAnswer, error: null });
+      }
+      if (name === "unshare_list") {
+        db.members = db.members.filter(function (m) { return !(m.list_id === args.p_list && m.user_id === args.p_user); });
+        db.people[args.p_list] = (db.people[args.p_list] || []).filter(function (x) { return x.user_id !== args.p_user; });
+        // the person's products leave the list and stay theirs: the owner can no longer read them
+        db.products = db.products.filter(function (p) { return !(p.list_id === args.p_list && p.user_id === args.p_user); });
+        return resolve({ data: true, error: null });
+      }
+      if (name === "leave_list") {
+        db.members = db.members.filter(function (m) { return !(m.list_id === args.p_list && m.user_id === "u1"); });
+        db.products = db.products.filter(function (p) { return p.list_id !== args.p_list || p.user_id === "u1"; });
+        db.products.forEach(function (p) { if (p.list_id === args.p_list) p.list_id = null; });
+        db.lists = db.lists.filter(function (l) { return l.id !== args.p_list; });
+        return resolve({ data: true, error: null });
+      }
       if (name === "request_access") return resolve(db.askError ? { data: null, error: { message: "boom" } } : { data: db.askReply, error: null });
       if (name === "admin_list_requests") return resolve({ data: clone(db.requests), error: null });
       if (name === "admin_list_allowed") return resolve({ data: clone(db.allowedList), error: null });
@@ -168,7 +190,7 @@ async function open(opts = {}) {
   await page.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
   // config.js in the repo holds the real project's values, so both cases are served from the test, never from the file.
   await page.route(/\/config\.js$/, r => r.fulfill({ contentType: "text/javascript", body: opts.config === false ? "window.PV_CONFIG={supabaseUrl:\"\",supabaseAnonKey:\"\"};" : 'window.PV_CONFIG={supabaseUrl:"https://x.supabase.test",supabaseAnonKey:"anon"};' }));
-  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, imports: opts.imports || [], noImports: !!opts.noImports, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [] };
+  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, imports: opts.imports || [], noImports: !!opts.noImports, members: opts.members || [], people: opts.people || {}, noMembers: !!opts.noMembers, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [] };
   await page.addInitScript("window.__INIT = " + JSON.stringify(init) + ";");
   if (opts.fake !== false) await page.addInitScript(FAKE);
   if (opts.storage) await page.addInitScript(s => { for (const k in s) localStorage.setItem(k, s[k]); }, opts.storage);
@@ -927,6 +949,170 @@ let base;
       await p.click('[data-lsel="w1"]'); await p.click('[data-lact="del"]');
       const ov = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
       check("lists: no horizontal overflow at 360 px with many long chips and the confirmation open", ov.sw <= ov.cw, JSON.stringify(ov));
+      await p.context().close();
+    }
+  }
+
+
+  // 10b2. sharing a list
+  {
+    const chips = p => p.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#chips .lchip"), b => b.innerText.replace(/\s+/g, " ").trim()));
+    const shown = p => p.evaluate(() => document.querySelectorAll("#list .item").length);
+    const settle = p => p.waitForTimeout(150);
+    const rpcs = p => p.evaluate(() => window.__db.rpcs.filter(r => /share|leave|members/.test(r.name) && r.name !== "list_members_named"));
+    const heads = p => p.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#list .item .head"), h => h.innerText.replace(/\s+/g, " ").trim()));
+    const GAVER = { id: "l1", user_id: "u1", name: "Gaver" };
+    const OWNER_PEOPLE = { l1: [{ user_id: "u1", name: "Mor", role: "owner", email: null }, { user_id: "m1", name: "Jesper", role: "member", email: "jesper@familie.dk" }] };
+    const ownerProducts = () => [
+      row("test-sony-xm5", { id: "mine", list_id: "l1" }),
+      row("test-ps5-pro", { id: "hans", list_id: "l1", user_id: "m1" }),
+      row("test-dyson-v15", { id: "koebt", list_id: "l1", user_id: "m1", bought_at: "2026-11-15T10:00:00Z", bought_price: 1099, bought_by: "m1" }),
+      row("test-lego-falcon", { id: "privat" })];
+
+    // the owner of a shared list
+    {
+      const p = await open({ products: ownerProducts(), lists: [GAVER], members: [{ list_id: "l1", user_id: "m1" }], people: OWNER_PEOPLE, label: "share-owner" });
+      await p.waitForSelector(".item"); await settle(p);
+      check("share: a shared list is marked quietly with the word 'delt', before the count", /Gaver delt 3/.test((await chips(p)).join("|")), JSON.stringify(await chips(p)));
+      await p.click('[data-lsel="l1"]');
+      check("share: the owner has Omdøb, Del and Slet liste", /^Omdøb\s*Del\s*Slet liste$/.test((await p.textContent("#listAct")).trim()), await p.textContent("#listAct"));
+      check("share: the share panel is closed until 'Del' is pressed", !(await p.isVisible("#shareBox")));
+      const hs = await heads(p);
+      check("share: someone else's product says who added it ('af Jesper'), my own does not", hs.some(h => /af Jesper/.test(h) && /PlayStation|PS5|Pro/i.test(h)) && !hs.some(h => /Sony/.test(h) && /af /.test(h)), JSON.stringify(hs));
+      check("share: a bought mark says who bought it and for how much", hs.some(h => /Købt af Jesper for 1\.099 kr\./.test(h)), JSON.stringify(hs));
+      // someone else's product: readable, markable, nothing else (the owner of the LIST has no edit rights over it either)
+      await p.locator('.head[data-id="hans"]').click();
+      const body = await p.locator('.item:has(.head[data-id="hans"]) .body').innerHTML();
+      check("share: someone else's product has no edit, delete, goal, shop, variant or move controls", !/data-edit|data-act="del"|data-act="goal"|data-shops|data-act="change"|data-listpick|data-fixurl/.test(body), body.slice(0, 300));
+      check("share: ... but it can be marked as bought, and its link is just 'Link'", /data-act="buy"/.test(body) && />Link</.test(body) && !/Dit link/.test(body));
+      await p.locator('.head[data-id="mine"]').click();
+      const mine = await p.locator('.item:has(.head[data-id="mine"]) .body').innerHTML();
+      check("share: my own product keeps every control", /data-edit/.test(mine) && /data-act="del"/.test(mine) && /data-shops/.test(mine) && /data-listpick/.test(mine));
+      await p.locator('.head[data-id="koebt"]').click();
+      const kb = await p.locator('.item:has(.head[data-id="koebt"]) .body').innerHTML();
+      check("share: the list owner can undo someone else's bought mark", /data-bought="koebt"/.test(kb) && /data-act="unbuy"/.test(kb));
+      await p.locator('[data-act="unbuy"]').click(); await settle(p);
+      const ub = (await ops(p)).filter(o => o.op === "update");
+      check("share: undo writes only the bought columns", ub.length === 1 && JSON.stringify(Object.keys(ub[0].payload).sort()) === JSON.stringify(["bought_at", "bought_price"]) && ub[0].filters[0][1] === "koebt", JSON.stringify(ub));
+
+      // the panel
+      await p.click('[data-lact="share"]');
+      check("share: 'Del' opens an e-mail field and the people, with the e-mail address of each (the owner typed it)", await p.isVisible("#shareBox") && /Jesper/.test(await p.textContent("#shPeople")) && /jesper@familie\.dk/.test(await p.textContent("#shPeople")) && !/Mor/.test(await p.textContent("#shPeople")));
+      await p.fill("#shEmail", "ikke en adresse"); await p.click("#shSave");
+      check("share: a bad address is refused locally, no call", /gyldig/.test(await p.textContent("#listMsg")) && (await rpcs(p)).length === 0);
+      await p.fill("#shEmail", "  Sara@Familie.dk "); await p.click("#shSave"); await settle(p);
+      let r = await rpcs(p);
+      check("share: an invite calls share_list with the list and the address", r.length === 1 && r[0].name === "share_list" && r[0].args.p_list === "l1" && r[0].args.p_email === "Sara@Familie.dk", JSON.stringify(r));
+      check("share: ... the person shows up, the field is cleared, the count of people shows", /Sara/.test(await p.textContent("#shPeople")) && (await p.inputValue("#shEmail")) === "");
+      for (const [ans, txt] of [["unknown", "Personen skal have adgang til Prisvagten først."], ["already", "Listen er allerede delt med personen."], ["self", "Det er din egen adresse."], ["full", "En liste kan højst deles med 10 personer."], ["slow", "Prøv igen om lidt."]]) {
+        await p.evaluate(a => { window.__db.shareAnswer = a; }, ans);
+        await p.fill("#shEmail", "x@familie.dk"); await p.click("#shSave"); await settle(p);
+        check("share: answer '" + ans + "' is explained plainly", (await p.textContent("#listMsg")).trim() === txt, await p.textContent("#listMsg"));
+      }
+      await p.evaluate(() => { window.__db.shareAnswer = "ok"; window.__db.shareError = { code: "42883", message: "function does not exist" }; });
+      await p.click("#shSave"); await settle(p);
+      check("share: a database without the update says so", /databasen mangler den nyeste opdatering/.test(await p.textContent("#listMsg")));
+      await p.evaluate(() => { window.__db.shareError = null; });
+      // removing
+      await p.evaluate(() => { window.__db.rpcs.length = 0; });
+      await p.locator('#shPeople li:has-text("Jesper") [data-sact="rm"]').click();
+      check("share: 'Fjern' asks first and says the products are kept", /Fjern Jesper\? Jespers egne produkter beholdes uden liste\./.test(await p.textContent("#shPeople")) && (await rpcs(p)).length === 0);
+      await p.click('[data-sact="rm-no"]');
+      check("share: 'Behold' cancels", /Jesper/.test(await p.textContent("#shPeople")) && (await rpcs(p)).length === 0);
+      await p.locator('#shPeople li:has-text("Jesper") [data-sact="rm"]').click(); await p.click('[data-sact="rm-yes"]'); await settle(p);
+      r = await rpcs(p);
+      check("share: removing calls unshare_list for that person", r.length === 1 && r[0].name === "unshare_list" && r[0].args.p_list === "l1" && r[0].args.p_user === "m1", JSON.stringify(r));
+      check("share: the person and their products are gone from the list", !/Jesper/.test(await p.textContent("#shPeople")) && (await shown(p)) === 1, String(await shown(p)));
+      await p.click("#shClose");
+      check("share: 'Luk' closes the panel", !(await p.isVisible("#shareBox")));
+      await p.click('[data-lact="del"]');
+      check("share: deleting a shared list warns that the others lose access", /De andre mister adgangen\./.test(await p.textContent("#listAct")));
+      await p.context().close();
+    }
+
+    // an owned list that nobody is in: no marker, but 'Del' is there
+    {
+      const p = await open({ products: ownerProducts().slice(0, 1), lists: [GAVER], label: "share-none" });
+      await p.waitForSelector(".item"); await settle(p);
+      check("share: an unshared list has no 'delt' marker", !/delt/.test((await chips(p)).join("|")), JSON.stringify(await chips(p)));
+      await p.click('[data-lsel="l1"]'); await p.click('[data-lact="del"]');
+      check("share: and its delete text is the old one", !/De andre/.test(await p.textContent("#listAct")));
+      await p.click('[data-lact="del-no"]'); await p.click('[data-lact="share"]');
+      check("share: an empty share panel shows only the field", await p.isVisible("#shEmail") && (await p.locator("#shPeople li").count()) === 0);
+      await p.context().close();
+    }
+
+    // a member
+    {
+      const SHARED = { id: "l1", user_id: "o9", name: "Gaver" }, OWN = { id: "l2", user_id: "u1", name: "Privat" };
+      const PEOPLE = { l1: [{ user_id: "o9", name: "Mor", role: "owner", email: null }, { user_id: "u1", name: "Jesper", role: "member", email: null }, { user_id: "m2", name: "Far", role: "member", email: null }] };
+      const prods = () => [
+        row("test-sony-xm5", { id: "moders", list_id: "l1", user_id: "o9" }),
+        row("test-ps5-pro", { id: "min", list_id: "l1", user_id: "u1" }),
+        row("test-dyson-v15", { id: "fars", list_id: "l1", user_id: "o9", bought_at: "2026-11-15T10:00:00Z", bought_price: 500, bought_by: "m2" }),
+        row("test-lego-falcon", { id: "minegen", list_id: "l1", user_id: "o9", bought_at: "2026-11-15T10:00:00Z", bought_price: 77, bought_by: "u1" }),
+        row("d6x2cugcpfc2mrzw894h", { id: "privat", list_id: "l2", user_id: "u1" })];
+      const p = await open({ products: prods(), lists: [SHARED, OWN], members: [{ list_id: "l1", user_id: "u1" }, { list_id: "l1", user_id: "m2" }], people: PEOPLE, label: "share-member" });
+      await p.waitForSelector(".item"); await settle(p);
+      check("member: the chip looks like any other, with the quiet 'delt'", /Gaver delt 4/.test((await chips(p)).join("|")) && /Privat 1/.test((await chips(p)).join("|")), JSON.stringify(await chips(p)));
+      await p.click('[data-lsel="l1"]');
+      const act = (await p.textContent("#listAct")).trim();
+      check("member: the only action is 'Forlad liste', no rename, share or delete", act === "Forlad liste", act);
+      const hs = await heads(p);
+      check("member: 'af Mor' on Mor's product, none on mine", hs.some(h => /af Mor/.test(h)) && !hs.some(h => /PlayStation|PS5/i.test(h) && /af /.test(h)), JSON.stringify(hs));
+      check("member: 'Købt af Far for 500 kr.' for Far's mark, and plain 'Købt for 77 kr.' for my own", hs.some(h => /Købt af Far for 500 kr\./.test(h)) && hs.some(h => /Købt for 77 kr\./.test(h) && !/Købt af/.test(h)), JSON.stringify(hs));
+      await p.locator('.head[data-id="moders"]').click();
+      const mb = await p.locator('.item:has(.head[data-id="moders"]) .body').innerHTML();
+      check("member: Mor's product has no edit, delete, goal, shop or move controls, only 'Købt'", !/data-edit|data-act="del"|data-act="goal"|data-shops|data-act="change"|data-listpick/.test(mb) && /data-act="buy"/.test(mb));
+      await p.locator('.head[data-id="fars"]').click();
+      const fb = await p.locator('.item:has(.head[data-id="fars"]) .body').innerHTML();
+      check("member: Far's bought mark cannot be undone or re-priced by me", !/data-bought|data-act="unbuy"/.test(fb));
+      await p.locator('.head[data-id="minegen"]').click();
+      const eb = await p.locator('.item:has(.head[data-id="minegen"]) .body').innerHTML();
+      check("member: my own bought mark on Mor's product can be undone and re-priced by me", /data-bought="minegen"/.test(eb) && /data-act="unbuy"/.test(eb) && !/data-edit/.test(eb));
+      await p.locator('.head[data-id="min"]').click();
+      const ob = await p.locator('.item:has(.head[data-id="min"]) .body').innerHTML();
+      check("member: my own product in the shared list has every control, the move list names both lists", /data-edit/.test(ob) && /data-act="del"/.test(ob) && /data-listpick/.test(ob) && (await p.locator("#lp-min option").allTextContents()).join("|") === "Ingen liste|Gaver|Privat");
+      // marking as bought writes the bought columns only
+      await p.locator('.item:has(.head[data-id="moders"]) [data-act="buy"]').click(); await settle(p);
+      const up = (await ops(p)).filter(o => o.op === "update");
+      check("member: 'Købt' on Mor's product writes only bought_at and bought_price", up.length === 1 && up[0].filters[0][1] === "moders" && JSON.stringify(Object.keys(up[0].payload).sort()) === JSON.stringify(["bought_at", "bought_price"]), JSON.stringify(up));
+      // adding goes into the shared list
+      await p.fill("#fMain", "Kaffemaskine"); await p.click("#fSubmit"); await settle(p);
+      const ins = (await ops(p)).filter(o => o.table === "products" && o.op === "insert");
+      check("member: a product added while the shared list is selected goes into it", ins.length === 1 && ins[0].payload.list_id === "l1", JSON.stringify(ins));
+      // a wish list is the owner's to follow
+      await p.fill("#fMain", "https://onskeskyen.dk/s/abc123"); await p.click("#fSubmit"); await settle(p);
+      check("member: a wish-list link on a list that is not mine is refused, nothing written", /Kun listens ejer/.test(await p.textContent("#fMsg")) && (await ops(p)).filter(o => o.table === "imports").length === 0 && !(await p.isDisabled("#fSubmit")));
+      // leaving
+      await p.evaluate(() => { window.__db.rpcs.length = 0; });
+      await p.click('[data-lact="leave"]');
+      check("member: 'Forlad liste' asks first and says own products are kept", /Forlad listen Gaver\? Dine egne produkter beholdes uden liste\./.test(await p.textContent("#listAct")) && (await rpcs(p)).length === 0);
+      await p.click('[data-lact="leave-no"]');
+      check("member: 'Behold' cancels", (await p.textContent("#listAct")).trim() === "Forlad liste" && (await rpcs(p)).length === 0);
+      await p.click('[data-lact="leave"]'); await p.click('[data-lact="leave-yes"]'); await settle(p);
+      const lr = await rpcs(p);
+      check("member: leaving calls leave_list", lr.length === 1 && lr[0].name === "leave_list" && lr[0].args.p_list === "l1", JSON.stringify(lr));
+      check("member: the list and the others' products are gone, my own stay without a list", !/Gaver/.test((await chips(p)).join("|")) && (await p.locator('.head[data-id="moders"]').count()) === 0 && (await p.locator('.head[data-id="min"]').count()) === 1 && (await p.locator('.head[data-id="privat"]').count()) === 1, JSON.stringify(await chips(p)));
+      await p.context().close();
+    }
+
+    // a database without list_members (schema.sql not run again): nothing is marked, nothing breaks
+    {
+      const p = await open({ products: ownerProducts().slice(0, 1), lists: [GAVER], noMembers: true, label: "share-old" });
+      await p.waitForSelector(".item"); await settle(p);
+      check("share: before the update nothing is marked as shared", !/delt/.test((await chips(p)).join("|")) && (await shown(p)) === 1);
+      await p.context().close();
+    }
+
+    // phone width with the panel open
+    {
+      const p = await open({ products: ownerProducts(), lists: [GAVER], members: [{ list_id: "l1", user_id: "m1" }], people: { l1: OWNER_PEOPLE.l1.concat([{ user_id: "m3", name: "Et rigtigt langt navn der fylder", role: "member", email: "et.rigtigt.lange.navn.der.fylder@meget-lang-adresse.example.dk" }]) }, width: 360, label: "share-phone" });
+      await p.waitForSelector(".item"); await settle(p);
+      await p.click('[data-lsel="l1"]'); await p.click('[data-lact="share"]');
+      await p.locator('#shPeople li:has-text("Et rigtigt") [data-sact="rm"]').click();
+      const ov = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+      check("share: no horizontal overflow at 360 px with the panel and a confirmation open", ov.sw <= ov.cw, JSON.stringify(ov));
       await p.context().close();
     }
   }

@@ -424,6 +424,8 @@ delete from public.lists;
 delete from public.products where name in ('tv', 'radio');
 
 -- the live shape: a database without lists, then the schema is run (twice)
+drop table public.list_members;
+drop policy products_select on public.products; drop policy products_update_shared on public.products;
 drop trigger products_list_check_trg on public.products;
 alter table public.products drop column list_id;
 drop table public.lists cascade;
@@ -762,6 +764,460 @@ reset role;
 select t.chk('imports sync: stopping keeps the products', (select count(*) = 1 from public.products where name = 'fra-oenskelisten'));
 delete from public.products where name = 'fra-oenskelisten';
 delete from public.imports; delete from public.lists; delete from public.profiles;
+
+-- 11e. sharing a list. People: A = mor (owner of the list, admin), B = far and C = sara (allowed, will become members),
+-- G = gerda (allowed, never a member: the outsider), D = fremmed (signed in, NOT allowed), E = ingen (allowed, has no account yet),
+-- F = gammel (has an account, not allowed).
+insert into public.allowed_emails (email) values ('sara@familie.dk'), ('gerda@familie.dk'), ('ingen@familie.dk') on conflict do nothing;
+insert into auth.users (id, email) values
+  ('00000000-0000-0000-0000-0000000000c5', 'sara@familie.dk'), ('00000000-0000-0000-0000-0000000000c3', 'fremmed@x.dk'),
+  ('00000000-0000-0000-0000-0000000000f6', 'gammel@x.dk'),    ('00000000-0000-0000-0000-0000000000a7', 'Gerda@Familie.dk')
+  on conflict (id) do nothing;
+create function t.asC() returns void language sql as $$ select set_config('request.jwt.claims', '{"email":"sara@familie.dk","sub":"00000000-0000-0000-0000-0000000000c5"}', false) $$;
+create function t.asG() returns void language sql as $$ select set_config('request.jwt.claims', '{"email":"gerda@familie.dk","sub":"00000000-0000-0000-0000-0000000000a7"}', false) $$;
+grant execute on function t.asC(), t.asG() to public;
+create function t.share(l uuid, e text) returns text language plpgsql as $$
+declare r text; begin r := public.share_list(l, e); return r; exception when insufficient_privilege then return 'denied'; end $$;
+create function t.rows(q text) returns integer language plpgsql as $$
+declare n integer; begin execute q; get diagnostics n = row_count; return n; end $$;
+grant execute on function t.share(uuid, text), t.rows(text) to public;
+-- a product by name (any role), and a product's list by name
+create function t.pid(n text) returns uuid language sql security definer as $$ select id from public.products where name = n $$;
+grant execute on function t.pid(text) to public;
+
+insert into public.lists (id, user_id, name) values
+  ('00000000-0000-0000-0000-00000000aa01', '00000000-0000-0000-0000-0000000000a1', 'Gaver'),
+  ('00000000-0000-0000-0000-00000000aa02', '00000000-0000-0000-0000-0000000000a1', 'Privat'),
+  ('00000000-0000-0000-0000-00000000bb01', '00000000-0000-0000-0000-0000000000b2', 'Bs egen');
+insert into public.products (user_id, name, source_url, target_type, target_value, status, title, offers, history, normal_price, verdict, notified_price, list_id) values
+  ('00000000-0000-0000-0000-0000000000a1', 'a-gave', 'https://shop.example.dk/gave', 'price', 100, 'tracking', 'Gave', '[{"price":90}]', '[{"t":1,"p":90}]', 120, '{"level":"good"}', 90, '00000000-0000-0000-0000-00000000aa01'),
+  ('00000000-0000-0000-0000-0000000000a1', 'a-privat', 'https://shop.example.dk/privat', 'price', 100, 'tracking', 'Privat', '[{"price":80}]', null, 120, null, null, '00000000-0000-0000-0000-00000000aa02'),
+  ('00000000-0000-0000-0000-0000000000a1', 'a-uden-liste', 'https://shop.example.dk/uden', 'auto', null, 'tracking', 'Uden', '[]', null, null, null, null, null),
+  ('00000000-0000-0000-0000-0000000000b2', 'b-privat', 'https://shop.example.dk/bprivat', 'auto', null, 'tracking', 'B', '[]', null, null, null, null, null);
+
+-- --- before anyone is invited: nobody but the owner sees or touches anything
+set role authenticated;
+select t.asB();
+select t.chk('share: before inviting, B sees only B''s own product and no lists of A',
+  (select count(*) = 1 and bool_and(name = 'b-privat') from public.products) and (select count(*) = 1 and bool_and(name = 'Bs egen') from public.lists));
+select t.chk('share: B cannot invite to A''s list (42501), C-like call as a non-owner is refused too',
+  t.share('00000000-0000-0000-0000-00000000aa01', 'sara@familie.dk') = 'denied');
+select t.chk('share: B cannot insert a membership directly (no INSERT right)',
+  t.try($$insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa01', '00000000-0000-0000-0000-0000000000b2')$$) = 'denied');
+select t.chk('share: B cannot put a product into A''s list before being invited (fk)',
+  t.putnew('snyd', '00000000-0000-0000-0000-00000000aa01') = 'fk');
+select t.chk('share: list_members_named gives an outsider no rows', (select count(*) = 0 from public.list_members_named('00000000-0000-0000-0000-00000000aa01')));
+select t.chk('share: unshare_list is refused for a non-owner', t.try($$select public.unshare_list('00000000-0000-0000-0000-00000000aa01', '00000000-0000-0000-0000-0000000000b2')$$) = 'denied');
+select t.chk('share: leave_list on a list you are not in is a quiet false', not public.leave_list('00000000-0000-0000-0000-00000000aa01'));
+select t.asX();   -- D: signed in, not allowed
+select t.chk('share: D (not allowed) is refused by every function and sees nothing',
+  t.share('00000000-0000-0000-0000-00000000aa01', 'sara@familie.dk') = 'denied'
+  and t.try($$select public.unshare_list('00000000-0000-0000-0000-00000000aa01', '00000000-0000-0000-0000-0000000000b2')$$) = 'denied'
+  and t.try($$select public.leave_list('00000000-0000-0000-0000-00000000aa01')$$) = 'denied'
+  and (select count(*) = 0 from public.list_members_named('00000000-0000-0000-0000-00000000aa01'))
+  and (select count(*) = 0 from public.products) and (select count(*) = 0 from public.lists) and (select count(*) = 0 from public.list_members));
+select t.chk('share: the helper functions only ever speak about the caller (D owns and is member of nothing)',
+  not public.owns_list('00000000-0000-0000-0000-00000000aa01') and not public.is_list_member('00000000-0000-0000-0000-00000000aa01'));
+reset role;
+set role anon;
+select t.chk('share: anon cannot call any of the functions or read the tables',
+  t.denied($$select public.share_list('00000000-0000-0000-0000-00000000aa01', 'x@y.dk')$$) and t.denied('select * from public.list_members_named(''00000000-0000-0000-0000-00000000aa01'')')
+  and t.denied($$select public.unshare_list('00000000-0000-0000-0000-00000000aa01', null)$$) and t.denied($$select public.leave_list('00000000-0000-0000-0000-00000000aa01')$$)
+  and t.denied('select * from public.list_members') and t.denied('select * from public.share_attempts') and t.denied($$select public.person_name('00000000-0000-0000-0000-0000000000a1')$$)
+  and t.denied($$select public.owns_list('00000000-0000-0000-0000-00000000aa01')$$));
+reset role;
+set role authenticated;
+select t.asA();
+select t.chk('share: nobody, not even the owner, can call person_name (internal)', t.denied($$select public.person_name('00000000-0000-0000-0000-0000000000b2')$$));
+select t.chk('share: nobody can read share_attempts', t.denied('select * from public.share_attempts'));
+
+-- --- inviting: every answer, and no way to tell "no account" from "not allowed"
+select t.chk('share: invalid addresses', t.share('00000000-0000-0000-0000-00000000aa01', 'hej') = 'invalid' and t.share('00000000-0000-0000-0000-00000000aa01', null) = 'invalid'
+  and t.share('00000000-0000-0000-0000-00000000aa01', 'a b@c.dk') = 'invalid' and t.share('00000000-0000-0000-0000-00000000aa01', repeat('a', 200) || '@b.dk') = 'invalid');
+select t.chk('share: your own address', t.share('00000000-0000-0000-0000-00000000aa01', ' MOR@familie.dk ') = 'self');
+select t.chk('share: no account and not allowed give the same answer (no account oracle)',
+  t.share('00000000-0000-0000-0000-00000000aa01', 'ingen@familie.dk') = 'unknown'          -- allowed, never signed in
+  and t.share('00000000-0000-0000-0000-00000000aa01', 'gammel@x.dk') = 'unknown'          -- has an account, not allowed
+  and t.share('00000000-0000-0000-0000-00000000aa01', 'findes-ikke@x.dk') = 'unknown'     -- neither
+  and t.share('00000000-0000-0000-0000-00000000aa01', 'fremmed@x.dk') = 'unknown');
+select t.chk('share: a list that is not yours is refused the same way as one that does not exist',
+  t.share('00000000-0000-0000-0000-00000000bb01', 'sara@familie.dk') = 'denied' and t.share(gen_random_uuid(), 'sara@familie.dk') = 'denied');
+select t.chk('share: nothing was stored by the misses', (select count(*) = 0 from public.list_members));
+reset role;
+select t.chk('share: look-ups are counted (4 so far)', (select count(*) = 4 from public.share_attempts));
+-- rate limit: 20 look-ups an hour (hits count too), then "slow" for everything (also for a valid address), and it does not depend on the address
+insert into public.share_attempts (user_id) select '00000000-0000-0000-0000-0000000000a1' from generate_series(1, 16);
+set role authenticated;
+select t.asA();
+select t.chk('share: after 20 look-ups in an hour the answer is "slow", even for a good address',
+  t.share('00000000-0000-0000-0000-00000000aa01', 'far@familie.dk') = 'slow' and t.share('00000000-0000-0000-0000-00000000aa01', 'nope@x.dk') = 'slow');
+select t.asB();
+select t.chk('share: the limit is per person (B is not slowed down, B only gets the normal refusal)', t.share('00000000-0000-0000-0000-00000000aa01', 'sara@familie.dk') = 'denied');
+reset role;
+update public.share_attempts set at = now() - interval '2 hours';
+set role authenticated;
+select t.asA();
+select t.chk('share: look-ups older than an hour do not count', t.share('00000000-0000-0000-0000-00000000aa01', 'far@familie.dk') = 'ok');
+select t.chk('share: ... and the old rows are cleaned up on the next miss', t.share('00000000-0000-0000-0000-00000000aa01', 'nope@x.dk') = 'unknown');
+reset role;
+update public.share_attempts set at = now() - interval '3 days';
+set role authenticated; select t.asA();
+select t.share('00000000-0000-0000-0000-00000000aa01', 'nope2@x.dk');
+reset role;
+select t.chk('share: rows older than a day are deleted', (select count(*) = 1 from public.share_attempts));
+set role authenticated;
+select t.asA();
+select t.chk('share: a second invite of the same person is "already" (case-insensitive)', t.share('00000000-0000-0000-0000-00000000aa01', 'FAR@Familie.dk') = 'already');
+select t.chk('share: the invite is stored once, the mixed-case account is found (Gerda@Familie.dk)', (select count(*) = 1 from public.list_members)
+  and t.share('00000000-0000-0000-0000-00000000aa02', 'gerda@familie.dk') = 'ok');
+select t.chk('share: A can remove G from Privat again', public.unshare_list('00000000-0000-0000-0000-00000000aa02', '00000000-0000-0000-0000-0000000000a7') and not public.unshare_list('00000000-0000-0000-0000-00000000aa02', '00000000-0000-0000-0000-0000000000a7'));
+select t.chk('share: invite C as well', t.share('00000000-0000-0000-0000-00000000aa01', 'sara@familie.dk') = 'ok');
+select t.chk('share: A sees both members', (select count(*) = 2 from public.list_members));
+reset role;
+select t.chk('share: hits are counted as look-ups too (already, gerda, sara and the last miss)', (select count(*) = 4 from public.share_attempts));
+
+-- --- what a member sees
+set role authenticated;
+select t.asB();
+select t.chk('member: B sees the shared list, not A''s other lists, and still their own',
+  (select array_agg(name order by name) from public.lists) = array['Bs egen', 'Gaver']);
+select t.chk('member: B sees the shared product (with price data), not A''s other products',
+  (select count(*) = 1 from public.products where name = 'a-gave' and offers is not null and normal_price = 120 and verdict is not null)
+  and (select count(*) = 0 from public.products where name in ('a-privat', 'a-uden-liste')) and (select count(*) = 2 from public.products));
+select t.chk('member: B sees their own membership and C''s (co-member), never memberships of other lists',
+  (select count(*) = 2 from public.list_members where list_id = '00000000-0000-0000-0000-00000000aa01'));
+select t.chk('member: B cannot guess A''s other products by id', (select count(*) = 0 from public.products where id = t.pid('a-privat')));
+select t.chk('member: the lists row of a shared list is read-only for B',
+  t.rows($$update public.lists set name = 'Hacket' where id = '00000000-0000-0000-0000-00000000aa01'$$) = 0
+  and t.rows($$delete from public.lists where id = '00000000-0000-0000-0000-00000000aa01'$$) = 0
+  and t.try($$insert into public.lists (user_id, name) values ('00000000-0000-0000-0000-0000000000a1', 'Snyd')$$) = 'denied');
+select t.chk('member: B cannot move the shared list to B, nor rename A''s list via user_id tricks',
+  t.rows($$update public.lists set user_id = '00000000-0000-0000-0000-0000000000b2' where id = '00000000-0000-0000-0000-00000000aa01'$$) = 0);
+select t.chk('member: B cannot add, change or remove members (no INSERT/UPDATE right, DELETE of other rows hits nothing)',
+  t.try($$insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa01', '00000000-0000-0000-0000-0000000000a7')$$) = 'denied'
+  and t.try($$update public.list_members set user_id = '00000000-0000-0000-0000-0000000000a7'$$) = 'denied'
+  and t.rows($$delete from public.list_members where user_id = '00000000-0000-0000-0000-0000000000c5'$$) = 0
+  and t.share('00000000-0000-0000-0000-00000000aa01', 'gerda@familie.dk') = 'denied'
+  and t.try($$select public.unshare_list('00000000-0000-0000-0000-00000000aa01', '00000000-0000-0000-0000-0000000000c5')$$) = 'denied');
+select t.chk('member: B''s names list shows people, no e-mail addresses',
+  (select count(*) = 3 and bool_and(email is null) from public.list_members_named('00000000-0000-0000-0000-00000000aa01')));
+select t.chk('member: the names are Mor (owner), Far, Sara',
+  (select array_agg(name || ':' || role order by name) from public.list_members_named('00000000-0000-0000-0000-00000000aa01')) = array['Far:member', 'Mor:owner', 'Sara:member']);
+select t.chk('member: B''s names list for A''s other list is empty', (select count(*) = 0 from public.list_members_named('00000000-0000-0000-0000-00000000aa02')));
+reset role;
+
+-- --- what a member can add, and what they cannot change on someone else's product
+set role authenticated;
+select t.asB();
+select t.chk('member: B can add a product to the shared list', t.putnew('b-i-gaver', '00000000-0000-0000-0000-00000000aa01') = 'ok');
+select t.chk('member: ... it is B''s (user_id), pending, in the list',
+  (select user_id = '00000000-0000-0000-0000-0000000000b2' and list_id = '00000000-0000-0000-0000-00000000aa01' and status = 'pending' from public.products where name = 'b-i-gaver'));
+select t.chk('member: B cannot add a product as someone else', t.try($$insert into public.products (user_id, name, target_type) values ('00000000-0000-0000-0000-0000000000a1', 'som-mor', 'auto')$$) = 'denied');
+select t.chk('member: B cannot add a product to A''s other list', t.putnew('snyd2', '00000000-0000-0000-0000-00000000aa02') = 'fk');
+select t.chk('member: B cannot put an own product into A''s other list', t.put('b-privat', '00000000-0000-0000-0000-00000000aa02') = 'fk');
+select t.chk('member: B can put an own product into the shared list', t.put('b-privat', '00000000-0000-0000-0000-00000000aa01') = 'ok');
+select t.chk('member: ... and back out', t.put('b-privat', null) = 'ok');
+reset role;
+-- a donor row that differs from a-gave in every column but the bought ones, used to try every column
+insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
+  status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id)
+values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
+  'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01');
+update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
+  variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04'
+ where name = 'a-gave';
+create table t.donor as select * from public.products where name = 'donor';
+create table t.snap as select id, to_jsonb(p) as j from public.products p where name = 'a-gave';
+grant select on t.donor, t.snap to public;
+select t.chk('forbidden columns: the donor row differs from the target in every column except the bought ones',
+  (select count(*) = 0 from jsonb_each((select to_jsonb(p) from public.products p where name = 'a-gave')) e
+     join jsonb_each((select to_jsonb(d) from t.donor d)) f using (key)
+    where e.value = f.value and key not in ('bought_at', 'bought_price', 'bought_by')));
+-- t.forbid(product): try to change every column but the bought ones; returns the columns where it did NOT fail with check_violation
+create function t.forbid(pid uuid) returns text language plpgsql as $$
+declare c record; bad text := ''; n integer; same boolean;
+begin
+  for c in select a.attname from pg_attribute a where a.attrelid = 'public.products'::regclass and a.attnum > 0 and not a.attisdropped
+             and a.attname not in ('bought_at', 'bought_price', 'bought_by') loop
+    execute format('select (select %I from public.products where id = %L) is not distinct from (select %I from t.donor)', c.attname, pid, c.attname) into same;
+    continue when same;     -- the donor has the same value here (fx the owner), nothing to try
+    begin
+      execute format('update public.products set %I = (select %I from t.donor) where id = %L', c.attname, c.attname, pid);
+      get diagnostics n = row_count;
+      bad := bad || c.attname || '(no error, ' || n || ' rows) ';
+    exception when check_violation then null;
+      when others then bad := bad || c.attname || '(' || sqlstate || ') ';
+    end;
+  end loop;
+  return bad;
+end $$;
+grant execute on function t.forbid(uuid) to public;
+set role authenticated;
+select t.asB();
+select t.chk('forbidden: B (member) cannot change ANY column of A''s product except the bought ones', t.forbid(t.pid('a-gave')) = '');
+select t.chk('forbidden: ... and nothing changed', (select to_jsonb(p) = s.j from public.products p, t.snap s where p.id = s.id));
+select t.chk('forbidden: B cannot delete A''s product in the shared list', t.rows($$delete from public.products where name = 'a-gave'$$) = 0);
+select t.chk('forbidden: B cannot set several columns at once with a harmless one',
+  t.try($$update public.products set name = 'x', bought_at = now() where name = 'a-gave'$$) = 'check');
+select t.chk('forbidden: B cannot hand A''s product to B or pull it out of the list in one go',
+  t.try($$update public.products set user_id = '00000000-0000-0000-0000-0000000000b2' where name = 'a-gave'$$) = 'check'
+  and t.try($$update public.products set list_id = null where name = 'a-gave'$$) = 'check');
+reset role;
+select t.chk('forbidden: still untouched after the attempts', (select to_jsonb(p) = s.j from public.products p, t.snap s where p.id = s.id));
+set role authenticated;
+select t.asC();
+select t.chk('forbidden: C (the other member) is held to the same rule', t.forbid(t.pid('a-gave')) = '');
+select t.chk('forbidden: ... and cannot change B''s product in the list either', t.forbid(t.pid('b-i-gaver')) = '');
+select t.asA();
+select t.chk('forbidden: A, the list''s owner, also cannot change B''s product (only the bought columns)', t.forbid(t.pid('b-i-gaver')) = '');
+select t.chk('forbidden: A cannot delete B''s product in A''s list', t.rows($$delete from public.products where name = 'b-i-gaver'$$) = 0);
+select t.chk('forbidden: A sees B''s product in the list', (select count(*) = 1 from public.products where name = 'b-i-gaver'));
+reset role;
+select t.chk('forbidden: B''s product is untouched', (select user_id = '00000000-0000-0000-0000-0000000000b2' and name = 'b-i-gaver' from public.products where name = 'b-i-gaver'));
+
+-- --- bought: who may mark, who may undo
+set role authenticated;
+select t.asB();
+update public.products set bought_at = '2000-01-01', bought_price = 1099, bought_by = '00000000-0000-0000-0000-0000000000c5' where name = 'a-gave';
+select t.chk('bought: B marks A''s product; the time is the server''s, bought_by is B (not what was sent)',
+  (select bought_price = 1099 and abs(extract(epoch from now() - bought_at)) < 60 and bought_by = '00000000-0000-0000-0000-0000000000b2' from public.products where name = 'a-gave'));
+select t.chk('bought: nothing else changed by the member''s mark',
+  (select to_jsonb(p) - 'bought_at' - 'bought_price' - 'bought_by' = s.j - 'bought_at' - 'bought_price' - 'bought_by' from public.products p, t.snap s where p.id = s.id));
+select t.asC();
+select t.chk('bought: C sees who bought it', (select bought_by = '00000000-0000-0000-0000-0000000000b2' from public.products where name = 'a-gave'));
+select t.chk('bought: C (a plain member) cannot undo B''s mark, nor change its price', t.try($$update public.products set bought_at = null, bought_price = null where name = 'a-gave'$$) = 'check'
+  and t.try($$update public.products set bought_price = 1 where name = 'a-gave'$$) = 'check');
+update public.products set bought_at = now(), bought_by = '00000000-0000-0000-0000-0000000000c5' where name = 'a-gave';
+select t.chk('bought: C cannot take over the mark (bought_by and time stay B''s)',
+  (select bought_by = '00000000-0000-0000-0000-0000000000b2' and bought_price = 1099 and bought_at < now() - interval '0 seconds' from public.products where name = 'a-gave'));
+select t.chk('bought: C cannot write bought_by directly either (the update is accepted, the value ignored)', t.rows($$update public.products set bought_by = '00000000-0000-0000-0000-0000000000c5' where name = 'a-gave'$$) = 1);
+select t.chk('bought: ... bought_by is still B', (select bought_by = '00000000-0000-0000-0000-0000000000b2' from public.products where name = 'a-gave'));
+select t.asB();
+update public.products set bought_price = 999.5 where name = 'a-gave';
+select t.chk('bought: B (who set it) can change the price', (select bought_price = 999.5 from public.products where name = 'a-gave'));
+select t.asA();
+update public.products set bought_price = 950 where name = 'a-gave';
+select t.chk('bought: A (product owner and list owner) can change the price', (select bought_price = 950 and bought_by = '00000000-0000-0000-0000-0000000000b2' from public.products where name = 'a-gave'));
+update public.products set bought_at = null, bought_price = null where name = 'a-gave';
+select t.chk('bought: A can undo B''s mark; bought_by is cleared', (select bought_at is null and bought_price is null and bought_by is null from public.products where name = 'a-gave'));
+-- the other direction: A marks own product, B cannot undo it
+update public.products set bought_at = now() where name = 'a-gave';
+select t.chk('bought: A''s own mark is stamped with A', (select bought_by = '00000000-0000-0000-0000-0000000000a1' from public.products where name = 'a-gave'));
+select t.asB();
+select t.chk('bought: B cannot undo A''s mark', t.try($$update public.products set bought_at = null where name = 'a-gave'$$) = 'check');
+select t.chk('bought: ... nor fake a price on it', t.try($$update public.products set bought_price = 5 where name = 'a-gave'$$) = 'check');
+-- B's own product in the list, bought by C: B (the product's owner) and A (list owner) may undo, C may
+select t.asC();
+update public.products set bought_at = now(), bought_price = 50 where name = 'b-i-gaver';
+select t.chk('bought: C marks B''s product', (select bought_by = '00000000-0000-0000-0000-0000000000c5' from public.products where name = 'b-i-gaver'));
+select t.asA();
+select t.chk('bought: A (list owner, not product owner, not marker) can undo', t.rows($$update public.products set bought_at = null, bought_price = null where name = 'b-i-gaver'$$) = 1);
+select t.chk('bought: ... and bought_by is cleared', (select bought_at is null and bought_by is null from public.products where name = 'b-i-gaver'));
+select t.asC();
+update public.products set bought_at = now() where name = 'b-i-gaver';
+select t.asB();
+select t.chk('bought: B (product owner) can undo C''s mark on B''s own product', t.rows($$update public.products set bought_at = null where name = 'b-i-gaver'$$) = 1);
+select t.chk('bought: ... it is undone', (select bought_at is null from public.products where name = 'b-i-gaver'));
+select t.chk('bought: a member can mark again after an undo', t.rows($$update public.products set bought_at = now() where name = 'b-i-gaver'$$) = 1);
+select t.chk('bought: ... stamped with B', (select bought_by = '00000000-0000-0000-0000-0000000000b2' from public.products where name = 'b-i-gaver'));
+update public.products set bought_at = null where name = 'b-i-gaver';
+-- an insert with a bought mark is stamped too, bought_by cannot be preset
+insert into public.products (name, target_type, bought_at, bought_price, bought_by, list_id) values ('b-koebt', 'auto', '1999-01-01', 5, '00000000-0000-0000-0000-0000000000c5', '00000000-0000-0000-0000-00000000aa01');
+select t.chk('bought: an insert gets the server time and bought_by = the inserting person', (select bought_by = '00000000-0000-0000-0000-0000000000b2' and abs(extract(epoch from now() - bought_at)) < 60 from public.products where name = 'b-koebt'));
+insert into public.products (name, target_type, bought_by) values ('b-ikke-koebt', 'auto', '00000000-0000-0000-0000-0000000000c5');
+select t.chk('bought: bought_by without a mark is dropped on insert', (select bought_by is null from public.products where name = 'b-ikke-koebt'));
+update public.products set bought_by = '00000000-0000-0000-0000-0000000000c5' where name = 'b-ikke-koebt';
+select t.chk('bought: bought_by without a mark is dropped on update', (select bought_by is null from public.products where name = 'b-ikke-koebt'));
+reset role;
+delete from public.products where name in ('b-koebt', 'b-ikke-koebt');
+
+-- --- the owner of a product in the shared list keeps full control of it
+set role authenticated;
+select t.asB();
+update public.products set name = 'b-i-gaver2', target_type = 'price', target_value = 7, shops_only = false where name = 'b-i-gaver';
+select t.chk('own product: B can edit own product in the shared list', (select count(*) = 1 from public.products where name = 'b-i-gaver2' and target_value = 7));
+select t.asA();
+select t.chk('own product: A (list owner) sees the change', (select count(*) = 1 from public.products where name = 'b-i-gaver2'));
+select t.asB();
+select t.chk('own product: B can delete own product', t.rows($$delete from public.products where name = 'b-i-gaver2'$$) = 1);
+reset role;
+
+-- --- a third person (G, allowed but not a member) and a removed-from-allowed member
+set role authenticated;
+select t.asG();
+select t.chk('outsider: G (allowed, not a member) sees nothing of A''s, and is refused by every function',
+  (select count(*) = 0 from public.products) and (select count(*) = 0 from public.lists) and (select count(*) = 0 from public.list_members)
+  and (select count(*) = 0 from public.list_members_named('00000000-0000-0000-0000-00000000aa01'))
+  and t.share('00000000-0000-0000-0000-00000000aa01', 'gerda@familie.dk') = 'denied'
+  and t.try($$select public.unshare_list('00000000-0000-0000-0000-00000000aa01', '00000000-0000-0000-0000-0000000000b2')$$) = 'denied'
+  and not public.leave_list('00000000-0000-0000-0000-00000000aa01'));
+select t.chk('outsider: G cannot add to, change or delete in the shared list',
+  t.putnew('snyd3', '00000000-0000-0000-0000-00000000aa01') = 'fk'
+  and t.rows($$update public.products set bought_at = now() where name = 'a-gave'$$) = 0
+  and t.rows($$delete from public.products where name = 'a-gave'$$) = 0
+  and t.rows($$update public.lists set name = 'x'$$) = 0 and t.rows($$delete from public.list_members$$) = 0);
+reset role;
+select t.chk('outsider: nothing happened', (select count(*) = 1 from public.products where name = 'a-gave' and bought_at is not null and bought_by = '00000000-0000-0000-0000-0000000000a1'));
+-- B loses access to the site: no reading, no writing, even though still a member row
+delete from public.allowed_emails where email = 'far@familie.dk';
+set role authenticated;
+select t.asB();
+select t.chk('allowed: a member who is no longer allowed sees and changes nothing',
+  (select count(*) = 0 from public.products) and (select count(*) = 0 from public.lists) and (select count(*) = 0 from public.list_members)
+  and t.rows($$update public.products set bought_at = now() where name = 'a-gave'$$) = 0 and t.putnew('nej', '00000000-0000-0000-0000-00000000aa01') = 'denied'
+  and (select count(*) = 0 from public.list_members_named('00000000-0000-0000-0000-00000000aa01')) and t.try($$select public.leave_list('00000000-0000-0000-0000-00000000aa01')$$) = 'denied');
+reset role;
+insert into public.allowed_emails (email) values ('far@familie.dk');
+
+-- --- removal and leaving: the person's own products leave the list and stay theirs; read access ends at once
+insert into public.products (user_id, name, target_type, list_id) values
+  ('00000000-0000-0000-0000-0000000000b2', 'b-1', 'auto', '00000000-0000-0000-0000-00000000aa01'),
+  ('00000000-0000-0000-0000-0000000000b2', 'b-2', 'auto', '00000000-0000-0000-0000-00000000aa01'),
+  ('00000000-0000-0000-0000-0000000000c5', 'c-1', 'auto', '00000000-0000-0000-0000-00000000aa01');
+update public.products set bought_at = now(), bought_by = '00000000-0000-0000-0000-0000000000b2', bought_price = 10 where name = 'a-gave';
+set role authenticated;
+select t.asB();
+select t.chk('remove: B sees 4 products before (a-gave, b-1, b-2, c-1)', (select count(*) = 4 from public.products where list_id = '00000000-0000-0000-0000-00000000aa01'));
+select t.asC();
+select t.chk('remove: only the owner can remove (C cannot)', t.try($$select public.unshare_list('00000000-0000-0000-0000-00000000aa01', '00000000-0000-0000-0000-0000000000b2')$$) = 'denied');
+select t.asA();
+select t.chk('remove: A removes B', public.unshare_list('00000000-0000-0000-0000-00000000aa01', '00000000-0000-0000-0000-0000000000b2'));
+select t.asB();
+select t.chk('remove: B immediately sees nothing of the list: not a-gave, not c-1, not the list, not the members',
+  (select count(*) = 0 from public.products where name in ('a-gave', 'c-1')) and (select count(*) = 0 from public.lists where name = 'Gaver')
+  and (select count(*) = 0 from public.list_members) and (select count(*) = 0 from public.list_members_named('00000000-0000-0000-0000-00000000aa01'))
+  and t.rows($$update public.products set bought_at = null where name = 'a-gave'$$) = 0 and t.putnew('nej2', '00000000-0000-0000-0000-00000000aa01') = 'fk');
+select t.chk('remove: B''s own products stay B''s, now without a list (and B still sees them)',
+  (select count(*) = 3 and bool_and(list_id is null) and bool_and(user_id = '00000000-0000-0000-0000-0000000000b2') from public.products where name in ('b-1', 'b-2', 'b-privat')));
+select t.asA();
+select t.chk('remove: A no longer sees B''s products, still sees own and C''s',
+  (select count(*) = 0 from public.products where name in ('b-1', 'b-2')) and (select count(*) = 2 from public.products where list_id = '00000000-0000-0000-0000-00000000aa01'));
+select t.chk('remove: the mark B left on a-gave stays; B still has a name for A (former member)',
+  (select bought_by = '00000000-0000-0000-0000-0000000000b2' from public.products where name = 'a-gave')
+  and (select role = 'former' and name = 'Far' and email is null from public.list_members_named('00000000-0000-0000-0000-00000000aa01') where user_id = '00000000-0000-0000-0000-0000000000b2'));
+select t.asC();
+select t.chk('remove: C sees a former member by name but never an e-mail', (select count(*) = 3 and bool_and(email is null) from public.list_members_named('00000000-0000-0000-0000-00000000aa01')));
+select t.chk('remove: C (remaining member) can undo nothing of B''s old mark', t.try($$update public.products set bought_at = null where name = 'a-gave'$$) = 'check');
+select t.asA();
+select t.chk('remove: A can (list owner)', t.rows($$update public.products set bought_at = null, bought_price = null where name = 'a-gave'$$) = 1);
+-- leaving
+select t.asC();
+select t.chk('leave: C leaves', public.leave_list('00000000-0000-0000-0000-00000000aa01') and not public.leave_list('00000000-0000-0000-0000-00000000aa01'));
+select t.chk('leave: C''s own product is out of the list and still C''s; C sees no more of A''s',
+  (select count(*) = 1 and bool_and(list_id is null) from public.products where name = 'c-1') and (select count(*) = 1 from public.products)
+  and (select count(*) = 0 from public.lists));
+select t.chk('leave: C cannot leave by deleting someone else''s row, only their own', t.rows($$delete from public.list_members$$) = 0);
+reset role;
+select t.chk('leave/remove: A''s product is untouched and still in the list', (select list_id = '00000000-0000-0000-0000-00000000aa01' and user_id = '00000000-0000-0000-0000-0000000000a1' from public.products where name = 'a-gave'));
+select t.chk('leave/remove: no members left', (select count(*) = 0 from public.list_members));
+-- a member can also leave by deleting their own row (RLS), and the products still leave the list
+set role authenticated; select t.asA();
+select t.share('00000000-0000-0000-0000-00000000aa01', 'far@familie.dk'), t.share('00000000-0000-0000-0000-00000000aa01', 'sara@familie.dk');
+select t.asB();
+select t.chk('leave: B back in; adds a product', t.putnew('b-3', '00000000-0000-0000-0000-00000000aa01') = 'ok');
+select t.chk('leave: B leaves with a plain DELETE of the own row', t.rows($$delete from public.list_members where user_id = '00000000-0000-0000-0000-0000000000b2'$$) = 1);
+select t.chk('leave: ... and the product left the list', (select list_id is null from public.products where name = 'b-3'));
+reset role;
+
+-- --- deleting the list: products stay with whoever added them, members lose access, memberships go
+set role authenticated; select t.asC();
+select t.chk('delete list: C adds a product to the shared list', t.putnew('c-2', '00000000-0000-0000-0000-00000000aa01') = 'ok');
+select t.asA();
+delete from public.lists where id = '00000000-0000-0000-0000-00000000aa01';
+reset role;
+select t.chk('delete list: all products stay, none in a list, with their adders',
+  (select count(*) = 1 and bool_and(list_id is null) and bool_and(user_id = '00000000-0000-0000-0000-0000000000c5') from public.products where name = 'c-2')
+  and (select count(*) = 1 and bool_and(list_id is null) from public.products where name = 'a-gave')
+  and (select count(*) = 0 from public.list_members));
+set role authenticated; select t.asC();
+select t.chk('delete list: C keeps own product, sees nothing else', (select count(*) = 2 and bool_and(user_id = '00000000-0000-0000-0000-0000000000c5') from public.products));
+reset role;
+
+-- --- the cap: 10 members per list, 40 products per adding person
+insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000aa03', '00000000-0000-0000-0000-0000000000a1', 'Stor');
+insert into auth.users (id, email) select ('00000000-0000-0000-0000-000000000' || lpad(g::text, 3, '0'))::uuid, 'medlem' || g || '@familie.dk' from generate_series(101, 111) g;
+insert into public.allowed_emails (email) select 'medlem' || g || '@familie.dk' from generate_series(101, 111) g;
+set role authenticated; select t.asA();
+select t.chk('cap: ten members are fine',
+  (select bool_and(t.share('00000000-0000-0000-0000-00000000aa03', 'medlem' || g || '@familie.dk') = 'ok') from generate_series(101, 110) g));
+select t.chk('cap: the eleventh gets "full", also for an unknown address (the cap comes first, it says nothing about the address)',
+  t.share('00000000-0000-0000-0000-00000000aa03', 'medlem111@familie.dk') = 'full' and t.share('00000000-0000-0000-0000-00000000aa03', 'nope@x.dk') = 'full');
+reset role;
+select t.chk('cap: the trigger enforces it for every role', t.try($$insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa03', '00000000-0000-0000-0000-000000000111')$$) = 'check');
+select t.chk('cap: the owner cannot be a member', t.try($$insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa01', '00000000-0000-0000-0000-0000000000a1')$$) = 'fk');
+select t.chk('cap: only allowed people can be members (checked for every role)',
+  t.try($$insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa03', '00000000-0000-0000-0000-0000000000f6')$$) = 'check'
+  and t.try($$insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa03', gen_random_uuid())$$) in ('fk', 'check'));
+delete from public.list_members where user_id = '00000000-0000-0000-0000-000000000110';
+select t.chk('cap: ... the eleventh fits now', t.try($$insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa03', '00000000-0000-0000-0000-000000000111')$$) = 'ok');
+-- 40 products per adding person: member products count for the member, not for the owner
+insert into public.products (user_id, name, target_type, list_id) select '00000000-0000-0000-0000-000000000101', 'm' || g, 'auto', '00000000-0000-0000-0000-00000000aa03' from generate_series(1, 40) g;
+set role authenticated;
+select set_config('request.jwt.claims', '{"email":"medlem101@familie.dk","sub":"00000000-0000-0000-0000-000000000101"}', false);
+select t.chk('cap: the 41st product of a member is refused, even in the shared list', t.putnew('m41', '00000000-0000-0000-0000-00000000aa03') = 'check');
+select t.asA();
+select t.chk('cap: the owner''s own count is separate (A can still add to the shared list)', t.putnew('a-ny', '00000000-0000-0000-0000-00000000aa03') = 'ok');
+reset role;
+delete from public.products where name ~ '^m[0-9]+$' or name = 'a-ny';
+
+-- --- the price job (service role) and imports
+set role service_role;
+select t.chk('job: the service role can add a product for a member to the shared list', t.try($$insert into public.products (user_id, name, target_type, list_id) values ('00000000-0000-0000-0000-000000000102', 'job-m', 'auto', '00000000-0000-0000-0000-00000000aa03')$$) = 'ok');
+select t.chk('job: ... and for the owner', t.try($$insert into public.products (user_id, name, target_type, list_id) values ('00000000-0000-0000-0000-0000000000a1', 'job-a', 'auto', '00000000-0000-0000-0000-00000000aa03')$$) = 'ok');
+select t.chk('job: ... but not for a person who is not a member (checked for every role)', t.try($$insert into public.products (user_id, name, target_type, list_id) values ('00000000-0000-0000-0000-0000000000c5', 'job-c', 'auto', '00000000-0000-0000-0000-00000000aa03')$$) = 'fk');
+update public.products set check_note = 'tjekket', status = 'tracking', title = 'T' where name = 'job-m';
+select t.chk('job: updates keep user_id and list_id', (select user_id = '00000000-0000-0000-0000-000000000102' and list_id = '00000000-0000-0000-0000-00000000aa03' and title = 'T' from public.products where name = 'job-m'));
+reset role;
+set role authenticated;
+select set_config('request.jwt.claims', '{"email":"medlem101@familie.dk","sub":"00000000-0000-0000-0000-000000000101"}', false);
+select t.chk('imports: a member cannot create an import into the shared list (only the owner can)',
+  t.impl('https://onskeskyen.dk/s/medlem', '00000000-0000-0000-0000-00000000aa03') = 'fk');
+select t.chk('imports: a member can still make one without a list', t.imp('https://onskeskyen.dk/s/medlem2') = 'ok');
+select t.chk('imports: ... and sees only their own imports', (select count(*) = 1 from public.imports));
+select t.asA();
+select t.chk('imports: the owner can create one into the shared list, and a member does not see it',
+  t.impl('https://onskeskyen.dk/s/ejer', '00000000-0000-0000-0000-00000000aa03') = 'ok');
+select set_config('request.jwt.claims', '{"email":"medlem101@familie.dk","sub":"00000000-0000-0000-0000-000000000101"}', false);
+select t.chk('imports: the member cannot read or stop the owner''s import', (select count(*) = 1 and bool_and(url like '%medlem2') from public.imports)
+  and t.rows($$delete from public.imports where url like '%ejer'$$) = 0);
+reset role;
+delete from public.imports;
+
+-- --- the shared list's names
+update public.access_requests set status = 'approved', name = '  Jesper Frank ' where email = 'p1@x.dk';
+update public.access_requests set status = 'pending', name = 'Snyder' where email = 'p2@x.dk';
+insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000e8', 'p1@x.dk'), ('00000000-0000-0000-0000-0000000000e9', 'p2@x.dk'),
+  ('00000000-0000-0000-0000-0000000000ea', 'Anne-Mette.Hansen+pris@x.dk'), ('00000000-0000-0000-0000-0000000000eb', '.@x.dk');
+select t.chk('names: the first word of the name given when asking for access; only when approved; else the start of the e-mail',
+  (select string_agg(n, ',' order by n) from (select public.person_name(id) n from auth.users where id in
+     ('00000000-0000-0000-0000-0000000000e8', '00000000-0000-0000-0000-0000000000e9', '00000000-0000-0000-0000-0000000000ea', '00000000-0000-0000-0000-0000000000a1')) x) = 'Anne,Jesper,Mor,P2');
+select t.chk('names: nothing usable gives a fallback', public.person_name('00000000-0000-0000-0000-0000000000eb') = 'Ukendt');
+set role authenticated;
+select t.asA();
+select t.chk('names: the owner sees the e-mail address (lower-case) of the members they invited',
+  (select email from public.list_members_named('00000000-0000-0000-0000-00000000aa03') where name = 'Medlem101') = 'medlem101@familie.dk'
+  and (select email is null from public.list_members_named('00000000-0000-0000-0000-00000000aa03') where role = 'owner'));
+select set_config('request.jwt.claims', '{"email":"medlem101@familie.dk","sub":"00000000-0000-0000-0000-000000000101"}', false);
+select t.chk('names: a member sees names and not one e-mail address (not the owner''s, not a co-member''s)',
+  (select count(*) = 11 and bool_and(email is null) from public.list_members_named('00000000-0000-0000-0000-00000000aa03')));
+reset role;
+delete from public.lists where id = '00000000-0000-0000-0000-00000000aa03';
+delete from public.products where name like 'job-%';
+delete from public.list_members;
+delete from public.lists where user_id = '00000000-0000-0000-0000-0000000000a1';
+delete from public.products where user_id in (select id from auth.users where id <> '00000000-0000-0000-0000-0000000000a1' and id <> '00000000-0000-0000-0000-0000000000b2');
+drop table t.donor, t.snap;
+
+-- a person leaves the site: the memberships, products and attempts go with them
+insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000aa04', '00000000-0000-0000-0000-0000000000a1', 'Slut');
+insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa04', '00000000-0000-0000-0000-0000000000c5');
+insert into public.products (user_id, name, target_type, list_id, bought_at, bought_by, bought_price) values
+  ('00000000-0000-0000-0000-0000000000a1', 'slut-a', 'auto', '00000000-0000-0000-0000-00000000aa04', now(), '00000000-0000-0000-0000-0000000000c5', 5);
+delete from auth.users where id = '00000000-0000-0000-0000-0000000000c5';
+select t.chk('delete user: the membership goes, the bought mark stays without a name, the product is untouched',
+  (select count(*) = 0 from public.list_members) and (select bought_at is not null and bought_by is null from public.products where name = 'slut-a'));
+delete from public.products where name = 'slut-a'; delete from public.lists where name = 'Slut';
+insert into auth.users (id, email) values ('00000000-0000-0000-0000-0000000000c5', 'sara@familie.dk');
 
 -- 12. final whole-file run on the populated database
 \o /dev/null

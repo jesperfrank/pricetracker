@@ -1811,6 +1811,60 @@ test('bought: a product bought while its hit waits for the morning mail drops ou
   assert.strictEqual(byIdIn(db, 'K').digest_price, null, 'and is forgotten');
 });
 
+// ---------------------------------------------------------------- shared lists: the job does not care who else sees a product
+
+test('shared list: a bought mark set by another member stops the notification exactly like the owner\'s own mark; undone, only the adder is mailed', async () => {
+  const db = newDb();
+  // anna (u1) added K to a list she shares with bo (u3); bo marked it as bought (bought_by = u3). N is a normal product of anna's in the same list.
+  db.products.push(dprod('K', { list_id: 'LS', bought_at: '2026-11-10T12:00:00Z', bought_price: 4500, bought_by: 'u3' }), dprod('N', { list_id: 'LS' }));
+  db.profiles.push(dprofile(), dprofile({ user_id: 'u3' }));
+  const res = await runAt(db, '2026-11-16T10:00:00Z');
+  const K = byIdIn(db, 'K');
+  assert.strictEqual(K.status, 'tracking'); assert.strictEqual(K.offers[0].price, 3999, 'still checked'); assert.strictEqual(K.notified_price, null, 'no hit recorded');
+  assert.strictEqual(res.stats.hits, 1); assert.strictEqual(db.sent.length, 1); assert(db.sent[0].text.includes('Dyson N') && !db.sent[0].text.includes('Dyson K'));
+  assert.strictEqual(K.bought_by, 'u3', 'the job leaves bought_by alone'); assert.strictEqual(K.list_id, 'LS', 'and the list');
+  const kPatch = db.patches.find((p) => p.id === 'K').body;
+  assert(!('bought_by' in kPatch) && !('bought_at' in kPatch) && !('list_id' in kPatch) && !('notified_price' in kPatch), Object.keys(kPatch).join());
+  // bo undoes the mark: the next check notifies, and the mail goes to anna only (the person who added it), never to bo
+  K.bought_at = null; K.bought_price = null; K.bought_by = null;
+  await runAt(db, '2026-11-17T10:15:00Z', dpages(-500));
+  assert.strictEqual(K.notified_price, 3499);
+  const last = db.sent.slice(1);
+  assert(last.length >= 1 && last.every((m) => /anna@example\.dk/i.test(JSON.stringify(m.to))), JSON.stringify(last.map((m) => m.to)));
+  assert(last.some((m) => m.text.includes('Dyson K')));
+});
+
+test('shared list: products of several people in one list are each processed once, and every deal mail goes to the person who added the product', async () => {
+  const db = newDb();
+  db.products.push(dprod('S1', { list_id: 'LS' }), product('S2', 'u3', 'dyson', { name: 'Dyson S2', target_value: 4000, list_id: 'LS' }), product('S3', 'u3', 'dyson', { name: 'Dyson S3', target_value: 4000 }));
+  db.profiles.push(dprofile(), dprofile({ user_id: 'u3' }));
+  const res = await runAt(db, '2026-11-16T10:00:00Z');
+  ['S1', 'S2', 'S3'].forEach((id) => { assert.strictEqual(db.patches.filter((p) => p.id === id).length, 1, id + ' is written once'); assert.strictEqual(byIdIn(db, id).status, 'tracking'); });
+  assert.strictEqual(res.stats.hits, 3);
+  assert.strictEqual(db.sent.length, 2, 'one mail per person');
+  const to = (m) => JSON.stringify(m.to).toLowerCase();
+  const anna = db.sent.find((m) => /anna@example/.test(to(m))), bo = db.sent.find((m) => /bo@example/.test(to(m)));
+  assert(anna && bo && anna !== bo);
+  assert(anna.text.includes('Dyson S1') && !anna.text.includes('Dyson S2') && !anna.text.includes('Dyson S3'), 'anna gets only her own product, not bo\'s in the shared list');
+  assert(bo.text.includes('Dyson S2') && bo.text.includes('Dyson S3') && !bo.text.includes('Dyson S1'), 'bo gets only his own');
+  // the same prices again: nothing is mailed twice
+  await runAt(db, '2026-11-16T10:30:00Z'); assert.strictEqual(db.sent.length, 2);
+  // the products stay where they were put
+  assert.strictEqual(byIdIn(db, 'S1').list_id, 'LS'); assert.strictEqual(byIdIn(db, 'S2').list_id, 'LS'); assert.strictEqual(byIdIn(db, 'S2').user_id, 'u3');
+});
+
+test('shared list: a member\'s bought mark also drops the hit out of the waiting morning mail', async () => {
+  const db = newDb();
+  db.products.push(dprod('K', { list_id: 'LS' }), dprod('L', { list_id: 'LS' }));
+  db.profiles.push(dprofile({ mail_digest: true }));
+  await runAt(db, '2026-11-16T05:00:00Z');
+  assert.strictEqual(byIdIn(db, 'K').digest_price, 3999);
+  Object.assign(byIdIn(db, 'K'), { bought_at: '2026-11-16T05:30:00Z', bought_price: 3999, bought_by: 'u3' });
+  await runAt(db, '2026-11-16T06:00:00Z');
+  assert.strictEqual(db.sent.length, 1); assert(db.sent[0].text.includes('Dyson L') && !db.sent[0].text.includes('Dyson K'));
+  assert.strictEqual(byIdIn(db, 'K').digest_price, null);
+});
+
 // ---------------------------------------------------------------- the one morning mail
 
 test('digest: copenhagenHour and the 07:00 window follow Copenhagen time, also on the days the clock changes', () => {

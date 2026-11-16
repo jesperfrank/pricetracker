@@ -92,6 +92,15 @@
         <button class="link" id="lfCancel" type="button">Annuller</button>
       </form>
       <p class="listact" id="listAct" hidden></p>
+      <div class="sharebox" id="shareBox" hidden>
+        <form class="listform" id="shareForm" autocomplete="off" novalidate>
+          <label class="vh" for="shEmail">E-mailadresse på personen</label>
+          <input class="inp" type="email" id="shEmail" maxlength="200" placeholder="E-mail" inputmode="email" autocapitalize="off" spellcheck="false">
+          <button class="btn small" id="shSave" type="submit">Del</button>
+          <button class="link" id="shClose" type="button">Luk</button>
+        </form>
+        <ul class="people" id="shPeople"></ul>
+      </div>
       <p class="msg" id="listMsg" role="alert" hidden></p>
     </nav>
 
@@ -103,7 +112,7 @@
 
     <details class="fine" id="howBox">
       <summary>Sådan vurderer vi tilbud</summary>
-      <p>Et tilbud vurderes mod den laveste pris de seneste 30 dage og mod normalprisen, ikke mod butikkens egen førpris. Er der for lidt historik, skal prisen være mindst 10 % under den første pris, vi har set. Fragt er ikke med, medmindre det står ved butikken. Priserne hentes hvert kvarter, og listen er kun din.</p>
+      <p>Et tilbud vurderes mod den laveste pris de seneste 30 dage og mod normalprisen, ikke mod butikkens egen førpris. Er der for lidt historik, skal prisen være mindst 10 % under den første pris, vi har set. Fragt er ikke med, medmindre det står ved butikken. Priserne hentes hvert kvarter, og dine lister er private, medmindre du deler en.</p>
     </details>
     <details class="fine" id="settingsBox">
       <summary>Indstillinger</summary>

@@ -69,6 +69,8 @@ alter table public.products add column if not exists backfill_state jsonb;
 -- stays in its list; the job never sends mails for it. bought_at is set by the server clock (see products_guard).
 alter table public.products add column if not exists bought_at timestamptz;
 alter table public.products add column if not exists bought_price numeric;
+-- Who marked it as bought (a member of a shared list may do it, see "sharing" below). Set by products_guard only, never written directly.
+alter table public.products add column if not exists bought_by uuid references auth.users(id) on delete set null;
 alter table public.products drop constraint if exists products_bought_price_check;
 alter table public.products add constraint products_bought_price_check check (
   bought_price is null or (bought_at is not null and bought_price > 0 and bought_price <= 10000000));
@@ -148,11 +150,7 @@ create policy profiles_own on public.profiles
   using ((select auth.uid()) = user_id and public.is_allowed())
   with check ((select auth.uid()) = user_id and public.is_allowed());
 
-drop policy if exists products_own on public.products;
-create policy products_own on public.products
-  for all to authenticated
-  using ((select auth.uid()) = user_id and public.is_allowed())
-  with check ((select auth.uid()) = user_id and public.is_allowed());
+-- products: the policies are in the sharing section below (they need the list helper functions).
 
 grant select, insert, update, delete on public.profiles, public.products to authenticated;
 -- The price job signs in with the service key. Newer Supabase projects do not grant table rights by default, so state them.
@@ -164,6 +162,10 @@ grant select, insert, update, delete on public.allowed_emails, public.profiles, 
 -- Roles 'authenticated' and 'anon' are the PostgREST roles of browser requests; the service role
 -- (the job) and the SQL editor / table editor (postgres) are not restricted.
 -- Changing source_url starts the product over: the job fetches the new page from scratch.
+-- Someone else's product in a shared list (RLS lets list members this far): only the bought columns may change, every other
+-- column must be exactly as it was (compared as a whole row, so a column added later is protected too). A bought mark is
+-- stamped with the server time and with who set it (bought_by). It can be undone, or its price edited, by the person who set it,
+-- by the product's owner and by the list's owner; a bought mark cannot be taken over by someone else.
 create or replace function public.products_guard()
 returns trigger
 language plpgsql
@@ -171,6 +173,8 @@ set search_path = public
 as $$
 declare
   restricted boolean := current_user in ('authenticated', 'anon');
+  uid uuid := auth.uid();
+  may_edit_bought boolean;
 begin
   if not restricted then
     return new;
@@ -182,12 +186,19 @@ begin
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     new.digest_price := null; new.digest_at := null;
-    -- bought_at / bought_price are the person's own, but the time is the server's
-    if new.bought_at is not null then new.bought_at := now(); end if;
+    -- bought_at / bought_price are the person's own, but the time is the server's and the person is who is signed in
+    new.bought_by := null;
+    if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; end if;
     return new;
   end if;
 
   -- UPDATE
+  may_edit_bought := old.user_id = uid or old.bought_by = uid or (old.list_id is not null and public.owns_list(old.list_id));
+  if old.user_id is distinct from uid then
+    if (to_jsonb(new) - 'bought_at' - 'bought_price' - 'bought_by') is distinct from (to_jsonb(old) - 'bought_at' - 'bought_price' - 'bought_by') then
+      raise exception 'Kun den, der har tilføjet produktet, kan ændre det.' using errcode = 'check_violation';
+    end if;
+  end if;
   new.user_id := old.user_id;
   new.status := old.status;
   new.title := old.title; new.variants := old.variants; new.offers := old.offers; new.history := old.history;
@@ -195,8 +206,21 @@ begin
   new.check_note := old.check_note; new.last_checked := old.last_checked;
   new.notified_price := old.notified_price; new.notified_at := old.notified_at; new.backfill_state := old.backfill_state;
   new.digest_price := old.digest_price; new.digest_at := old.digest_at;
-  -- marking as bought stamps the server time once; the time cannot be edited afterwards (only cleared, which also clears the price)
-  if new.bought_at is not null then new.bought_at := coalesce(old.bought_at, now()); end if;
+  -- bought: marking stamps the server time and the person once; the time and the person cannot be edited afterwards
+  -- (only cleared, which also clears the price)
+  if old.bought_at is null then
+    if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; else new.bought_by := null; end if;
+  elsif new.bought_at is null then
+    if not may_edit_bought then
+      raise exception 'Kun den, der har markeret produktet som købt, kan fortryde.' using errcode = 'check_violation';
+    end if;
+    new.bought_by := null;
+  else
+    if new.bought_price is distinct from old.bought_price and not may_edit_bought then
+      raise exception 'Kun den, der har markeret produktet som købt, kan rette prisen.' using errcode = 'check_violation';
+    end if;
+    new.bought_at := old.bought_at; new.bought_by := old.bought_by;
+  end if;
 
   if new.source_url is distinct from old.source_url then
     new.status := 'pending';
@@ -327,7 +351,7 @@ create trigger lists_limit_trg
   before insert on public.lists
   for each row execute function public.lists_limit();
 
--- A product may only point at one of its owner's own lists (checked for every role, the job and the SQL editor included).
+-- A product may only point at a list its owner owns or is a member of (checked for every role, the job and the SQL editor included).
 -- SECURITY DEFINER so the check does not depend on the caller's row level security.
 create or replace function public.products_list_check()
 returns trigger
@@ -337,7 +361,9 @@ set search_path = public
 as $$
 begin
   if new.list_id is not null
-     and not exists (select 1 from public.lists l where l.id = new.list_id and l.user_id = new.user_id) then
+     and not exists (select 1 from public.lists l where l.id = new.list_id
+                       and (l.user_id = new.user_id
+                            or exists (select 1 from public.list_members m where m.list_id = l.id and m.user_id = new.user_id))) then
     raise exception 'Listen findes ikke.' using errcode = 'foreign_key_violation';
   end if;
   return new;
@@ -817,6 +843,307 @@ grant execute on function public.admin_list_requests() to authenticated;
 grant execute on function public.admin_decide(text, boolean) to authenticated;
 grant execute on function public.admin_list_allowed() to authenticated;
 grant execute on function public.admin_remove_allowed(text) to authenticated;
+
+-- ---------------------------------------------------------------- sharing a list
+-- Everything is private per person (user_id = auth.uid()), with ONE exception: the owner of a list can share that one list with
+-- people who already have access to the site (at most 10 members per list). The owner is not stored as a member (lists.user_id).
+-- A member sees the list and the products in it, adds products to it and marks products as bought. Everything else on someone
+-- else's product is locked by products_guard (see above). A product in a shared list keeps its own user_id: the 40-product cap,
+-- the price job and the deal e-mails still go by the person who added it. Imports stay the list owner's (imports_list_check).
+-- Leaving or being removed moves the person's own products out of the list (list_id null): they stay theirs.
+--
+-- Row level security never looks at another table directly (that recurses): the two small SECURITY DEFINER functions below
+-- answer "do I own this list" and "am I a member of it", and the policies call them. Both only ever speak about the caller.
+
+create table if not exists public.list_members (
+  list_id  uuid not null references public.lists(id) on delete cascade,
+  user_id  uuid not null references auth.users(id) on delete cascade,
+  added_at timestamptz not null default now(),
+  primary key (list_id, user_id)
+);
+create index if not exists list_members_user_idx on public.list_members (user_id);
+
+create or replace function public.owns_list(p_list uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select exists (select 1 from public.lists l where l.id = p_list and l.user_id = auth.uid());
+$$;
+
+create or replace function public.is_list_member(p_list uuid)
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select exists (select 1 from public.list_members m where m.list_id = p_list and m.user_id = auth.uid());
+$$;
+
+revoke all on function public.owns_list(uuid) from public, anon;
+revoke all on function public.is_list_member(uuid) from public, anon;
+grant execute on function public.owns_list(uuid) to authenticated, service_role;
+grant execute on function public.is_list_member(uuid) to authenticated, service_role;
+
+alter table public.list_members enable row level security;
+revoke all on public.list_members from anon;
+-- Members are added by share_list() only (it checks who may be invited): no INSERT and no UPDATE for browser users at all.
+revoke insert, update on public.list_members from authenticated;
+grant select, delete on public.list_members to authenticated;
+grant select, insert, update, delete on public.list_members to service_role;
+
+-- The owner sees the members of their lists; a member sees their own row and the co-members of the same list.
+drop policy if exists list_members_select on public.list_members;
+create policy list_members_select on public.list_members
+  for select to authenticated
+  using (public.is_allowed()
+         and ((select auth.uid()) = user_id or public.owns_list(list_id) or public.is_list_member(list_id)));
+
+-- The owner removes a member, a member removes themselves (leaves).
+drop policy if exists list_members_delete on public.list_members;
+create policy list_members_delete on public.list_members
+  for delete to authenticated
+  using (public.is_allowed() and ((select auth.uid()) = user_id or public.owns_list(list_id)));
+
+-- Checked for every role: the owner is never a member, at most 10 members, and only a person who is on the allowed list.
+create or replace function public.list_members_guard()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if exists (select 1 from public.lists l where l.id = new.list_id and l.user_id = new.user_id) then
+    raise exception 'Ejeren af listen er allerede med.' using errcode = 'check_violation';
+  end if;
+  if (select count(*) from public.list_members m where m.list_id = new.list_id) >= 10 then
+    raise exception 'En liste kan højst deles med 10 personer.' using errcode = 'check_violation';
+  end if;
+  if not exists (select 1 from auth.users u join public.allowed_emails a on a.email = lower(u.email) where u.id = new.user_id) then
+    raise exception 'Personen skal have adgang til Prisvagten først.' using errcode = 'check_violation';
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists list_members_guard_trg on public.list_members;
+create trigger list_members_guard_trg
+  before insert on public.list_members
+  for each row execute function public.list_members_guard();
+
+-- Whoever leaves, is removed (or loses the list because it is deleted): their own products leave the list and stay theirs.
+create or replace function public.list_members_after_delete()
+returns trigger
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  update public.products set list_id = null where list_id = old.list_id and user_id = old.user_id;
+  return old;
+end;
+$$;
+
+drop trigger if exists list_members_after_delete_trg on public.list_members;
+create trigger list_members_after_delete_trg
+  after delete on public.list_members
+  for each row execute function public.list_members_after_delete();
+
+-- A member can read the shared list's row (name), never the owner's other lists. Writing a list stays with the owner (lists_own).
+drop policy if exists lists_member_select on public.lists;
+create policy lists_member_select on public.lists
+  for select to authenticated
+  using (public.is_allowed() and public.is_list_member(id));
+
+-- products: one policy per command, replacing the old "all" policy.
+-- Read: your own products, and every product in a list you own or are a member of.
+-- Insert and delete: your own products only (a product can be added to a shared list: products_list_check). Update: your own
+-- products, or someone else's product in a shared list (products_guard then lets only the bought columns through).
+drop policy if exists products_own on public.products;
+drop policy if exists products_select on public.products;
+drop policy if exists products_insert on public.products;
+drop policy if exists products_update_own on public.products;
+drop policy if exists products_update_shared on public.products;
+drop policy if exists products_delete on public.products;
+create policy products_select on public.products
+  for select to authenticated
+  using (public.is_allowed()
+         and ((select auth.uid()) = user_id or public.owns_list(list_id) or public.is_list_member(list_id)));
+create policy products_insert on public.products
+  for insert to authenticated
+  with check ((select auth.uid()) = user_id and public.is_allowed());
+create policy products_update_own on public.products
+  for update to authenticated
+  using ((select auth.uid()) = user_id and public.is_allowed())
+  with check ((select auth.uid()) = user_id and public.is_allowed());
+create policy products_update_shared on public.products
+  for update to authenticated
+  using (public.is_allowed() and (select auth.uid()) <> user_id and (public.owns_list(list_id) or public.is_list_member(list_id)))
+  with check (public.is_allowed() and (select auth.uid()) <> user_id and (public.owns_list(list_id) or public.is_list_member(list_id)));
+create policy products_delete on public.products
+  for delete to authenticated
+  using ((select auth.uid()) = user_id and public.is_allowed());
+
+-- A short name for a person, for the people in a shared list: the first word of the name they gave when they asked for access,
+-- else the part of the e-mail before the @ (up to the first dot, dash, underscore or plus), first letter capitalised.
+-- Internal: nobody can call it, only the functions below.
+create or replace function public.person_name(p_user uuid)
+returns text
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select coalesce(
+    (select nullif(left(split_part(btrim(r.name), ' ', 1), 20), '')
+       from public.access_requests r where r.email = lower(u.email) and r.status = 'approved'),
+    (select nullif(upper(left(x.l, 1)) || substr(x.l, 2), '')
+       from (select left(split_part(split_part(split_part(split_part(lower(u.email), '@', 1), '.', 1), '-', 1), '_', 1), 20) as l) x),
+    'Ukendt')
+  from auth.users u where u.id = p_user;
+$$;
+revoke all on function public.person_name(uuid) from public, anon, authenticated;
+
+-- Shares one of your lists with a person who already has access. Returns 'ok', 'already' (already a member), 'self', 'full'
+-- (10 members), 'invalid' (not an e-mail address), 'slow' (more than 20 look-ups in the last hour) or 'unknown'. 'unknown' is the one
+-- answer both for an address with no account and for one that is not allowed, so nobody can find out who has an account.
+-- Raises 42501 when you are not allowed or do not own the list (the same for a list that does not exist).
+create table if not exists public.share_attempts (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  at      timestamptz not null default now()
+);
+create index if not exists share_attempts_idx on public.share_attempts (user_id, at);
+alter table public.share_attempts enable row level security;      -- and no policy: only share_list() and the service role
+revoke all on public.share_attempts from public, anon, authenticated;
+grant select, insert, update, delete on public.share_attempts to service_role;
+
+create or replace function public.share_list(p_list uuid, p_email text)
+returns text
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  me     uuid := auth.uid();
+  e      text := lower(btrim(coalesce(p_email, '')));
+  target uuid;
+begin
+  if me is null or not public.is_allowed() or not public.owns_list(p_list) then
+    raise exception 'not allowed' using errcode = '42501';
+  end if;
+  if char_length(e) > 200 or e !~ '^[^[:space:][:cntrl:]@]+@[^[:space:][:cntrl:]@]+\.[^[:space:][:cntrl:]@]+$' then
+    return 'invalid';
+  end if;
+  if e = lower(coalesce(auth.jwt() ->> 'email', '')) then
+    return 'self';
+  end if;
+  if (select count(*) from public.share_attempts a where a.user_id = me and a.at > now() - interval '1 hour') >= 20 then
+    return 'slow';
+  end if;
+  if (select count(*) from public.list_members m where m.list_id = p_list) >= 10 then
+    return 'full';
+  end if;
+  -- every look-up counts, a hit as well as a miss: nobody can run through addresses to find out who has an account
+  insert into public.share_attempts (user_id) values (me);
+  delete from public.share_attempts a where a.user_id = me and a.at < now() - interval '1 day';
+  select u.id into target from auth.users u where lower(u.email) = e limit 1;
+  if target is null or not exists (select 1 from public.allowed_emails a where a.email = e) then
+    return 'unknown';
+  end if;
+  if exists (select 1 from public.list_members m where m.list_id = p_list and m.user_id = target)
+     or exists (select 1 from public.lists l where l.id = p_list and l.user_id = target) then
+    return 'already';
+  end if;
+  insert into public.list_members (list_id, user_id) values (p_list, target);
+  return 'ok';
+end;
+$$;
+
+-- The people of a list, for the owner and the members only (everyone else gets no rows): the owner, the members, and anyone
+-- else who is named on a product in it (someone who left after buying). role = 'owner' | 'member' | 'former'. The e-mail address
+-- is only given to the list's owner, and only for members they invited themselves.
+create or replace function public.list_members_named(p_list uuid)
+returns table (user_id uuid, name text, role text, email text)
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  is_owner boolean;
+begin
+  if auth.uid() is null or not public.is_allowed() then
+    return;
+  end if;
+  is_owner := public.owns_list(p_list);
+  if not (is_owner or public.is_list_member(p_list)) then
+    return;
+  end if;
+  return query
+    select l.user_id, public.person_name(l.user_id), 'owner'::text, null::text
+      from public.lists l where l.id = p_list
+    union all
+    select m.user_id, public.person_name(m.user_id), 'member'::text,
+           case when is_owner then (select lower(u.email) from auth.users u where u.id = m.user_id) else null end
+      from public.list_members m where m.list_id = p_list
+    union all
+    select x.id, public.person_name(x.id), 'former'::text, null::text
+      from (select p.user_id as id from public.products p where p.list_id = p_list
+            union select p.bought_by from public.products p where p.list_id = p_list and p.bought_by is not null) x
+     where not exists (select 1 from public.lists l where l.id = p_list and l.user_id = x.id)
+       and not exists (select 1 from public.list_members m where m.list_id = p_list and m.user_id = x.id);
+end;
+$$;
+
+-- The owner removes a member. Returns true when someone was removed. Raises 42501 for anyone but the list's owner.
+create or replace function public.unshare_list(p_list uuid, p_user uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  n integer;
+begin
+  if auth.uid() is null or not public.is_allowed() or not public.owns_list(p_list) then
+    raise exception 'not allowed' using errcode = '42501';
+  end if;
+  delete from public.list_members m where m.list_id = p_list and m.user_id = p_user;
+  get diagnostics n = row_count;
+  return n = 1;
+end;
+$$;
+
+-- A member leaves a list. Returns true when they were a member.
+create or replace function public.leave_list(p_list uuid)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  n integer;
+begin
+  if auth.uid() is null or not public.is_allowed() then
+    raise exception 'not allowed' using errcode = '42501';
+  end if;
+  delete from public.list_members m where m.list_id = p_list and m.user_id = auth.uid();
+  get diagnostics n = row_count;
+  return n = 1;
+end;
+$$;
+
+revoke all on function public.share_list(uuid, text) from public, anon;
+revoke all on function public.list_members_named(uuid) from public, anon;
+revoke all on function public.unshare_list(uuid, uuid) from public, anon;
+revoke all on function public.leave_list(uuid) from public, anon;
+grant execute on function public.share_list(uuid, text) to authenticated;
+grant execute on function public.list_members_named(uuid) to authenticated;
+grant execute on function public.unshare_list(uuid, uuid) to authenticated;
+grant execute on function public.leave_list(uuid) to authenticated;
 
 -- First run only: nobody is admin yet, so the address added first (the owner added themselves first) becomes admin.
 -- Later runs change nothing, so admin never moves.

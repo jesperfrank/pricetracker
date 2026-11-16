@@ -19,7 +19,7 @@
     return window.supabase.createClient(url, key);
   }
 
-  var state = { imports: [], importsOk: false, importMsg: "", confirmImport: null, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
+  var state = { share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
     prefs: { always: [], exclude: [], only: false, notify: true, digest: false }, profileSound: null };
   var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
   var sb = null, user = null, channel = null, pollTimer = null, fetching = false, again = false, lastFetch = 0, fetchSeq = 0;
@@ -176,7 +176,8 @@
       targetType: r.target_type === "pct" ? "pct" : r.target_type === "auto" ? "auto" : "price", targetValue: num(r.target_value),
       shopsAlways: r.shops_always, shopsExclude: r.shops_exclude, shopsOnly: !!r.shops_only,
       url: r.source_url || null, createdAt: r.created_at || "", listId: r.list_id || null,
-      boughtAt: r.bought_at || null, boughtPrice: num(r.bought_price)
+      boughtAt: r.bought_at || null, boughtPrice: num(r.bought_price),
+      userId: r.user_id || null, boughtBy: r.bought_by || null
     };
   }
   function offersOf(p) {
@@ -262,6 +263,28 @@
     return ls.length ? ls.join(", ") : (p.title || "");
   }
 
+  // ---- shared lists: who is who ----
+  // A product is "mine" when I added it. In a list shared with me, the products of others can be read and marked as bought, nothing else
+  // (the database enforces it; the controls are only hidden here). A row without user_id (never from the database) counts as mine.
+  function isMine(p) { return !user || !p.userId || p.userId === user.id; }
+  function mayEdit(p) { return state.canWrite && isMine(p); }
+  function listById(id) { return state.lists.filter(function (l) { return l.id === id; })[0]; }
+  function listShared(id) { var l = listById(id); return !!l && (!l.own || (state.memCount[id] || 0) > 0); }
+  function personName(listId, uid) {
+    var ps = state.people[listId] || [];
+    for (var i = 0; i < ps.length; i++) if (ps[i].id === uid) return ps[i].name;
+    return "";
+  }
+  // the name of the person who added the product, only for someone else's product in a shared list
+  function addedBy(p) { return !isMine(p) && p.listId && listShared(p.listId) ? personName(p.listId, p.userId) : ""; }
+  // the name of the person who marked it as bought, only when that is someone else than me
+  function boughtByName(p) { return p.boughtBy && user && p.boughtBy !== user.id && p.listId ? personName(p.listId, p.boughtBy) : ""; }
+  // may undo a bought mark or change its price: the product's owner, the person who marked it, the list's owner
+  function mayUnbuy(p) {
+    var l = p.listId ? listById(p.listId) : null;
+    return state.canWrite && (isMine(p) || (!!p.boughtBy && !!user && p.boughtBy === user.id) || !!(l && l.own));
+  }
+
   // ---- rendering ----
   function renderStatus() {
     if (!user) return;
@@ -296,9 +319,10 @@
     if (p.status === "pending") st = p.url ? "Henter produktet …" : "Finder produktet …";
     else if (p.status === "error") st = '<span class="warn">' + esc(p.checkNote || "Produktet kunne ikke hentes") + '</span>';
     else if (awaitingFetch(p)) st = "Henter priser for den valgte variant …";
-    else if (p.status === "choose") st = '<span class="out">Vælg variant</span>';
+    else if (p.status === "choose") st = isMine(p) ? '<span class="out">Vælg variant</span>' : '<span class="out">Variant ikke valgt</span>';
     else if (p.boughtAt && p.status === "tracking") {
-      st = esc(p.boughtPrice != null ? "Købt for " + kr(p.boughtPrice) : "Købt");
+      var bw = boughtByName(p);
+      st = esc("Købt" + (bw ? " af " + bw : "") + (p.boughtPrice != null ? " for " + kr(p.boughtPrice) : ""));
       if (b && p.boughtPrice != null && Math.round(b.price) !== Math.round(p.boughtPrice)) st += " · nu " + esc(kr(b.price));
     }
     else if (isHit(p)) st = '<span class="ok">' + (p.targetType === "auto" ? "Godt tilbud" : "Mål nået") + '</span> · på lager hos ' + esc(b.store || "en butik");
@@ -307,6 +331,8 @@
     else if (!anyStock) st = '<span class="out">Udsolgt alle steder</span> · senest hos ' + esc(b.store || "en butik");
     else st = (t != null ? esc(kr(b.price - t)) + " over målet · " : "") + "billigst hos " + esc(b.store || "en butik");
     if (p.status === "tracking" && p.warning && !p.boughtAt) st += ' · <span class="warn">Oppustet førpris</span>';
+    var ab = addedBy(p);
+    if (ab) st += " · af " + esc(ab);
     var showPrice = p.status === "tracking" && b;
     return '<div><h2>' + esc(p.name) + '</h2><div class="meta">' + st + '</div></div>' + (p.status === "tracking" ? sparkHtml(p) : '<span class="spark"></span>') +
       '<div class="price n"><b>' + (showPrice ? esc(kr(b.price)) : "–") + '</b><span>' + (p.boughtAt ? "" : esc(targetText(p))) + '</span></div>';
@@ -330,7 +356,7 @@
 
   function listPickHtml(p) {
     var id = p._id;
-    if (!state.canWrite || !state.listsOk || !state.lists.length) return "";
+    if (!mayEdit(p) || !state.listsOk || !state.lists.length) return "";
     var known = state.lists.some(function (l) { return l.id === p.listId; });
     return '<div class="listpick"><label for="lp-' + esc(id) + '">Liste</label><select id="lp-' + esc(id) + '" data-listpick="' + esc(id) + '">' +
       '<option value="">Ingen liste</option>' + state.lists.map(function (l) {
@@ -342,6 +368,7 @@
     var id = p._id;
     if (!state.canWrite || p.status === "pending" || p.status === "error") return "";
     if (!p.boughtAt) return '<div class="foot"><span></span><button type="button" class="link" data-act="buy" data-id="' + esc(id) + '">Købt</button></div>';
+    if (!mayUnbuy(p)) return "";                                  // someone else's mark: the head says who bought it
     return '<form class="edit bought-row" data-bought="' + esc(id) + '" novalidate><label for="bp-' + esc(id) + '">Købt for</label>' +
       '<input class="n" type="number" id="bp-' + esc(id) + '" min="1" max="10000000" step="any" inputmode="decimal" value="' + esc(p.boughtPrice != null ? p.boughtPrice : "") + '"> <span>kr.</span>' +
       '<button class="link" type="submit">Gem</button><button type="button" class="link" data-act="unbuy" data-id="' + esc(id) + '">Fortryd</button>' +
@@ -349,8 +376,8 @@
   }
   function footHtml(p, fixLink) {
     var id = p._id, link = safeUrl(p.url), html = listPickHtml(p) + boughtHtml(p);
-    html += '<div class="foot"><span>' + (link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">Dit link</a>' : '') + '</span>';
-    if (state.canWrite) {
+    html += '<div class="foot"><span>' + (link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">' + (isMine(p) ? "Dit link" : "Link") + '</a>' : '') + '</span>';
+    if (mayEdit(p)) {
       if (state.confirmDel === id) {
         html += '<span class="edit"><span>Fjern produktet og dets historik?</span>' +
           '<button type="button" class="link warn" data-act="del-yes" data-id="' + esc(id) + '">Ja, fjern</button>' +
@@ -373,7 +400,7 @@
   // Name-only product: link to prisjagt.dk's own search (opens in a new tab) and a form to paste the link found there.
   function findHtml(p, afterError) {
     var id = p._id, a = '<a href="https://prisjagt.dk/search?search=' + esc(encodeURIComponent(p.name)) + '" target="_blank" rel="noopener noreferrer">Søg selv på Prisjagt</a>';
-    var f = state.canWrite ? '<form class="edit" data-fixurl="' + esc(id) + '" novalidate><label for="u-' + esc(id) + '">Indsæt linket her</label>' +
+    var f = mayEdit(p) ? '<form class="edit" data-fixurl="' + esc(id) + '" novalidate><label for="u-' + esc(id) + '">Indsæt linket her</label>' +
       '<input class="wide" type="url" id="u-' + esc(id) + '" maxlength="500" required placeholder="https://…">' +
       '<button class="link" type="submit">Gem linket</button><span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></form>' : "";
     return '<p class="verdict">' + a + '</p>' + f;
@@ -390,7 +417,7 @@
     return list.filter(function (x) { if (!(x.v > 0) || seen[x.v]) return false; seen[x.v] = true; return true; }).slice(0, 3);
   }
   function suggestHtml(p, b, h, low30, lowAll) {
-    if (!state.canWrite || !h.length) return "";
+    if (!mayEdit(p) || !h.length) return "";
     var l = suggestions(p, b, low30, lowAll);
     if (!l.length) return "";
     return '<div class="sugg" role="group" aria-label="Sæt mål">' + l.map(function (x) {
@@ -406,14 +433,14 @@
     if (p.status === "error" && !p.url)
       return '<p class="verdict poor"><b>Produktet blev ikke fundet.</b> ' + esc(p.checkNote || "Find det selv på Prisjagt, og indsæt linket her.") + '</p>' + findHtml(p, true) + footHtml(p);
     if (p.status === "error") {
-      var f = state.canWrite ? '<form class="edit" data-fixurl="' + esc(id) + '" novalidate><label class="vh" for="u-' + esc(id) + '">Link til produktet</label>' +
+      var f = mayEdit(p) ? '<form class="edit" data-fixurl="' + esc(id) + '" novalidate><label class="vh" for="u-' + esc(id) + '">Link til produktet</label>' +
         '<input class="wide" type="url" id="u-' + esc(id) + '" maxlength="500" required value="' + esc(p.url || "") + '" placeholder="Link fra prisjagt.dk eller en butik">' +
         '<button class="link" type="submit">Gem linket og prøv igen</button><span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></form>' : "";
       return '<p class="verdict poor"><b>Produktet kunne ikke hentes.</b> ' + esc(p.checkNote || "Tjek, at linket er en produktside.") + '</p>' + f + footHtml(p);
     }
     if (awaitingFetch(p))
-      return '<div class="foot"><span>Variant: ' + esc(variantLabels(p)) + '</span>' + (state.canWrite && !isShopUrl(p.url) ? '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>' : '') + '</div>' + footHtml(p);
-    if (p.status === "choose") return chooserHtml(p) + footHtml(p);
+      return '<div class="foot"><span>Variant: ' + esc(variantLabels(p)) + '</span>' + (mayEdit(p) && !isShopUrl(p.url) ? '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>' : '') + '</div>' + footHtml(p);
+    if (p.status === "choose") return (isMine(p) ? chooserHtml(p) : '<p class="note">Variant ikke valgt endnu.</p>') + footHtml(p);
 
     var b = bestOf(p), h = histOf(p), now = Date.now(), html = "";
     if (state.note[id]) html += '<p class="note">' + esc(state.note[id]) + '</p>';
@@ -431,7 +458,7 @@
       html += '<p class="note">Kun denne butik. Et link fra prisjagt.dk sammenligner flere.</p>';
     } else if (p.variants.length) {
       html += '<div class="foot"><span>' + (p.variants.length > 1 ? "Variant: " + esc(variantLabels(p) || "alle") : "") + '</span>';
-      if (state.canWrite && !state.change[id]) html += '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>';
+      if (mayEdit(p) && !state.change[id]) html += '<button type="button" class="link" data-act="change" data-id="' + esc(id) + '">Skift variant</button>';
       html += '</div>';
     }
 
@@ -474,7 +501,7 @@
             (u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">Se varen</a>' : '') + '</td></tr>';
         }).join("") + '</tbody></table></div></div>';
     }
-    if (state.canWrite) {
+    if (mayEdit(p)) {
       html += '<details class="pshops"><summary>Butiksvalg</summary><form class="pshop" data-shops="' + esc(id) + '">' +
         '<label for="sa-' + esc(id) + '">Tjek altid</label>' +
         '<input type="text" id="sa-' + esc(id) + '" maxlength="600" value="' + esc(shopList(p.shopsAlways).join(", ")) + '" placeholder="fx Proshop, hifiklubben.dk">' +
@@ -501,42 +528,67 @@
   }
   function inSel(p, sel) { return sel === "all" || (sel === "none" ? !listKnown(p.listId) : p.listId === sel); }
   function listCount(sel) { return state.products.filter(function (p) { return inSel(p, sel); }).length; }
-  function listById(id) { return state.lists.filter(function (l) { return l.id === id; })[0]; }
   function sortLists() { state.lists.sort(function (a, b) { return a.name.localeCompare(b.name, "da") || (a.id < b.id ? -1 : 1); }); }
-  function chipHtml(key, label, n) {
+  function chipHtml(key, label, n, shared) {
     return '<button type="button" class="lchip" data-lsel="' + esc(key) + '" aria-pressed="' + (curSel() === key) + '">' + esc(label) +
-      (n != null ? ' <span class="cnt n">' + n + '</span>' : '') + '</button>';
+      (shared ? ' <span class="shr">delt</span>' : '') + (n != null ? ' <span class="cnt n">' + n + '</span>' : '') + '</button>';
   }
+  function ownLists() { return state.lists.filter(function (l) { return l.own; }); }
   function renderLists() {
     var box = $("listsBox");
     var show = !!(user && state.listsOk && (state.lists.length || state.canWrite));
     box.hidden = !show;
     if (!show) return;
     var sel = curSel(), html = chipHtml("all", "Alle", state.products.length);
-    state.lists.forEach(function (l) { html += chipHtml(l.id, l.name, listCount(l.id)); });
+    state.lists.forEach(function (l) { html += chipHtml(l.id, l.name, listCount(l.id), listShared(l.id)); });
     if (state.lists.length && hasUnlisted()) html += chipHtml("none", "Uden liste", listCount("none"));
     if (state.canWrite) html += '<button type="button" class="lchip plus" data-lact="new" aria-expanded="' + (state.listForm === "new") + '">+ Ny liste</button>';
     $("chips").innerHTML = html;
     var cur = listById(sel), act = "";
     if (state.listForm) act = "";
+    else if (cur && state.canWrite && !cur.own) {
+      if (state.confirmLeave === cur.id) {
+        act = '<span class="edit"><span>Forlad listen ' + esc(cur.name) + '? Dine egne produkter beholdes uden liste.</span>' +
+          '<button type="button" class="link warn" data-lact="leave-yes">Ja, forlad listen</button>' +
+          '<button type="button" class="link" data-lact="leave-no">Behold</button></span>';
+      } else act = '<button type="button" class="link warn" data-lact="leave">Forlad liste</button>';
+    }
     else if (cur && state.canWrite) {
       if (state.confirmList === cur.id) {
-        act = '<span class="edit"><span>Slet listen ' + esc(cur.name) + '? Produkterne beholdes og flyttes til Uden liste.</span>' +
+        act = '<span class="edit"><span>Slet listen ' + esc(cur.name) + '? Produkterne beholdes og flyttes til Uden liste.' + (listShared(cur.id) ? ' De andre mister adgangen.' : '') + '</span>' +
           '<button type="button" class="link warn" data-lact="del-yes">Ja, slet listen</button>' +
           '<button type="button" class="link" data-lact="del-no">Behold</button></span>';
       } else {
         act = '<button type="button" class="link" data-lact="rename">Omdøb</button>' +
+          '<button type="button" class="link" data-lact="share" aria-expanded="' + (state.share === cur.id) + '">Del</button>' +
           '<button type="button" class="link warn" data-lact="del">Slet liste</button>';
       }
     }
     $("listAct").innerHTML = act; $("listAct").hidden = !act;
     var f = $("listForm"); f.hidden = !state.listForm;
+    renderShare(cur);
+  }
+  // The share panel of an owned list: who is in it ("Fjern" asks first) and a field to invite one more person.
+  function renderShare(cur) {
+    var open = !!(cur && cur.own && state.canWrite && state.share === cur.id && !state.listForm);
+    $("shareBox").hidden = !open;
+    if (!open) { $("shPeople").innerHTML = ""; return; }
+    var ms = (state.people[cur.id] || []).filter(function (x) { return x.role === "member"; });
+    ms.sort(function (a, b) { return a.name.localeCompare(b.name, "da"); });
+    $("shPeople").innerHTML = ms.map(function (m) {
+      var who = esc(m.name || "Ukendt");
+      if (state.confirmMember === m.id)
+        return '<li><span>Fjern ' + who + '? ' + who + 's egne produkter beholdes uden liste.</span><button type="button" class="link warn" data-sact="rm-yes" data-uid="' + esc(m.id) + '">Ja, fjern</button>' +
+          '<button type="button" class="link" data-sact="rm-no">Behold</button></li>';
+      return '<li><span>' + who + '</span>' + (m.email ? '<span class="meta">' + esc(m.email) + '</span>' : '') +
+        '<button type="button" class="link" data-sact="rm" data-uid="' + esc(m.id) + '">Fjern</button></li>';
+    }).join("");
   }
   function listMsg(t) { var m = $("listMsg"); m.textContent = t || ""; m.hidden = !t; }
-  function selectList(key) { state.listSel = key; state.confirmList = null; state.listForm = null; listMsg(""); saveSel(); render(); }
+  function selectList(key) { state.listSel = key; state.confirmList = null; state.confirmLeave = null; state.share = null; state.confirmMember = null; state.listForm = null; listMsg(""); saveSel(); render(); }
   function openListForm(mode) {
     var cur = listById(curSel());
-    state.listForm = mode; state.confirmList = null; listMsg("");
+    state.listForm = mode; state.confirmList = null; state.confirmLeave = null; state.share = null; listMsg("");
     $("lfName").value = mode === "rename" && cur ? cur.name : "";
     $("lfSave").textContent = mode === "rename" ? "Gem navn" : "Opret liste";
     $("lfLabel").textContent = mode === "rename" ? "Nyt navn til listen" : "Navn på den nye liste";
@@ -558,7 +610,23 @@
     var b = ev.target.closest("[data-lact]"); if (!b) return;
     var act = b.dataset.lact, cur = listById(curSel());
     if (!cur) return;
+    if (act === "leave") { state.confirmLeave = cur.id; render(); return; }
+    if (act === "leave-no") { state.confirmLeave = null; render(); return; }
+    if (act === "leave-yes" && sb && !cur.own) {
+      b.disabled = true;
+      sb.rpc("leave_list", { p_list: cur.id }).then(function (r) {
+        if (r && r.error) { b.disabled = false; listMsg(listError(r.error)); return; }
+        // the database moves my own products out of the list; the others' products are no longer mine to see
+        state.products = state.products.filter(function (p) { return p.listId !== cur.id || isMine(p); });
+        state.products.forEach(function (p) { if (p.listId === cur.id) p.listId = null; });
+        state.lists = state.lists.filter(function (l) { return l.id !== cur.id; });
+        state.confirmLeave = null; state.listSel = "all"; saveSel(); listMsg(""); render(); fetchProducts();
+      }, function () { b.disabled = false; listMsg("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+      return;
+    }
+    if (!cur.own) return;
     if (act === "rename") openListForm("rename");
+    else if (act === "share") { state.share = state.share === cur.id ? null : cur.id; state.confirmMember = null; listMsg(""); render(); if (state.share) $("shEmail").focus(); }
     else if (act === "del") { state.confirmList = cur.id; render(); }
     else if (act === "del-no") { state.confirmList = null; render(); }
     else if (act === "del-yes" && sb) {
@@ -579,9 +647,9 @@
     if (!sb || !state.listForm) return;
     var name = $("lfName").value.replace(/\s+/g, " ").trim(), mode = state.listForm, cur = listById(curSel());
     if (!name || name.length > 40) { listMsg("Skriv et navn på mellem 1 og 40 tegn."); return; }
-    var dup = state.lists.some(function (l) { return l.name.toLowerCase() === name.toLowerCase() && !(mode === "rename" && cur && l.id === cur.id); });
+    var dup = ownLists().some(function (l) { return l.name.toLowerCase() === name.toLowerCase() && !(mode === "rename" && cur && l.id === cur.id); });
     if (dup) { listMsg("Du har allerede en liste med det navn."); return; }
-    if (mode === "new" && state.lists.length >= 30) { listMsg("Du kan højst have 30 lister. Slet en liste først."); return; }
+    if (mode === "new" && ownLists().length >= 30) { listMsg("Du kan højst have 30 lister. Slet en liste først."); return; }
     var btn = $("lfSave"); btn.disabled = true;
     var q = mode === "rename" && cur ? sb.from("lists").update({ name: name }).eq("id", cur.id) : sb.from("lists").insert({ name: name });
     if (mode === "new") q = q.select().single();
@@ -589,9 +657,46 @@
       btn.disabled = false;
       if (r && r.error) { listMsg(listError(r.error)); return; }
       if (mode === "rename" && cur) { cur.name = name; sortLists(); }
-      else if (r && r.data && r.data.id) { state.lists.push({ id: r.data.id, name: r.data.name || name }); sortLists(); state.listSel = r.data.id; saveSel(); }
+      else if (r && r.data && r.data.id) { state.lists.push({ id: r.data.id, name: r.data.name || name, own: true }); sortLists(); state.listSel = r.data.id; saveSel(); }
       state.listForm = null; listMsg(""); render(); fetchLists();
     }, function () { btn.disabled = false; listMsg("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+  });
+
+  // ---- sharing: invite by e-mail, remove a person ----
+  var SHARE_ANSWER = {
+    unknown: "Personen skal have adgang til Prisvagten først.", already: "Listen er allerede delt med personen.", self: "Det er din egen adresse.",
+    full: "En liste kan højst deles med 10 personer.", invalid: "Skriv en gyldig e-mailadresse.", slow: "Prøv igen om lidt."
+  };
+  $("shClose").addEventListener("click", function () { state.share = null; state.confirmMember = null; listMsg(""); render(); });
+  $("shareForm").addEventListener("keydown", function (ev) { if (ev.key === "Escape") { state.share = null; state.confirmMember = null; listMsg(""); render(); } });
+  $("shareForm").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var cur = listById(curSel()), addr = $("shEmail").value.trim();
+    if (!sb || !cur || !cur.own || state.share !== cur.id) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addr) || addr.length > 200) { listMsg(SHARE_ANSWER.invalid); return; }
+    var btn = $("shSave"); btn.disabled = true; listMsg("");
+    sb.rpc("share_list", { p_list: cur.id, p_email: addr }).then(function (r) {
+      btn.disabled = false;
+      if (r && r.error) { listMsg(schemaOld(r.error) ? SCHEMA_OLD : listError(r.error)); return; }
+      var a = r && r.data;
+      if (a === "ok") { $("shEmail").value = ""; listMsg(""); fetchMembers(); return; }
+      listMsg(SHARE_ANSWER[a] || "Kunne ikke gemme lige nu. Prøv igen om lidt.");
+    }, function () { btn.disabled = false; listMsg("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+  });
+  $("shPeople").addEventListener("click", function (ev) {
+    var b = ev.target.closest("[data-sact]"), cur = listById(curSel()); if (!b || !cur || !cur.own || !sb) return;
+    var act = b.dataset.sact, uid = b.dataset.uid;
+    if (act === "rm") { state.confirmMember = uid; render(); return; }
+    if (act === "rm-no") { state.confirmMember = null; render(); return; }
+    if (act !== "rm-yes") return;
+    b.disabled = true;
+    sb.rpc("unshare_list", { p_list: cur.id, p_user: uid }).then(function (r) {
+      if (r && r.error) { b.disabled = false; listMsg(listError(r.error)); return; }
+      state.confirmMember = null; listMsg("");
+      state.people[cur.id] = (state.people[cur.id] || []).filter(function (x) { return x.id !== uid; });
+      state.memCount[cur.id] = Math.max(0, (state.memCount[cur.id] || 1) - 1);
+      render(); fetchProducts();
+    }, function () { b.disabled = false; listMsg("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
   });
 
   // ---- imports: a shared wish list from Ønskeskyen is read by the price job; a quiet status line per import ----
@@ -814,8 +919,29 @@
     sb.from("lists").select("*").order("name", { ascending: true }).then(function (r) {
       if (!user || user.id !== uid) return;
       if (r.error) { if (!state.listsOk) { state.lists = []; render(); } return; }
-      state.lists = (r.data || []).map(function (l) { return { id: l.id, name: String(l.name || "") }; });
-      sortLists(); state.listsOk = true; render();
+      state.lists = (r.data || []).map(function (l) { return { id: l.id, name: String(l.name || ""), own: !l.user_id || l.user_id === uid }; });
+      sortLists(); state.listsOk = true; render(); fetchMembers();
+    }, function () {});
+  }
+  // Who is in the shared lists. The owner sees the memberships of their lists, a member sees the co-members of the list they are in.
+  // list_members does not exist before schema.sql has been run again: then nothing is shared and nothing is shown.
+  function fetchMembers() {
+    if (!sb || !user) return;
+    var uid = user.id;
+    sb.from("list_members").select("list_id,user_id").then(function (r) {
+      if (!user || user.id !== uid || r.error) return;
+      var cnt = {}; (r.data || []).forEach(function (m) { cnt[m.list_id] = (cnt[m.list_id] || 0) + 1; });
+      state.memCount = cnt;
+      var shared = state.lists.filter(function (l) { return listShared(l.id); });
+      Object.keys(state.people).forEach(function (k) { if (!shared.some(function (l) { return l.id === k; })) delete state.people[k]; });
+      render();
+      shared.forEach(function (l) {
+        sb.rpc("list_members_named", { p_list: l.id }).then(function (x) {
+          if (!user || user.id !== uid || !x || x.error || !Array.isArray(x.data)) return;
+          state.people[l.id] = x.data.map(function (m) { return { id: m.user_id, name: String(m.name || ""), role: m.role, email: m.email ? String(m.email) : "" }; });
+          render();
+        }, function () {});
+      });
     }, function () {});
   }
   function refreshSoon() { if (Date.now() - lastFetch > 2500) fetchProducts(); else { again = true; setTimeout(function () { if (again && !fetching) { again = false; fetchProducts(); } }, 2600); } }
@@ -843,7 +969,7 @@
   }
   function startSession() {
     state.loaded = false; state.products = []; state.canWrite = true;
-    state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null;
+    state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.share = null; state.confirmMember = null; state.confirmLeave = null; state.memCount = {}; state.people = {}; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null;
     $("status").textContent = "Henter listen …";
     loadSounds();
     ensureProfile(); fetchProducts(); fetchAccess();
@@ -855,7 +981,7 @@
   function stopSession() {
     clearInterval(pollTimer); pollTimer = null;
     try { if (channel) sb.removeChannel(channel); } catch (e) {}
-    channel = null; state.products = []; state.loaded = false; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null; renderImports();
+    channel = null; state.products = []; state.loaded = false; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.share = null; state.confirmMember = null; state.confirmLeave = null; state.memCount = {}; state.people = {}; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null; renderImports();
     access.admin = false; access.requests = []; access.allowed = []; access.confirm = null; access.seq++; accMsg(""); renderAccess();
   }
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && user) fetchProducts(); });
@@ -1117,7 +1243,7 @@
   function schemaOld(e, shopLink) {
     if (!e) return false;
     var c = String(e.code || ""), m = String(e.message || "") + " " + String(e.details || "");
-    if (c === "42703" || c === "PGRST204" || c === "42P01" || c === "PGRST205") return true;      // missing column or table
+    if (c === "42703" || c === "PGRST204" || c === "42P01" || c === "PGRST205" || c === "42883" || c === "PGRST202") return true;      // missing column, table or function
     if (c === "23514" && /target_type/.test(m)) return true;                                       // the goal 'auto' is not allowed yet
     if (c === "23502" && /target_value/.test(m)) return true;                                      // a goal without a value is not allowed yet
     if (c === "23514" && shopLink && /source_url/.test(m)) return true;                            // only prisjagt.dk links are allowed yet
@@ -1169,8 +1295,10 @@
     var pend = state.imports.filter(function (x) { return x.status === "pending"; }).length;
     if (pend >= 5) { fail("Du har allerede 5 ønskelister i gang. Vent, til de er hentet."); return; }
     if (state.imports.length >= 20) { fail("Du følger 20 ønskelister. Stop eller skjul en først."); return; }
+    var into = curSel();
+    if (listKnown(into) && !listById(into).own) { fail("Kun listens ejer kan tilføje en ønskeliste."); return; }
     var btn = $("fSubmit"); btn.disabled = true;
-    var row = { url: url }, into = curSel();
+    var row = { url: url };
     if (listKnown(into)) row.list_id = into;
     sb.from("imports").insert(row).then(function (r) {
       btn.disabled = false;
