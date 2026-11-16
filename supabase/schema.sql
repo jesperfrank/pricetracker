@@ -102,6 +102,8 @@ create policy products_own on public.products
   with check ((select auth.uid()) = user_id and public.is_allowed());
 
 grant select, insert, update, delete on public.profiles, public.products to authenticated;
+-- The price job signs in with the service key. Newer Supabase projects do not grant table rights by default, so state them.
+grant select, insert, update, delete on public.allowed_emails, public.profiles, public.products, public.resolver_secret to service_role;
 
 -- ---------------------------------------------------------------- triggers on products
 
