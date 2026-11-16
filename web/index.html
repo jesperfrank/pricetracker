@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Prisvagten</title>
 <meta name="description" content="Prisvagten holder øje med priser i danske webshops og sender en e-mail, når målet er nået.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111315" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Prisvagten">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&display=swap">
@@ -122,6 +130,13 @@
     </section>
     <p class="fine" id="tryRow"><button type="button" class="link" id="tryBtn">Prøv lyden</button></p>
   </section>
+  <div class="fine" id="installBox" hidden>
+    <button type="button" class="link" id="installBtn" hidden>Læg på hjemmeskærmen</button>
+    <details id="installIos" hidden>
+      <summary>Læg på hjemmeskærmen</summary>
+      <p>Tryk på Del, og vælg Føj til hjemmeskærm.</p>
+    </details>
+  </div>
 </div>
 
 <script src="config.js"></script>

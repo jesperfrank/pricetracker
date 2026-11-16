@@ -1300,6 +1300,27 @@
       ? "Login-linket er udløbet eller er brugt allerede. Send et nyt." : "Login mislykkedes. Send et nyt login-link.";
   }
 
+  // ---- installable app: home-screen item and offline shell (must never affect the page) ----
+  try {
+    var standalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
+    var ios = /iphone|ipad|ipod/i.test(navigator.userAgent || "") || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    var installEv = null;
+    if (!standalone) {
+      window.addEventListener("beforeinstallprompt", function (ev) {
+        ev.preventDefault(); installEv = ev; $("installBtn").hidden = false; $("installBox").hidden = false;
+      });
+      $("installBtn").addEventListener("click", function () {
+        if (!installEv) return;
+        var e2 = installEv; installEv = null; $("installBox").hidden = true;
+        try { e2.prompt(); } catch (e) {}
+      });
+      if (ios) { $("installIos").hidden = false; $("installBox").hidden = false; }
+    }
+    if ("serviceWorker" in navigator && (location.protocol === "https:" || /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname))) {
+      navigator.serviceWorker.register("sw.js").catch(function () {});
+    }
+  } catch (e) {}
+
   // ---- boot ----
   var cfg = window.PV_CONFIG || {};
   if (!cfg.supabaseUrl || !cfg.supabaseAnonKey) { $("setupMsg").hidden = false; return; }

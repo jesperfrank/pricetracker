@@ -160,7 +160,7 @@ function check(name, ok, extra) { results.push({ name, ok: !!ok, extra }); conso
 
 let browser;
 async function open(opts = {}) {
-  const ctx = await browser.newContext({ viewport: { width: opts.width || 900, height: opts.height || 900 }, colorScheme: opts.scheme || "light" });
+  const ctx = await browser.newContext({ viewport: { width: opts.width || 900, height: opts.height || 900 }, colorScheme: opts.scheme || "light", serviceWorkers: "block" });
   const page = await ctx.newPage();
   page.on("pageerror", e => pageErrors.push(opts.label + ": " + e.message));
   page.on("console", m => { if (m.type() === "error" && !/Failed to load resource/.test(m.text())) pageErrors.push(opts.label + " console: " + m.text()); });
@@ -1343,6 +1343,78 @@ let base;
       await d.context().close(); await s.context().close();
     }
     check("screenshots saved", ["screenshot-light.png", "screenshot-dark.png", "screenshot-mobile.png"].every(f => fs.existsSync(path.join(ROOT, f))));
+  }
+
+  // 15. installable app (PWA): manifest, icons, service worker, install item
+  {
+    const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+    const rel = u => !/^(\/|[a-z]+:)/i.test(u);
+    const bare = async (ctxOpts, init) => {   // a page with the fake client but without open()'s defaults
+      const ctx = await browser.newContext(Object.assign({ serviceWorkers: "block" }, ctxOpts || {}));
+      const pg = await ctx.newPage(); pg.on("pageerror", e => pageErrors.push("pwa: " + e.message));
+      await pg.route(/cdn\.jsdelivr\.net/, r => r.fulfill({ contentType: "text/javascript", body: "/* test: client is injected */" }));
+      await pg.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
+      await pg.route(/\/config\.js$/, r => r.fulfill({ contentType: "text/javascript", body: 'window.PV_CONFIG={supabaseUrl:"https://x.supabase.test",supabaseAnonKey:"anon"};' }));
+      await pg.addInitScript("window.__INIT = { session: null };");
+      await pg.addInitScript(FAKE);
+      if (init) await pg.addInitScript(init.fn, init.arg);
+      await pg.goto(base + "/index.html");
+      return pg;
+    };
+    const mLink = /<link rel="manifest" href="([^"]+)"/.exec(html);
+    check("manifest is linked with a relative href", mLink && rel(mLink[1]), mLink && mLink[1]);
+    let man = null;
+    try { man = JSON.parse(fs.readFileSync(path.join(ROOT, mLink[1]), "utf8")); } catch (e) {}
+    check("manifest is valid JSON with relative start_url and scope", man && man.start_url === "./" && man.scope === "./" && man.display === "standalone" && man.lang === "da" && man.name === "Prisvagten");
+    const pngSize = f => { const b = fs.readFileSync(f); return b.readUInt32BE(16) + "x" + b.readUInt32BE(20); };
+    const icons = (man && man.icons) || [];
+    check("manifest icons exist on disk with the stated sizes, incl. maskable", icons.length >= 3 && icons.every(i => rel(i.src) && fs.existsSync(path.join(ROOT, i.src)) && pngSize(path.join(ROOT, i.src)) === i.sizes) && icons.some(i => i.purpose === "maskable"));
+    check("apple-touch-icon is 180x180 and linked", /rel="apple-touch-icon" href="icons\/apple-touch-icon.png"/.test(html) && pngSize(path.join(ROOT, "icons", "apple-touch-icon.png")) === "180x180");
+    check("theme-color metas for light and dark", /name="theme-color"[^>]*prefers-color-scheme: light/.test(html) && /name="theme-color"[^>]*prefers-color-scheme: dark/.test(html));
+
+    let parses = true; try { new (require("vm").Script)(fs.readFileSync(path.join(ROOT, "sw.js"), "utf8")); } catch (e) { parses = false; }
+    check("service worker file parses", parses);
+    const sw = require(path.join(ROOT, "sw.js"));
+    const O = "https://jesperfrank.github.io";
+    check("worker handles same-origin GET only", sw.shouldHandle("GET", O + "/pricetracker/app.js", O) && sw.shouldHandle("get", O + "/pricetracker/", O)
+      && !sw.shouldHandle("POST", O + "/pricetracker/app.js", O) && !sw.shouldHandle("PUT", O + "/x", O) && !sw.shouldHandle("DELETE", O + "/x", O));
+    check("worker ignores cross-origin requests (Supabase, jsDelivr, fonts)", !sw.shouldHandle("GET", "https://abc.supabase.co/rest/v1/products", O)
+      && !sw.shouldHandle("GET", "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js", O) && !sw.shouldHandle("GET", "not a url", O));
+    check("worker does not touch sounds", !sw.shouldHandle("GET", O + "/pricetracker/sounds/kasse.mp3", O));
+    check("shell files all exist", sw.SHELL.filter(f => f !== "./").every(f => fs.existsSync(path.join(ROOT, f))));
+
+    {   // the worker registers and creates its versioned cache
+      const ctx = await browser.newContext({ serviceWorkers: "allow" });
+      const pg = await ctx.newPage(); pg.on("pageerror", e => pageErrors.push("sw: " + e.message));
+      await pg.route(/cdn\.jsdelivr\.net/, r => r.fulfill({ contentType: "text/javascript", body: "" }));
+      await pg.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
+      await pg.goto(base + "/index.html");
+      const ok = await pg.evaluate(() => navigator.serviceWorker.ready.then(() => new Promise(r => setTimeout(r, 500))).then(() => caches.keys()).then(k => k.length === 1 && /^prisvagten-shell-v/.test(k[0]))).catch(() => false);
+      check("service worker registers and creates a versioned cache", ok);
+      await ctx.close();
+    }
+    for (const mode of ["reject", "throw"]) {   // a failing registration must not break the page
+      const pg = await bare({}, { arg: mode, fn: m => { Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { register: () => { if (m === "throw") throw new Error("nope"); return Promise.reject(new Error("nope")); } } }); } });
+      await pg.waitForSelector("#authView:not([hidden])", { timeout: 5000 }).catch(() => {});
+      check("page works when service worker registration " + (mode === "throw" ? "throws" : "is rejected"), await pg.isVisible("#authView"));
+      await pg.context().close();
+    }
+    {
+      const p = await open({ session: false, label: "install" });
+      check("install item is hidden until the browser offers install", !(await p.isVisible("#installBox")));
+      await p.evaluate(() => { const e = new Event("beforeinstallprompt", { cancelable: true }); e.prompt = () => { window.__prompted = true; }; window.dispatchEvent(e); });
+      check("install link shows on beforeinstallprompt", await p.isVisible("#installBtn") && /Læg på hjemmeskærmen/.test(await p.textContent("#installBtn")));
+      await p.click("#installBtn");
+      check("install link triggers the prompt and goes away", await p.evaluate(() => window.__prompted === true) && !(await p.isVisible("#installBox")));
+      await p.context().close();
+      const sp = await bare({}, { fn: () => { const mm = window.matchMedia.bind(window); window.matchMedia = q => /display-mode: standalone/.test(q) ? { matches: true, media: q, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} } : mm(q); } });
+      await sp.evaluate(() => window.dispatchEvent(new Event("beforeinstallprompt", { cancelable: true })));
+      check("install item stays hidden when running standalone", !(await sp.isVisible("#installBox")) && !(await sp.isVisible("#installIos")));
+      await sp.context().close();
+      const ip = await bare({ userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1" });
+      check("iOS shows a collapsed hint with the Del instruction", await ip.isVisible("#installIos") && !(await ip.evaluate(() => document.getElementById("installIos").open)) && /Tryk på Del, og vælg Føj til hjemmeskærm\./.test(await ip.textContent("#installIos")));
+      await ip.context().close();
+    }
   }
 
   check("no page errors", pageErrors.length === 0, pageErrors.join(" | "));

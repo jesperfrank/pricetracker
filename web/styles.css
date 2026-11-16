@@ -210,3 +210,7 @@ details.fine summary { margin-top: 0; color: var(--ink2) }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; scroll-behavior: auto !important } }
 [hidden] { display: none !important }
+/* installed app: keep the header clear of the notch and the home bar */
+body { padding-top: calc(48px + env(safe-area-inset-top, 0px)); padding-bottom: calc(80px + env(safe-area-inset-bottom, 0px)) }
+@media (max-width: 560px) { body { padding-top: calc(28px + env(safe-area-inset-top, 0px)); padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px)) } }
+#installBox { margin-top: 10px } #installBox[hidden] { display: none }
