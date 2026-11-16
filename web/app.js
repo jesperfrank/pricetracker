@@ -255,7 +255,7 @@
   function headHtml(p) {
     var b = bestOf(p), t = targetKr(p), os = offersOf(p), st;
     var anyStock = os.some(function (o) { return o.inStock !== false; });
-    if (p.status === "pending") st = "Henter produktet … klar inden for et kvarter";
+    if (p.status === "pending") st = p.url ? "Henter produktet … klar inden for et kvarter" : "Finder produktet … det kan tage op til en time.";
     else if (p.status === "error") st = '<span class="warn">' + esc(p.checkNote || "Produktet kunne ikke hentes") + '</span>';
     else if (awaitingFetch(p)) st = "Henter priser for den valgte variant …";
     else if (p.status === "choose") st = '<span class="out">Vælg, hvilken variant du vil følge</span>';
@@ -305,12 +305,25 @@
     return html + '</div>';
   }
 
+  // Name-only product: link to prisjagt.dk's own search (opens in a new tab) and a form to paste the link found there.
+  function findHtml(p, afterError) {
+    var id = p._id, a = '<a href="https://prisjagt.dk/search?search=' + esc(encodeURIComponent(p.name)) + '" target="_blank" rel="noopener noreferrer">Søg på Prisjagt</a>';
+    var f = state.canWrite ? '<form class="edit" data-fixurl="' + esc(id) + '" novalidate><label for="u-' + esc(id) + '">Indsæt linket her</label>' +
+      '<input class="wide" type="url" id="u-' + esc(id) + '" maxlength="500" required placeholder="https://prisjagt.dk/…">' +
+      '<button class="link" type="submit">Gem linket</button><span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></form>' : "";
+    return '<p class="verdict">' + (afterError ? "Find det selv" : "Har du travlt? Find det selv") + ': ' + a + '</p>' + f;
+  }
+
   function bodyHtml(p) {
     var id = p._id;
+    if (p.status === "pending" && !p.url)
+      return '<p class="verdict">Finder produktet … det kan tage op til en time.</p>' + findHtml(p) + footHtml(p);
     if (p.status === "pending")
       return '<p class="verdict">Henter produktet fra prisjagt.dk. Det er klar inden for et kvarter, og så kan du vælge variant.</p>' + footHtml(p);
+    if (p.status === "error" && !p.url)
+      return '<p class="verdict poor"><b>Produktet blev ikke fundet.</b> ' + esc(p.checkNote || "Find det selv på Prisjagt, og indsæt linket her.") + '</p>' + findHtml(p, true) + footHtml(p);
     if (p.status === "error") {
-      var f = state.canWrite ? '<form class="edit" data-fixurl="' + esc(id) + '"><label class="vh" for="u-' + esc(id) + '">Link fra prisjagt.dk</label>' +
+      var f = state.canWrite ? '<form class="edit" data-fixurl="' + esc(id) + '" novalidate><label class="vh" for="u-' + esc(id) + '">Link fra prisjagt.dk</label>' +
         '<input class="wide" type="url" id="u-' + esc(id) + '" maxlength="500" required value="' + esc(p.url || "") + '" placeholder="Link fra prisjagt.dk">' +
         '<button class="link" type="submit">Gem linket og prøv igen</button><span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></form>' : "";
       return '<p class="verdict poor"><b>Produktet kunne ikke hentes.</b> ' + esc(p.checkNote || "Tjek, at linket er en produktside på prisjagt.dk.") + '</p>' + f + footHtml(p);
@@ -403,7 +416,7 @@
     });
     if (!ps.length) {
       list.innerHTML = '<div class="empty"><b>Ingen produkter endnu</b>' +
-        (state.canWrite ? "Indsæt et link fra prisjagt.dk ovenfor. Så henter vi produktet, du vælger variant, og derefter ser du laveste pris, butikkerne og prisen dag for dag."
+        (state.canWrite ? "Skriv navnet på en vare eller indsæt et link fra prisjagt.dk ovenfor. Så finder og henter vi produktet, du vælger variant, og derefter ser du laveste pris, butikkerne og prisen dag for dag."
           : "Når der er tilføjet produkter, ser du laveste pris, butikker og prisudvikling her.") + '</div>';
       return;
     }
@@ -636,9 +649,11 @@
       setRowMsg(fid, "Gemmer …");
       sb.from("products").update({ source_url: nu }).eq("id", fid).then(function (r) {
         if (r && r.error) { setRowMsg(fid, "Kunne ikke gemme lige nu. Prøv igen om lidt."); onWriteError(r.error); return; }
-        var p = prod(fid); if (p) p.url = nu;
-        setRowMsg(fid, "Gemt. Produktet hentes igen ved næste kørsel, inden for et kvarter.");
-        fetchProducts();
+        // the database starts the product over on a new link (status 'pending'); show that straight away
+        var p = prod(fid); if (p) { p.url = nu; p.status = "pending"; p.checkNote = ""; }
+        state.rowMsg[fid] = "";
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        render(); fetchProducts();
       }, function () { setRowMsg(fid, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
       return;
     }
@@ -665,25 +680,35 @@
       ? "Rabatten regnes fra normalprisen, som findes ved første hentning, ikke fra butikkens egen førpris."
       : "Du får besked, når varen er på lager til den pris eller under.";
   }
+  // A value that looks like an address (scheme, www., or a single word with a path) is a link; anything else is a name.
+  function looksLikeLink(t) { return /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^(javascript|data|vbscript|file|mailto):/i.test(t) || /^www\./i.test(t) || /^\S+\.\S+\/\S*$/.test(t) || /prisjagt\.dk/i.test(t) && !/\s/.test(t); }
   $("fTypePrice").addEventListener("change", syncType); $("fTypePct").addEventListener("change", syncType);
   $("addForm").addEventListener("submit", function (ev) {
     ev.preventDefault();
     var msg = $("fMsg"); msg.hidden = true;
     var fail = function (t) { msg.textContent = t; msg.hidden = false; };
-    var url = parsePrisjagt($("fUrl").value), v = Number($("fVal").value), pct = $("fTypePct").checked;
-    var name = $("fName").value.trim().slice(0, 140) || PLACEHOLDER;
-    if (!url) { fail("Linket skal være en produktside på https://prisjagt.dk/ . Søg efter varen på prisjagt.dk, åbn den, og kopier adressen."); return; }
+    var raw = $("fMain").value.trim().replace(/\s+/g, " "), v = Number($("fVal").value), pct = $("fTypePct").checked, url = null, name = null;
+    if (!raw) { fail("Skriv navnet på varen, eller indsæt et link fra prisjagt.dk."); return; }
+    if (looksLikeLink(raw)) {
+      url = parsePrisjagt(raw);
+      if (!url) { fail("Linket skal være en produktside på https://prisjagt.dk/ . Søg efter varen på prisjagt.dk, åbn den, og kopier adressen."); return; }
+    } else {
+      if (raw.length < 2 || raw.length > 140) { fail("Navnet skal være mellem 2 og 140 tegn."); return; }
+      name = raw;
+    }
     if (!(v > 0) || (pct && v > 95)) { fail(pct ? "Skriv en rabat mellem 1 og 95 %." : "Skriv en pris i hele kroner."); return; }
     if (!sb) return;
     var btn = $("fSubmit"); btn.disabled = true;
-    sb.from("products").insert({ name: name, source_url: url, target_type: pct ? "pct" : "price", target_value: v, active: true }).then(function (r) {
+    var row = url ? { name: PLACEHOLDER, source_url: url, target_type: pct ? "pct" : "price", target_value: v, active: true }
+      : { name: name, target_type: pct ? "pct" : "price", target_value: v };
+    sb.from("products").insert(row).then(function (r) {
       btn.disabled = false;
       if (r && r.error) {
         if (isDenied(r.error)) { onWriteError(r.error); return; }
-        fail(r.error.code === "23514" ? "Databasen afviste linket eller målet. Tjek, at linket er fra prisjagt.dk." : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
+        fail(r.error.code === "23514" ? (url ? "Databasen afviste linket eller målet. Tjek, at linket er fra prisjagt.dk." : "Databasen afviste navnet eller målet. Tjek dem, og prøv igen.") : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
         return;
       }
-      $("fName").value = ""; $("fUrl").value = ""; $("fVal").value = "";
+      $("fMain").value = ""; $("fVal").value = "";
       fetchProducts();
     }, function () { btn.disabled = false; fail("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
   });

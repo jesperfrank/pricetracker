@@ -252,7 +252,7 @@ function makeFake(db) {
         let rows = t.slice();
         if (mm[1] === 'products') {
           assert.strictEqual(q.get('active'), 'eq.true'); assert.strictEqual(q.get('source_url'), 'not.is.null');
-          rows = rows.filter((r) => r.active !== false && r.source_url);
+          rows = rows.filter((r) => r.active !== false && (r.source_url || db.ignoreLinkFilter));   // db.ignoreLinkFilter: a server that wrongly returns name-only rows
         }
         if (q.get('user_id') && /^in\.\((.*)\)$/.test(q.get('user_id'))) { const ids = /^in\.\((.*)\)$/.exec(q.get('user_id'))[1].split(','); rows = rows.filter((r) => ids.indexOf(r.user_id) !== -1); }
         if (q.get('email') && /^eq\./.test(q.get('email'))) rows = rows.filter((r) => r.email === q.get('email').slice(3));
@@ -461,6 +461,25 @@ test('job never writes user-owned columns (id, user_id, name, source_url, target
   const db = newDb(); db.products.push(product('Z', 'u1', 'sony'));
   await R.run(ctxFor(db, { [urlOf('sony')]: pageFor('sony') }));   // the fake asserts this on every PATCH
   assert(db.patches.length === 1 && db.products[0].status === 'choose' && db.products[0].variants.length === 5);
+});
+
+test('name-only products (source_url null) are skipped silently: no fetch, no write, no 6-hour error retry', async () => {
+  for (const wrongServer of [false, true]) {
+    const db = newDb(); db.ignoreLinkFilter = wrongServer;
+    db.products.push(
+      product('N1', 'u1', 'lego', { source_url: null, name: 'Kun et navn' }),
+      product('N2', 'u1', 'lego', { source_url: null, status: 'error', check_note: 'Ikke fundet', last_checked: '2026-11-10T10:00:00Z' }),   // error for > 6 h
+      product('N3', 'u1', 'lego', { source_url: null, status: 'error', check_note: 'Ikke fundet', last_checked: null }),
+      product('L1', 'u1', 'ps5'));
+    const logs = [];
+    const ctx = ctxFor(db, { [urlOf('ps5')]: pageFor('ps5') }, { log: (l) => logs.push(l) });
+    const r = await R.run(ctx);
+    assert.deepStrictEqual(ctx.fetched, [urlOf('ps5')], 'only the product with a link is fetched');
+    assert.deepStrictEqual(db.patches.map((x) => x.id), ['L1']);
+    assert.strictEqual(r.stats.total, 1);
+    assert(db.products.slice(0, 3).every((x) => x.source_url === null) && db.products[1].status === 'error' && db.products[1].check_note === 'Ikke fundet');
+    assert(!logs.some((l) => /Kun et navn|N1|N2|N3/.test(l)), 'nothing logged about them');
+  }
 });
 
 // ---------------------------------------------------------------- live sanity check (opt-in)

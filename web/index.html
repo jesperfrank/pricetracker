@@ -47,10 +47,8 @@
   <!-- signed in -->
   <section id="appView" hidden>
     <form class="add" id="addForm" autocomplete="off" novalidate>
-      <label class="vh" for="fUrl">Link fra prisjagt.dk</label>
-      <input class="inp url" type="url" id="fUrl" maxlength="500" required placeholder="Link fra prisjagt.dk">
-      <label class="vh" for="fName">Eget navn (valgfrit)</label>
-      <input class="inp name" type="text" id="fName" maxlength="140" placeholder="Eget navn (valgfrit)">
+      <label class="vh" for="fMain">Produktnavn eller link fra prisjagt.dk</label>
+      <input class="inp url" type="text" id="fMain" maxlength="500" required placeholder="Produktnavn eller link fra prisjagt.dk">
       <div class="amount">
         <label class="vh" for="fVal" id="fValLabel">Højeste pris i kroner</label>
         <input class="inp n" type="number" id="fVal" min="1" step="1" required inputmode="numeric" placeholder="Højst">
@@ -62,7 +60,7 @@
       <button class="btn" id="fSubmit" type="submit">Hold øje</button>
     </form>
     <p class="msg" id="fMsg" role="alert" hidden></p>
-    <p class="hint" id="fHelp">Søg efter varen på prisjagt.dk, åbn den, og kopier adressen fra browserens adressefelt.</p>
+    <p class="hint" id="fHelp">Skriv navnet på varen, så leder vi efter den på Prisjagt (op til en time), eller indsæt selv et link til varen fra prisjagt.dk, så går det hurtigere.</p>
     <p class="hint" id="fHint">Du får besked, når varen er på lager til den pris eller under.</p>
     <p class="notice" id="readonly" hidden>Din adresse har ikke adgang til at gemme endnu. Bed ejeren om at tilføje den.</p>
 

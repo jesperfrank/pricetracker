@@ -59,8 +59,17 @@ I Supabase: **Project Settings** > **API** (eller *API Keys*). Noter:
 
 Frontenden ligger i `web/` og udgives af workflowet `pages.yml`. Slå Pages til: repoet > **Settings** > **Pages** > *Source*: **GitHub Actions**. Frontenden skal have Project URL og anon-nøglen fra trin 4 (se `web/`).
 
+## Tilføj produkter ved navn (assistenten)
+
+Man kan skrive et produktnavn i stedet for et link. Produktet står så som "Finder produktet …", indtil et link er fundet: enten af brugeren selv ("Søg på Prisjagt" og indsæt linket) eller af navne-assistenten, en separat AI-agent der ikke hører til dette repo.
+
+1. Kør hele `supabase/schema.sql` igen i **SQL Editor** (det er sikkert; der oprettes ikke et nyt token, hvis der allerede er et).
+2. Nederst i resultatet vises en kolonne `resolver_token_copy_this` med en lang tekst. Kopiér den. Den kan også ses senere ved at køre `select token from public.resolver_secret;` i SQL Editor.
+3. Teksten er værdien til hemmeligheden `x-resolver-token`, som navne-assistenten bruger (sendes som HTTP-headeren `x-resolver-token`). Assistenten bruger kun den offentlige anon/publishable-nøgle, aldrig service_role-nøglen. Del ikke tokenet andre steder, og læg det ikke i repoet.
+4. Vil du skifte tokenet: `update public.resolver_secret set token = replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');`, og opdatér hemmeligheden hos assistenten.
+
 ## Hverdagen
 
 - Ny person: tilføj e-mailen i `allowed_emails` og send dem linket til siden.
 - Jobbet henter hver produktside højst én gang pr. kørsel, med 1,5 sekunds pause, og forsøger aldrig at omgå en blokering. Svarer Prisjagt med 403/429, springer jobbet resten over i den kørsel, og produktet får en note.
-- Et produkt i fejl-tilstand prøves igen efter 6 timer. Skifter nogen linket, starter produktet forfra.
+- Et produkt i fejl-tilstand prøves igen efter 6 timer (produkter uden link, altså kun et navn, springes over, til der er et link). Skifter nogen linket, starter produktet forfra.

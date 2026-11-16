@@ -52,6 +52,11 @@ create table if not exists public.products (
     coalesce(cardinality(shops_always), 0) <= 100 and coalesce(cardinality(shops_exclude), 0) <= 100)
 );
 
+-- A product may be added by name only (source_url null); the name must then not be blank.
+-- NOT VALID: enforced for every new/changed row without re-checking old rows.
+alter table public.products drop constraint if exists products_name_not_blank;
+alter table public.products add constraint products_name_not_blank check (btrim(name) <> '') not valid;
+
 create index if not exists products_user_idx on public.products (user_id);
 create index if not exists products_job_idx on public.products (status) where active;
 
@@ -195,3 +200,135 @@ $$;
 grant usage on schema public to supabase_auth_admin;
 grant execute on function public.hook_before_user_created(jsonb) to supabase_auth_admin;
 revoke execute on function public.hook_before_user_created(jsonb) from authenticated, anon, public;
+
+-- ---------------------------------------------------------------- name lookup: resolver functions
+-- A user can add a product by name only (source_url null, status 'pending'). An external assistant
+-- (no service key!) finds the prisjagt.dk page and writes the link back through the three functions
+-- below, called over PostgREST (/rest/v1/rpc/...) with the publishable key in "apikey" and a secret
+-- in the HTTP header "x-resolver-token". The secret lives in resolver_secret; nobody but the
+-- SECURITY DEFINER functions (owner = the role that runs this file) can read it.
+--
+-- How they coexist with products_guard(): the guard restricts only when current_user is
+-- 'authenticated' or 'anon'. Inside a SECURITY DEFINER function current_user is the function owner,
+-- so the guard lets these functions write status/check_note/source_url, while a browser user's own
+-- UPDATE (current_user = authenticated) is still restricted exactly as before. No flag, no change
+-- to the guard. The functions themselves only touch a pending product without link, and only
+-- the columns listed below.
+
+create table if not exists public.resolver_secret (
+  token      text primary key check (char_length(token) >= 32),
+  created_at timestamptz default now()
+);
+alter table public.resolver_secret enable row level security;     -- and no policy: no access via the API
+revoke all on public.resolver_secret from public, anon, authenticated;
+
+-- First run only: one random token (two v4 UUIDs = 64 hex chars from the server's CSPRNG;
+-- gen_random_uuid() is built into Postgres 13+, so no pgcrypto/search_path dependency).
+insert into public.resolver_secret (token)
+select replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '')
+where not exists (select 1 from public.resolver_secret);
+
+-- True when the request header x-resolver-token (PostgREST lower-cases header names) matches a stored token.
+create or replace function public.resolver_token_ok()
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  h text;
+begin
+  begin
+    h := (current_setting('request.headers', true)::json) ->> 'x-resolver-token';
+  exception when others then
+    return false;
+  end;
+  if h is null or h = '' then
+    return false;
+  end if;
+  return exists (select 1 from public.resolver_secret where token = h);
+end;
+$$;
+revoke all on function public.resolver_token_ok() from public, anon, authenticated;
+
+-- Up to 20 products with a name but no link yet, oldest first. No user ids, no e-mails.
+create or replace function public.resolver_list()
+returns table (id uuid, name text, created_at timestamptz)
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  return query
+    select p.id, p.name, p.created_at
+    from public.products p
+    where p.active and p.source_url is null and p.status = 'pending'
+    order by p.created_at, p.id
+    limit 20;
+end;
+$$;
+
+-- Writes the link for a product that is still name-only and pending. Status stays 'pending', so the
+-- price job does its normal first fetch. Only https://prisjagt.dk/product.php?p=<digits> is accepted
+-- (an optional www. is dropped; anything else, including other query parameters or fragments, is rejected).
+-- Returns true when the product was updated, false when it is no longer in that state.
+create or replace function public.resolver_set(p_id uuid, p_url text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  u text := btrim(coalesce(p_url, ''));
+  n integer;
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  u := regexp_replace(u, '^https://www\.prisjagt\.dk/', 'https://prisjagt.dk/');
+  if char_length(u) > 200 or u !~ '^https://prisjagt\.dk/product\.php\?p=[0-9]+$' then
+    raise exception 'resolver: not a prisjagt.dk product link' using errcode = '22023';
+  end if;
+  update public.products
+     set source_url = u, check_note = null
+   where id = p_id and active and source_url is null and status = 'pending';
+  get diagnostics n = row_count;
+  return n = 1;
+end;
+$$;
+
+-- Marks a still name-only pending product as failed (the user sees the note and can paste a link).
+create or replace function public.resolver_fail(p_id uuid, p_note text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  n integer;
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  update public.products
+     set status = 'error', check_note = nullif(left(btrim(coalesce(p_note, '')), 200), '')
+   where id = p_id and active and source_url is null and status = 'pending';
+  get diagnostics n = row_count;
+  return n = 1;
+end;
+$$;
+
+revoke all on function public.resolver_list() from public;
+revoke all on function public.resolver_set(uuid, text) from public;
+revoke all on function public.resolver_fail(uuid, text) from public;
+grant execute on function public.resolver_list() to anon, authenticated;
+grant execute on function public.resolver_set(uuid, text) to anon, authenticated;
+grant execute on function public.resolver_fail(uuid, text) to anon, authenticated;
+
+-- Shows the token (copy it from the result of this last query; see docs/SETUP.md).
+select token as resolver_token_copy_this from public.resolver_secret;

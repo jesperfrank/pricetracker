@@ -111,7 +111,11 @@ async function run(ctx) {
   const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, hits: 0, sent: 0, mailSkipped: 0, mailNote: '', written: 0, writeFail: 0, deadline: false };
 
   // 1. load (a failure here means Supabase is unreachable: let it throw)
-  const products = await sb.select('products', 'select=*&active=eq.true&source_url=not.is.null&order=last_checked.asc.nullsfirst&limit=1000');
+  // Products added by name only (source_url null) wait for a link (from the name-lookup assistant or the user):
+  // the query leaves them out, and the filter below keeps them out even if the query is changed. Never fetched,
+  // never counted, never retried (also not by the 6-hour error retry).
+  const products = (await sb.select('products', 'select=*&active=eq.true&source_url=not.is.null&order=last_checked.asc.nullsfirst&limit=1000'))
+    .filter((p) => p.source_url);
   const ownerIds = Array.from(new Set(products.map((p) => p.user_id)));
   const profiles = {};
   for (let i = 0; i < ownerIds.length; i += 50) {
