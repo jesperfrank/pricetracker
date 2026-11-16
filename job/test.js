@@ -530,7 +530,8 @@ function makeFake(db) {
         let rows = t.slice();
         if (mm[1] === 'imports') {
           rows = rows.filter((r) => !q.get('status') || r.status === q.get('status').slice(3));
-          rows.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+          if (/^synced_at\.asc/.test(q.get('order') || '')) rows.sort((a, b) => (a.synced_at ? Date.parse(a.synced_at) : -Infinity) - (b.synced_at ? Date.parse(b.synced_at) : -Infinity) || String(a.created_at).localeCompare(String(b.created_at)));
+          else rows.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
           if (q.get('limit')) rows = rows.slice(0, Number(q.get('limit')));
           db.importReads = (db.importReads || 0) + 1;
         } else if (ownerEq && (mm[1] === 'products' || mm[1] === 'lists')) rows = rows.filter((r) => r.user_id === ownerEq[1]);   // one person's rows (the import step)
@@ -573,13 +574,31 @@ function makeFake(db) {
         return reply(201, h.Prefer === 'return=representation' ? out : undefined);
       }
       if (m === 'PATCH') {
+        if (mm[1] === 'profiles') {   // the morning mail's claim: only digest_sent_at, only where it still has the value the job read
+          const body = JSON.parse(opts.body);
+          assert.deepStrictEqual(Object.keys(body), ['digest_sent_at'], 'the job writes digest_sent_at on profiles, nothing else');
+          if (db.beforeClaim) db.beforeClaim();
+          const uid = /^eq\.(.+)$/.exec(q.get('user_id'))[1], cond = q.get('digest_sent_at');
+          db.profilePatches = (db.profilePatches || []).concat([{ uid, cond, body }]);
+          if (db.profilePatchFail && body.digest_sent_at !== null && !db.profilePatchFailOnlyRollback) return reply(500, { message: 'db error' });
+          if (db.profileRollbackFail && body.digest_sent_at === (db.profileRollbackFailTo === undefined ? null : db.profileRollbackFailTo) && cond && /^eq\./.test(cond)) return reply(500, { message: 'db error' });
+          const row = t.find((r) => r.user_id === uid);
+          const cur = row ? row.digest_sent_at : undefined;
+          const ok = row && (cond === 'is.null' ? cur == null : (cond && /^eq\./.test(cond) && Date.parse(decodeURIComponent(cond.slice(3))) === Date.parse(cur)));
+          if (!ok) return reply(200, []);
+          row.digest_sent_at = body.digest_sent_at;
+          return reply(200, h.Prefer === 'return=representation' ? [JSON.parse(JSON.stringify(row))] : undefined);
+        }
         assert.strictEqual(h.Prefer, 'return=minimal');
         if (mm[1] === 'imports') {
           const id = /^eq\.(.+)$/.exec(q.get('id'))[1], body = JSON.parse(opts.body);
-          assert.deepStrictEqual(Object.keys(body).sort(), ['added', 'done_at', 'found', 'note', 'status'], 'the job writes the result columns only');
-          assert.strictEqual(q.get('status'), 'eq.pending', 'only a still-pending import is marked');
-          const row = t.find((r) => r.id === id && r.status === 'pending'); if (!row) return reply(204);
-          if (db.importPatchFail) return reply(500, { message: 'db error' });
+          const OWN = ['added', 'done_at', 'found', 'list_id', 'note', 'seen', 'status', 'sync_fails', 'synced_at', 'title'];
+          Object.keys(body).forEach((k) => assert(OWN.indexOf(k) !== -1, 'the job writes job columns only: ' + k));
+          assert(q.get('status') === 'eq.pending' || q.get('status') === 'eq.done', 'only a still-pending (or still-done) import is written');
+          db.importPatches = (db.importPatches || []).concat([{ id, filter: q.get('status'), body }]);
+          const row = t.find((r) => r.id === id && r.status === q.get('status').slice(3)); if (!row) return reply(204);
+          if (db.importPatchFail && (q.get('status') === 'eq.pending' || db.importPatchFail === 'all')) return reply(500, { message: 'db error' });
+          if (db.importNoSyncColumns && Object.keys(body).some((k) => ['seen', 'sync_fails', 'synced_at', 'title', 'list_id'].indexOf(k) !== -1)) return reply(400, { code: '42703', message: 'column imports.synced_at does not exist' });
           Object.assign(row, body); return reply(204);
         }
         if (mm[1] === 'access_requests') {
@@ -1271,7 +1290,7 @@ test('onskeskyen: a share link becomes products on a new list named after the wi
   assert.strictEqual(body.operationName, 'getWishlistWishes'); assert.strictEqual(body.variables.id, LIST_ID); assert.deepStrictEqual(body.variables.input, { cursor: 0, limit: 30 });
   assert.strictEqual(body.query, ONSKE.QUERY); assert(!/u1|supabase|anna/i.test(web.posts()[1].body), 'nothing about the user is sent');
   assert.deepStrictEqual(pauses, [1000, 1000, 1000], 'a pause before every request but the first');
-  assert.deepStrictEqual(stats, { pending: 1, done: 1, error: 0, added: 12, missing: false });
+  assert.deepStrictEqual(stats, { pending: 1, done: 1, error: 0, added: 12, missing: false, synced: 0, syncAdded: 0, syncFailed: 0 }, 'the import just finished is not read again in the same run');
   const made = db.lists.filter((l) => l.user_id === 'u1');
   assert.strictEqual(made.length, 1); assert.strictEqual(made[0].name, 'Fødselsdagsønsker');
   const added = mine(db).filter((p) => p.id !== 'old');
@@ -1507,7 +1526,7 @@ test('onskeskyen: at most 3 imports per run, oldest first; out of time leaves th
 test('onskeskyen: an import that is not a wish-list link is an error; a user hiding a row while it runs is harmless', async () => {
   const web = onskeWeb(), db = importsDb(web); impRow(db, 'https://evil.example.com/s/abc');
   await runImp(db); assert.strictEqual(db.imports[0].status, 'error'); assert.strictEqual(db.imports[0].note, ONSKE.NOTE.badUrl); assert.strictEqual(web.calls.length, 0);
-  const w2 = onskeWeb(), d2 = importsDb(w2); impRow(d2, SHARE); d2.imports[0].status = 'done';
+  const w2 = onskeWeb(), d2 = importsDb(w2); impRow(d2, SHARE); d2.imports[0].status = 'done'; d2.imports[0].synced_at = NOW.toISOString();
   const r = await runImp(d2); assert.strictEqual(r.stats.pending, 0); assert.strictEqual(w2.calls.length, 0);
 });
 
@@ -1545,6 +1564,427 @@ test('run: imports come first, so the new products get their first price in the 
   const nameOnly = db.products.filter((p) => !p.source_url);
   assert.strictEqual(nameOnly.length, 1); assert.strictEqual(nameOnly[0].status, 'pending', 'a name-only product waits for the name lookup');
   assert(db.products.every((p) => p.target_type === 'auto'));
+});
+
+
+// ---------------------------------------------------------------- Onskeskyen: the import stays in sync (once a day)
+
+const at = (iso) => () => new Date(iso);
+const D1 = '2026-11-17T10:00:00Z', D2 = '2026-11-18T10:00:00Z';
+const dayN = (n) => '2026-11-' + String(16 + n) + 'T10:00:00Z';
+const idsOf = (ws) => ws.map((w) => w.id);
+const mutableWeb = (wishes, extra) => { const lists = { [LIST_ID]: { title: 'Fødselsdagsønsker', accessLevel: 'Public', wishes: wishes.slice() } }; const web = onskeWeb(Object.assign({ lists }, extra || {})); web.lists = lists; return web; };
+const WL = 'https://onskeskyen.dk/wishlists/' + LIST_ID;
+
+test('sync: a finished import becomes a standing link (title, seen ids, list, synced_at) and is read again at most once a day', async () => {
+  const web = mutableWeb(WISHES), db = importsDb(web);
+  impRow(db, SHARE);
+  await runImp(db);
+  const imp = db.imports[0];
+  assert.strictEqual(imp.status, 'done');
+  assert.deepStrictEqual(imp.seen, idsOf(WISHES)); assert.strictEqual(imp.title, 'Fødselsdagsønsker'); assert.strictEqual(imp.sync_fails, 0);
+  assert.strictEqual(imp.synced_at, '2026-11-16T10:00:00Z'); assert.strictEqual(imp.list_id, db.lists[0].id, 'the list the products went into is remembered');
+  // later the same day: nothing is fetched
+  web.calls.length = 0;
+  let r = await runImp(db, { now: at('2026-11-17T07:59:00Z') });                // 21 h 59 min later
+  assert.strictEqual(r.stats.synced, 0); assert.strictEqual(web.calls.length, 0);
+  r = await runImp(db, { now: at('2026-11-17T08:00:00Z') });                    // 22 h later: due
+  assert.strictEqual(r.stats.synced, 1); assert(web.calls.length > 0);
+  assert.strictEqual(db.imports[0].synced_at, '2026-11-17T08:00:00Z');
+  web.calls.length = 0;
+  r = await runImp(db, { now: at('2026-11-17T08:15:00Z') }); assert.strictEqual(web.calls.length, 0, 'not again 15 minutes later');
+});
+
+test('sync: only wishes that are new since last time are added (same dedupe, name cleaning and tracking removal); nothing existing is touched', async () => {
+  const web = mutableWeb(WISHES), db = importsDb(web);
+  impRow(db, SHARE); await runImp(db);
+  const before = clone(mine(db)), listId = db.imports[0].list_id;
+  web.lists[LIST_ID].wishes = WISHES.concat([
+    { id: 'n1', title: '  Ny cykel\n', url: 'https://www.cykler.dk/p/1?utm_source=a&gclid=2&size=m#x' },
+    { id: 'n2', title: 'Samme vare igen', url: WISHES[0].url },                    // a link the person already follows
+    { id: 'n3', title: 'Kun et navn', url: null },
+    { id: null, title: 'Uden id', url: 'https://shop.dk/uden-id' },               // cannot be remembered: never added by a sync
+    { id: 'n4', title: '   ', url: 'https://shop.dk/uden-navn' },                 // no usable name
+  ]);
+  web.calls.length = 0;
+  const { stats, pauses, logs } = await runImp(db, { now: at(D1) });
+  assert.strictEqual(stats.synced, 1); assert.strictEqual(stats.syncAdded, 2); assert.strictEqual(stats.syncFailed, 0);
+  assert.deepStrictEqual(web.foreign, []); assert.deepStrictEqual(pauses, [1000, 1000, 1000], 'the same pauses as for an import');
+  web.calls.forEach((c) => { assert.strictEqual(c.redirect, 'manual'); assert(c.signal); assert.strictEqual(c.headers['User-Agent'], PJ.UA); });
+  const now = mine(db);
+  assert.strictEqual(now.length, 14);
+  assert.deepStrictEqual(now.slice(0, 12), before, 'the 12 products the person already has are untouched');
+  const [cykel, navn] = now.slice(12);
+  assert.strictEqual(cykel.name, 'Ny cykel'); assert.strictEqual(cykel.source_url, 'https://www.cykler.dk/p/1?size=m', 'tracking parameters and fragment removed');
+  assert.strictEqual(navn.name, 'Kun et navn'); assert.strictEqual(navn.source_url, null);
+  [cykel, navn].forEach((p) => { assert.strictEqual(p.status, 'pending'); assert.strictEqual(p.target_type, 'auto'); assert.strictEqual(p.target_value, null); assert.strictEqual(p.list_id, listId); assert.strictEqual(p.user_id, 'u1'); });
+  const imp = db.imports[0];
+  assert.strictEqual(imp.added, 14); assert.strictEqual(imp.found, 17); assert.strictEqual(imp.note, null); assert.strictEqual(imp.status, 'done'); assert.strictEqual(imp.sync_fails, 0);
+  assert.deepStrictEqual(imp.seen, idsOf(WISHES).concat(['n1', 'n2', 'n3', 'n4']), 'handled wishes are remembered (also the duplicate and the one without a name), the one without an id cannot be');
+  assert(logs.some((l) => /fulgt: 2 nye/.test(l)));
+  // another day, nothing new: nothing added
+  const r2 = await runImp(db, { now: at(D2) }); assert.strictEqual(r2.stats.syncAdded, 0); assert.strictEqual(mine(db).length, 14);
+});
+
+test('sync: a product the person removed is never added again, a wish removed from the list changes nothing', async () => {
+  const web = mutableWeb(WISHES), db = importsDb(web);
+  impRow(db, SHARE); await runImp(db);
+  const gone = mine(db).slice(0, 3).map((p) => p.id);
+  db.products = db.products.filter((p) => gone.indexOf(p.id) === -1);              // the person removed three products in the app
+  const keep = mine(db).length;
+  let r = await runImp(db, { now: at(D1) });
+  assert.strictEqual(r.stats.synced, 1); assert.strictEqual(r.stats.syncAdded, 0); assert.strictEqual(mine(db).length, keep, 'removed products are not added again');
+  web.lists[LIST_ID].wishes = WISHES.slice(3, 8);                                    // wishes were taken off the list on the wish-list site
+  r = await runImp(db, { now: at(D2) }); assert.strictEqual(mine(db).length, keep, 'products stay when a wish disappears');
+  web.lists[LIST_ID].wishes = WISHES.slice(0, 12).concat([{ id: 'late', title: 'Sent ønske', url: 'https://shop.dk/sent' }]);   // all back, plus one new
+  r = await runImp(db, { now: at(dayN(3)) });
+  assert.strictEqual(r.stats.syncAdded, 1); assert.deepStrictEqual(mine(db).slice(-1).map((p) => p.name), ['Sent ønske']); assert.strictEqual(mine(db).length, keep + 1);
+  assert(!mine(db).some((p) => p.name === WISHES[0].title), 'the removed ones are still gone');
+});
+
+test('sync: an import from before this feature (no seen list) is only memorised the first time, nothing is added', async () => {
+  const web = mutableWeb(WISHES), db = importsDb(web);
+  impRow(db, SHARE, { status: 'done', found: 12, added: 12, done_at: '2026-11-01T10:00:00Z', list_id: null });
+  assert(!('seen' in db.imports[0]));
+  const r = await runImp(db);
+  assert.strictEqual(r.stats.synced, 1); assert.strictEqual(r.stats.syncAdded, 0); assert.strictEqual(mine(db).length, 0, 'the person has removed everything: nothing comes back');
+  assert.deepStrictEqual(db.imports[0].seen, idsOf(WISHES)); assert.strictEqual(db.imports[0].title, 'Fødselsdagsønsker'); assert.strictEqual(db.imports[0].found, 12); assert.strictEqual(db.imports[0].added, 12);
+  web.lists[LIST_ID].wishes = WISHES.concat([{ id: 'new1', title: 'Nyt', url: null }]);
+  await runImp(db, { now: at(D1) });
+  assert.deepStrictEqual(mine(db).map((p) => p.name), ['Nyt']);
+  assert(db.imports[0].list_id && db.lists.some((l) => l.id === db.imports[0].list_id && l.name === 'Fødselsdagsønsker'), 'no list known: found or made by the wish list title, and remembered');
+  assert.strictEqual(mine(db)[0].list_id, db.imports[0].list_id);
+});
+
+test('sync: at most 3 per run on top of the 3 new imports, the longest-unread first; imports done less than a day ago wait', async () => {
+  const web = mutableWeb(WISHES), db = importsDb(web);
+  const seen = idsOf(WISHES);
+  for (let i = 1; i <= 5; i++) impRow(db, WL, { user_id: 'p' + i });                       // five new imports (only 3 are taken)
+  const times = ['2026-11-10T08:00:00Z', '2026-11-12T08:00:00Z', '2026-11-11T08:00:00Z', '2026-11-14T08:00:00Z', '2026-11-13T08:00:00Z', '2026-11-16T09:00:00Z', null];
+  times.forEach((t, i) => impRow(db, WL, { user_id: 's' + i, status: 'done', seen, synced_at: t, found: 12, added: 12, sync_fails: 0 }));
+  const r = await runImp(db);
+  assert.strictEqual(r.stats.pending, 3); assert.strictEqual(r.stats.done, 3); assert.strictEqual(ONSKE.MAX_SYNCS_PER_RUN, 3); assert.strictEqual(r.stats.synced, 3);
+  const synced = db.imports.filter((x) => x.user_id[0] === 's' && x.synced_at === '2026-11-16T10:00:00Z').map((x) => x.user_id).sort();
+  assert.deepStrictEqual(synced, ['s0', 's2', 's6'], 'never-synced first, then the oldest');   // s6 never (null), s0 10 Nov, s2 11 Nov
+  assert.strictEqual(db.imports.find((x) => x.user_id === 's5').synced_at, '2026-11-16T09:00:00Z', 'one hour ago: left alone');
+  assert.deepStrictEqual(web.foreign, []);
+  // the next run takes the next three (s1, s4, s3), the rest of the pending ones come too
+  const r2 = await runImp(db, { now: at('2026-11-16T10:15:00Z') });
+  assert.strictEqual(r2.stats.pending, 2); assert.strictEqual(r2.stats.synced, 3);
+  assert.deepStrictEqual(db.imports.filter((x) => x.user_id[0] === 's' && x.synced_at === '2026-11-16T10:15:00Z').map((x) => x.user_id).sort(), ['s1', 's3', 's4']);
+  // out of time: nothing is read
+  const w2 = mutableWeb(WISHES), d2 = importsDb(w2); impRow(d2, WL, { status: 'done', seen, synced_at: null });
+  const r3 = await runImp(d2, { deadlineAt: Date.now() - 1 }); assert.strictEqual(w2.calls.length, 0); assert.strictEqual(r3.stats.synced, 0);
+});
+
+test('sync: a list that is private or gone keeps the products, gets a short note, is tried once a day, and is given up after 7 days', async () => {
+  const web = mutableWeb(WISHES), db = importsDb(web);
+  impRow(db, WL); await runImp(db);
+  const products = mine(db).length;
+  web.lists[LIST_ID].accessLevel = 'Private';
+  for (let d = 1; d <= 6; d++) {
+    web.calls.length = 0;
+    const r = await runImp(db, { now: at(dayN(d)) });
+    const imp = db.imports[0];
+    assert.strictEqual(r.stats.synced, 1, 'day ' + d); assert.strictEqual(r.stats.syncFailed, 1);
+    assert.strictEqual(imp.status, 'done', 'day ' + d); assert.strictEqual(imp.sync_fails, d); assert.strictEqual(imp.note, ONSKE.NOTE.retryPrivate); assert.strictEqual(imp.synced_at, dayN(d));
+    assert.strictEqual(mine(db).length, products, 'the products stay');
+    const again = await runImp(db, { now: at(dayN(d).replace('T10', 'T18')) }); assert.strictEqual(again.stats.synced, 0, 'only once a day');
+  }
+  assert.strictEqual(ONSKE.NOTE.retryPrivate, 'Ønskelisten er ikke offentlig lige nu. Prøver igen i morgen.');
+  web.calls.length = 0;
+  await runImp(db, { now: at(dayN(7)) });
+  assert.strictEqual(db.imports[0].status, 'error'); assert.strictEqual(db.imports[0].sync_fails, 7); assert.strictEqual(db.imports[0].note, ONSKE.NOTE.private); assert.strictEqual(mine(db).length, products);
+  web.calls.length = 0;
+  const r = await runImp(db, { now: at(dayN(9)) }); assert.strictEqual(web.calls.length, 0, 'after the 7th failure nothing more is fetched'); assert.strictEqual(r.stats.synced, 0);
+  assert.strictEqual(ONSKE.MAX_SYNC_FAILS, 7);
+  // the list disappears entirely
+  const w2 = mutableWeb(WISHES), d2 = importsDb(w2); impRow(d2, WL); await runImp(d2);
+  delete w2.lists[LIST_ID]; await runImp(d2, { now: at(D1) });
+  assert.strictEqual(d2.imports[0].status, 'done'); assert.strictEqual(d2.imports[0].sync_fails, 1); assert.strictEqual(d2.imports[0].note, ONSKE.NOTE.retryPrivate);
+  // it comes back: the counter and the note are cleared, new wishes are picked up
+  w2.lists[LIST_ID] = { title: 'Fødselsdagsønsker', accessLevel: 'Public', wishes: WISHES.concat([{ id: 'back', title: 'Tilbage', url: null }]) };
+  await runImp(d2, { now: at(D2) });
+  assert.strictEqual(d2.imports[0].sync_fails, 0); assert.strictEqual(d2.imports[0].note, null); assert.strictEqual(mine(d2).length, 13);
+});
+
+test('sync: a site that does not answer counts as a failed day too, with its own note; our own database trouble does not count against the list', async () => {
+  const web = mutableWeb(WISHES), db = importsDb(web);
+  impRow(db, WL); await runImp(db);
+  web.calls.length = 0;
+  const w2 = mutableWeb(WISHES, { apiStatus: 503 }); db.web = w2;
+  await runImp(db, { now: at(D1) });
+  assert.strictEqual(db.imports[0].sync_fails, 1); assert.strictEqual(db.imports[0].note, ONSKE.NOTE.retryUnavailable); assert.strictEqual(db.imports[0].status, 'done');
+  db.imports[0].sync_fails = 6;
+  await runImp(db, { now: at(D2) });
+  assert.strictEqual(db.imports[0].status, 'error'); assert.strictEqual(db.imports[0].note, ONSKE.NOTE.unavailable);
+  // inserting the new products fails: tried again tomorrow, no failure counted, the wish is not marked as handled
+  const w3 = mutableWeb(WISHES), d3 = importsDb(w3); impRow(d3, WL); await runImp(d3);
+  w3.lists[LIST_ID].wishes = WISHES.concat([{ id: 'x1', title: 'Ny', url: null }]); d3.insertFail = 'products';
+  await runImp(d3, { now: at(D1) });
+  assert.strictEqual(d3.imports[0].sync_fails, 0); assert.strictEqual(d3.imports[0].synced_at, D1); assert(!d3.imports[0].seen.includes('x1'));
+  d3.insertFail = null; await runImp(d3, { now: at(D2) });
+  assert.strictEqual(mine(d3).filter((p) => p.name === 'Ny').length, 1);
+  // the finished import was saved while the result could not be written: sync did not touch a row that is no longer done
+  const d4 = importsDb(mutableWeb(WISHES)); impRow(d4, WL, { status: 'done', seen: idsOf(WISHES), synced_at: null });
+  d4.imports[0].status = 'error';
+  assert.strictEqual((await runImp(d4)).stats.synced, 0);
+});
+
+test('sync: the 40-product cap holds; wishes that did not fit are looked at again once there is room', async () => {
+  const web = mutableWeb(WISHES), db = importsDb(web);
+  impRow(db, WL); await runImp(db);
+  for (let i = 0; i < 27; i++) db.products.push(product('f' + i, 'u1', 'dyson', { source_url: 'https://fyld.dk/' + i }));     // 12 + 27 = 39
+  web.lists[LIST_ID].wishes = WISHES.concat([{ id: 'c1', title: 'Et', url: null }, { id: 'c2', title: 'To', url: null }, { id: 'c3', title: 'Tre', url: null }]);
+  await runImp(db, { now: at(D1) });
+  assert.strictEqual(mine(db).length, 40); assert.deepStrictEqual(db.imports[0].seen.slice(-1), ['c1']);
+  assert(db.imports[0].seen.includes('c1') && !db.imports[0].seen.includes('c2') && !db.imports[0].seen.includes('c3'), 'only the one that fitted is handled');
+  assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(db.imports[0].sync_fails, 0);
+  db.products = db.products.filter((p) => !/^f\d+$/.test(p.id));                          // the person makes room
+  await runImp(db, { now: at(D2) });
+  assert.deepStrictEqual(mine(db).slice(-2).map((p) => p.name), ['To', 'Tre']);
+});
+
+test('sync: a database without the new columns still saves a first import (plain result), and a sync that cannot be saved is logged', async () => {
+  const web = mutableWeb(WISHES), db = importsDb(web, { importNoSyncColumns: true }); impRow(db, WL);
+  const r = await runImp(db);
+  assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(db.imports[0].added, 12); assert.strictEqual(mine(db).length, 12);
+  assert(r.logs.some((l) => /kunne ikke gemme/.test(l)), 'the sync of the same run could not be saved and says so: ' + r.logs.join(' | '));
+  assert.strictEqual(r.stats.done, 1);
+});
+
+test('run: a standing import is read as part of the run; the new product is fetched in the same run; the summary stays 5 lines', async () => {
+  const wishes = WISHES.slice(0, 3);
+  const web = mutableWeb(wishes), db = importsDb(web);
+  impRow(db, WL, { status: 'done', seen: idsOf(wishes), synced_at: '2026-11-15T09:00:00Z', found: 3, added: 3, list_id: null });
+  web.lists[LIST_ID].wishes = wishes.concat([{ id: 'nyt', title: 'Nyt ønske', url: 'https://www.shop-nyt.dk/vare?utm_source=x' }]);
+  const logs = [];
+  const ctx = ctxFor(db, {}, { log: (l) => logs.push(l) });
+  ctx.getPage = async (u) => { ctx.fetched.push(u); return pageFor('dyson'); };
+  const res = await R.run(ctx);
+  assert.strictEqual(res.stats.imports.synced, 1); assert.strictEqual(res.stats.imports.syncAdded, 1); assert.strictEqual(res.summary.length, 5);
+  assert.deepStrictEqual(ctx.fetched, ['https://www.shop-nyt.dk/vare']);
+  assert.strictEqual(db.products.length, 1); assert(db.products[0].last_checked, 'got its first price in the same run');
+  assert(logs.some((l) => /Ønskelister fulgt: 1 læst igen, 1 nye varer/.test(l)));
+});
+
+// ---------------------------------------------------------------- bought products never notify
+
+const dprod = (id, extra) => product(id, 'u1', 'dyson', Object.assign({ name: 'Dyson ' + id, target_value: 4000, digest_price: null, digest_at: null, bought_at: null, bought_price: null }, extra || {}));
+const dprofile = (extra) => Object.assign({ user_id: 'u1', notify_email: true, mail_digest: false, digest_sent_at: null, shops_always: [], shops_exclude: [], shops_only: false }, extra || {});
+const dpages = (add) => ({ [urlOf('dyson')]: pageFor('dyson', add ? (r) => r.price + add : null) });
+const runAt = (db, iso, pages, extra) => R.run(ctxFor(db, pages || dpages(0), Object.assign({ now: at(iso) }, extra || {})));
+const byIdIn = (db, id) => db.products.find((p) => p.id === id);
+
+test('bought: a bought product is still checked and its price kept up to date, but never mails, also not at a new low; "Fortryd" lets it notify again', async () => {
+  const db = newDb();
+  db.products.push(dprod('K', { bought_at: '2026-11-10T12:00:00Z', bought_price: 4500 }), dprod('N'));
+  db.profiles.push(dprofile());
+  let res = await runAt(db, '2026-11-16T10:00:00Z');
+  const K = byIdIn(db, 'K');
+  assert.strictEqual(K.status, 'tracking'); assert.strictEqual(K.offers[0].price, 3999, 'the price is still checked'); assert.strictEqual(K.last_checked, '2026-11-16T10:00:00Z');
+  assert(K.history.some((x) => x.src === 'check' && x.p === 3999)); assert(K.verdict);
+  assert.strictEqual(K.notified_price, null, 'no hit recorded'); assert.strictEqual(res.stats.hits, 1, 'only the product that was not bought');
+  assert.strictEqual(db.sent.length, 1); assert(db.sent[0].text.includes('Dyson N') && !db.sent[0].text.includes('Dyson K'));
+  const kPatch = db.patches.find((p) => p.id === 'K').body;
+  assert(!('notified_price' in kPatch) && !('notified_at' in kPatch) && !('bought_at' in kPatch) && !('bought_price' in kPatch), 'the job never writes the bought columns: ' + Object.keys(kPatch));
+  // a lower price later: still silent
+  await runAt(db, '2026-11-17T10:00:00Z', dpages(-500));
+  assert.strictEqual(byIdIn(db, 'K').offers[0].price, 3499); assert.strictEqual(db.sent.length, 2, 'N hits again at the lower price');
+  assert(!db.sent[1].text.includes('Dyson K'), 'K, the bought one, is not in it');
+  // undone: the next check is a normal one (and mails)
+  K.bought_at = null; K.bought_price = null;
+  await runAt(db, '2026-11-17T10:15:00Z', dpages(-500));
+  assert.strictEqual(db.sent.length, 3); assert(db.sent[2].text.includes('Dyson K') && db.sent[2].text.includes('3.499 kr.') && !db.sent[2].text.includes('Dyson N'));
+  assert.strictEqual(K.notified_price, 3499);
+});
+
+test('bought: a product bought while its hit waits for the morning mail drops out of it', async () => {
+  const db = newDb();
+  db.products.push(dprod('K'), dprod('L'));
+  db.profiles.push(dprofile({ mail_digest: true }));
+  await runAt(db, '2026-11-16T05:00:00Z');                                            // collected (04:00... 06:00 CET: before 07:00)
+  assert.strictEqual(byIdIn(db, 'K').digest_price, 3999);
+  byIdIn(db, 'K').bought_at = '2026-11-16T05:30:00Z'; byIdIn(db, 'K').bought_price = 3999;
+  await runAt(db, '2026-11-16T06:00:00Z');
+  assert.strictEqual(db.sent.length, 1); assert.strictEqual(db.sent[0].subject, 'Prisvagten: 1 tilbud i dag'); assert(db.sent[0].text.includes('Dyson L') && !db.sent[0].text.includes('Dyson K'));
+  assert.strictEqual(byIdIn(db, 'K').digest_price, null, 'and is forgotten');
+});
+
+// ---------------------------------------------------------------- the one morning mail
+
+test('digest: copenhagenHour and the 07:00 window follow Copenhagen time, also on the days the clock changes', () => {
+  const D = require('./lib/digest');
+  const w = (iso, sent) => D.digestWindow(new Date(iso), sent || null);
+  assert.strictEqual(D.copenhagenHour(new Date('2026-11-16T05:59:00Z')), 6); assert.strictEqual(D.copenhagenHour(new Date('2026-11-16T06:00:00Z')), 7);
+  // winter (UTC+1): 07:00 is 06:00Z
+  assert(!w('2026-11-16T05:59:59Z') && w('2026-11-16T06:00:00Z'));
+  // summer (UTC+2): 07:00 is 05:00Z
+  assert(!w('2026-07-01T04:59:59Z') && w('2026-07-01T05:00:00Z'));
+  // spring forward, Sunday 29 March 2026 (01:00Z): before it 07:00 was 06:00Z, after it 05:00Z
+  assert(!w('2026-03-28T05:59:00Z') && w('2026-03-28T06:00:00Z'));
+  assert(!w('2026-03-29T04:59:00Z') && w('2026-03-29T05:00:00Z'));
+  assert.strictEqual(D.copenhagenHour(new Date('2026-03-29T00:59:00Z')), 1); assert.strictEqual(D.copenhagenHour(new Date('2026-03-29T01:00:00Z')), 3, '02:xx does not exist that night');
+  // fall back, Sunday 25 October 2026 (01:00Z): before it 07:00 was 05:00Z, after it 06:00Z
+  assert(!w('2026-10-24T04:59:00Z') && w('2026-10-24T05:00:00Z'));
+  assert(!w('2026-10-25T05:59:00Z') && w('2026-10-25T06:00:00Z'));
+  assert.strictEqual(D.copenhagenHour(new Date('2026-10-25T00:30:00Z')), 2); assert.strictEqual(D.copenhagenHour(new Date('2026-10-25T01:30:00Z')), 2, '02:30 happens twice');
+  assert.strictEqual(D.copenhagenHour(new Date('2026-10-24T22:00:00Z')), 0, 'midnight');
+  // once per Copenhagen date (not UTC date), also over the changes
+  assert(!w('2026-11-16T10:00:00Z', '2026-11-15T23:30:00Z'), '00:30 on the 16th in Copenhagen is the same day as 10:00Z');
+  assert(w('2026-11-16T10:00:00Z', '2026-11-15T22:59:00Z'), '23:59 on the 15th is yesterday');
+  assert(!w('2026-10-25T06:00:00Z', '2026-10-24T22:30:00Z') && w('2026-10-25T06:00:00Z', '2026-10-24T21:59:00Z'), 'fall-back day');
+  assert(!w('2026-03-29T05:00:00Z', '2026-03-28T23:30:00Z') && w('2026-03-29T05:00:00Z', '2026-03-28T22:59:00Z'), 'spring-forward day');
+  assert(w('2026-11-16T10:00:00Z', 'not a date') && w('2026-11-16T10:00:00Z', undefined));
+  assert.strictEqual(D.digestSubject(1), 'Prisvagten: 1 tilbud i dag'); assert.strictEqual(D.digestSubject(3), 'Prisvagten: 3 tilbud i dag');
+  assert(D.isDigestUser({ mail_digest: true }) && !D.isDigestUser({ mail_digest: true, notify_email: false }) && !D.isDigestUser({ mail_digest: false }) && !D.isDigestUser({}) && !D.isDigestUser(null));
+});
+
+test('digest: hits are collected, one mail goes out at the first run from 07:00 Copenhagen time, and not again that day', async () => {
+  const db = newDb();
+  db.products.push(dprod('A'), dprod('B'), dprod('C', { target_value: 100 }));            // C never hits
+  db.profiles.push(dprofile({ mail_digest: true }));
+  let res = await runAt(db, '2026-11-16T05:30:00Z');                                      // 06:30 in Copenhagen
+  assert.strictEqual(db.sent.length, 0, 'collected, not mailed'); assert.strictEqual(res.stats.hits, 2);
+  ['A', 'B'].forEach((id) => { const p = byIdIn(db, id); assert.strictEqual(p.notified_price, 3999); assert.strictEqual(p.digest_price, 3999); assert.strictEqual(p.digest_at, '2026-11-16T05:30:00Z'); });
+  assert.strictEqual(byIdIn(db, 'C').digest_price, null); assert.strictEqual(db.profiles[0].digest_sent_at, null);
+  await runAt(db, '2026-11-16T05:59:00Z'); assert.strictEqual(db.sent.length, 0, '06:59');
+  res = await runAt(db, '2026-11-16T06:00:00Z');                                          // 07:00
+  assert.strictEqual(db.sent.length, 1); assert.strictEqual(res.stats.digests, 1);
+  const m = db.sent[0];
+  assert.deepStrictEqual(m.to, ['anna@example.dk']); assert.strictEqual(m.subject, 'Prisvagten: 2 tilbud i dag');
+  assert(m.text.includes('Dyson A') && m.text.includes('Dyson B') && !m.text.includes('Dyson C') && m.text.includes('3.999 kr.') && m.text.includes('Link til butikken: https://'), m.text);
+  assert.strictEqual(db.profiles[0].digest_sent_at, '2026-11-16T06:00:00Z');
+  assert(/morgenmails: 1/.test(res.summary.join(' ')));
+  await runAt(db, '2026-11-16T06:15:00Z'); await runAt(db, '2026-11-16T14:00:00Z');
+  assert.strictEqual(db.sent.length, 1, 'one mail a day');
+  // the next morning, same prices: nothing new, no mail (the same rule as without the morning mail)
+  await runAt(db, '2026-11-17T06:00:00Z'); assert.strictEqual(db.sent.length, 1);
+  // no hits at all: no mail (and the day is not used up)
+  const d2 = newDb(); d2.products.push(dprod('Z', { target_value: 100 })); d2.profiles.push(dprofile({ mail_digest: true }));
+  await runAt(d2, '2026-11-16T06:00:00Z'); assert.strictEqual(d2.sent.length, 0); assert.strictEqual(d2.profiles[0].digest_sent_at, null);
+});
+
+test('digest: a hit that comes in after the morning mail waits for the next morning; a further price drop is mailed again, the same price is not', async () => {
+  const db = newDb();
+  db.products.push(dprod('A'));
+  db.profiles.push(dprofile({ mail_digest: true }));
+  await runAt(db, '2026-11-16T06:00:00Z');                                                // collected at 07:00 and mailed in the same run
+  assert.strictEqual(db.sent.length, 1); assert.strictEqual(db.sent[0].subject, 'Prisvagten: 1 tilbud i dag');
+  db.products.push(dprod('B'));                                                           // a second product hits at 11:00
+  await runAt(db, '2026-11-16T10:00:00Z'); assert.strictEqual(db.sent.length, 1, 'waits'); assert.strictEqual(byIdIn(db, 'B').digest_price, 3999);
+  await runAt(db, '2026-11-17T05:59:00Z'); assert.strictEqual(db.sent.length, 1);
+  await runAt(db, '2026-11-17T06:00:00Z');
+  assert.strictEqual(db.sent.length, 2); assert(db.sent[1].text.includes('Dyson B') && !db.sent[1].text.includes('Dyson A'), 'A was in yesterday\'s mail and is not mailed again');
+  // A drops further: collected at once, mailed the next morning
+  await runAt(db, '2026-11-17T12:00:00Z', dpages(-100));
+  assert.strictEqual(byIdIn(db, 'A').digest_price, 3899); assert.strictEqual(db.sent.length, 2, 'collected, not mailed (the 07:00 mail of the day has gone)');
+  await runAt(db, '2026-11-18T06:00:00Z', dpages(-100));
+  assert.strictEqual(db.sent.length, 3); assert(db.sent[2].text.includes('3.899 kr.') && db.sent[2].text.includes('Dyson A') && db.sent[2].text.includes('Dyson B'), 'B fell too (same page)');
+  assert.strictEqual(db.sent[2].subject, 'Prisvagten: 2 tilbud i dag');
+  await runAt(db, '2026-11-19T06:00:00Z', dpages(-100)); assert.strictEqual(db.sent.length, 3);
+});
+
+test('digest: only hits that still stand are mailed (price still at or below the one that triggered it)', async () => {
+  const db = newDb();
+  db.products.push(dprod('A', { target_value: 4200 }), dprod('B'), dprod('C'));
+  db.profiles.push(dprofile({ mail_digest: true }));
+  await runAt(db, '2026-11-16T05:00:00Z');                                                // all three collected at 3999
+  assert.strictEqual(db.products.filter((p) => p.digest_price === 3999).length, 3);
+  // 07:00: the price has gone up to 4100. A (goal 4200) is still a hit but above its collected price; B and C (goal 4000) are no hits any more
+  await runAt(db, '2026-11-16T06:00:00Z', dpages(101));
+  assert.strictEqual(db.sent.length, 0, 'nothing valid to mail'); assert.strictEqual(db.profiles[0].digest_sent_at, null, 'and the day is not used up');
+  assert.strictEqual(byIdIn(db, 'B').digest_price, null, 'a hit that is gone is forgotten'); assert.strictEqual(byIdIn(db, 'B').notified_price, null);
+  assert.strictEqual(byIdIn(db, 'A').digest_price, 3999); assert.strictEqual(byIdIn(db, 'A').notified_price, 3999);
+  // later that day the price is back below: A is valid again and goes out
+  await runAt(db, '2026-11-16T09:00:00Z', dpages(-49));
+  assert.strictEqual(db.sent.length, 1); assert(db.sent[0].text.includes('Dyson A') && db.sent[0].text.includes('3.950 kr.') && !db.sent[0].text.includes('3.999'), 'the price now, not the old one');
+  assert.strictEqual(db.sent[0].subject, 'Prisvagten: 3 tilbud i dag', 'A is valid again, B and C hit again');
+});
+
+test('digest: a failed send gives the day back and is tried again at the next run; a mail is never sent twice for a day', async () => {
+  const db = newDb();
+  db.products.push(dprod('A'));
+  db.profiles.push(dprofile({ mail_digest: true }));
+  await runAt(db, '2026-11-16T05:00:00Z');
+  db.resendFail = true;
+  const r = await runAt(db, '2026-11-16T06:00:00Z');
+  assert.strictEqual(db.sent.length, 0); assert.strictEqual(db.profiles[0].digest_sent_at, null, 'claim given back');
+  assert.deepStrictEqual(db.profilePatches.map((x) => [x.cond, x.body.digest_sent_at]), [['is.null', '2026-11-16T06:00:00Z'], ['eq.2026-11-16T06:00:00Z', null]], 'claim, then roll back to what it was');
+  assert.strictEqual(r.stats.mailSkipped, 1); assert.strictEqual(byIdIn(db, 'A').digest_price, 3999, 'the hit is still waiting');
+  db.resendFail = false;
+  await runAt(db, '2026-11-16T06:15:00Z');
+  assert.strictEqual(db.sent.length, 1); assert.strictEqual(db.profiles[0].digest_sent_at, '2026-11-16T06:15:00Z');
+  await runAt(db, '2026-11-16T06:30:00Z'); await runAt(db, '2026-11-16T06:30:00Z'); assert.strictEqual(db.sent.length, 1);
+  // the claim is lost to another run that was faster: no mail from this one
+  const d2 = newDb(); d2.products.push(dprod('A')); d2.profiles.push(dprofile({ mail_digest: true }));
+  await runAt(d2, '2026-11-16T05:00:00Z');
+  d2.beforeClaim = () => { d2.profiles[0].digest_sent_at = '2026-11-16T06:00:00Z'; };
+  await runAt(d2, '2026-11-16T06:00:30Z'); assert.strictEqual(d2.sent.length, 0, 'the other run sends it');
+  // a crashed run (the product writes of its run are gone, the claim is not): the hit is found as new again, but the day is used up
+  const d3 = newDb(); d3.products.push(dprod('A')); d3.profiles.push(dprofile({ mail_digest: true, digest_sent_at: '2026-11-16T06:00:00Z' }));
+  await runAt(d3, '2026-11-16T06:30:00Z'); assert.strictEqual(d3.sent.length, 0);
+  await runAt(d3, '2026-11-17T06:00:00Z'); assert.strictEqual(d3.sent.length, 1, 'next morning it goes out, once');
+  await runAt(d3, '2026-11-17T06:15:00Z'); assert.strictEqual(d3.sent.length, 1);
+  // the claim itself cannot be written: no mail
+  const d4 = newDb(); d4.products.push(dprod('A')); d4.profiles.push(dprofile({ mail_digest: true })); d4.profilePatchFail = true;
+  await runAt(d4, '2026-11-16T05:00:00Z'); const r4 = await runAt(d4, '2026-11-16T06:00:00Z'); assert.strictEqual(d4.sent.length, 0); assert.strictEqual(r4.stats.mailSkipped, 1);
+  d4.profilePatchFail = false; await runAt(d4, '2026-11-16T06:15:00Z'); assert.strictEqual(d4.sent.length, 1);
+});
+
+test('digest: hits found in this run are saved before the mail; a product that cannot be saved is left out and found again next run', async () => {
+  const db = newDb();
+  db.products.push(dprod('A'), dprod('B'));
+  db.profiles.push(dprofile({ mail_digest: true }));
+  db.patchFail = 'B';
+  const r = await runAt(db, '2026-11-16T06:00:00Z');                                      // both hit for the first time, at 07:00
+  assert.strictEqual(db.sent.length, 1); assert(db.sent[0].text.includes('Dyson A') && !db.sent[0].text.includes('Dyson B'));
+  assert.strictEqual(db.sent[0].subject, 'Prisvagten: 1 tilbud i dag'); assert.strictEqual(r.stats.writeFail >= 1, true);
+  assert.strictEqual(byIdIn(db, 'A').digest_price, 3999, 'A was saved before the claim');
+  assert.strictEqual(byIdIn(db, 'B').notified_price, null, 'B is still a new hit next time');
+  db.patchFail = null;
+  await runAt(db, '2026-11-17T06:00:00Z');
+  assert.strictEqual(db.sent.length, 2); assert(db.sent[1].text.includes('Dyson B') && !db.sent[1].text.includes('Dyson A'));
+});
+
+test('digest: the e-mail switch decides first (off means no mail at all); no key, no mail and no claim; switched off again, waiting hits go out as normal mail', async () => {
+  // "Send e-mail" off: nothing collected, nothing mailed, ever
+  const db = newDb(); db.products.push(dprod('A')); db.profiles.push(dprofile({ mail_digest: true, notify_email: false }));
+  await runAt(db, '2026-11-16T05:00:00Z'); await runAt(db, '2026-11-16T06:00:00Z'); await runAt(db, '2026-11-17T06:00:00Z');
+  assert.strictEqual(db.sent.length, 0); assert.strictEqual(byIdIn(db, 'A').digest_price, null); assert.strictEqual(db.profiles[0].digest_sent_at, null); assert.strictEqual(byIdIn(db, 'A').notified_price, 3999, 'the hit is recorded, as for any opted-out person');
+  // no Resend key: nothing claimed, the hit waits and goes out once mail works
+  const d2 = newDb(); d2.products.push(dprod('A')); d2.profiles.push(dprofile({ mail_digest: true }));
+  await runAt(d2, '2026-11-16T05:00:00Z', null, { resendKey: '' }); const r2 = await runAt(d2, '2026-11-16T06:00:00Z', null, { resendKey: '' });
+  assert.strictEqual(d2.sent.length, 0); assert.strictEqual(d2.profiles[0].digest_sent_at, null); assert(/RESEND_API_KEY/.test(r2.summary.join('\n')));
+  await runAt(d2, '2026-11-16T06:15:00Z'); assert.strictEqual(d2.sent.length, 1);
+  // the person is not on the allow-list: no mail, no claim
+  const d3 = newDb(); d3.allowed_emails = []; d3.products.push(dprod('A')); d3.profiles.push(dprofile({ mail_digest: true }));
+  await runAt(d3, '2026-11-16T05:00:00Z'); await runAt(d3, '2026-11-16T06:00:00Z'); assert.strictEqual(d3.sent.length, 0); assert.strictEqual(d3.profiles[0].digest_sent_at, null);
+  // switched off while a hit was waiting: it goes out with the next run as a normal mail and is no longer waiting
+  const d4 = newDb(); d4.products.push(dprod('A')); d4.profiles.push(dprofile({ mail_digest: true }));
+  await runAt(d4, '2026-11-16T05:00:00Z'); assert.strictEqual(d4.sent.length, 0);
+  d4.profiles[0].mail_digest = false;
+  await runAt(d4, '2026-11-16T05:15:00Z'); assert.strictEqual(d4.sent.length, 1); assert.notStrictEqual(d4.sent[0].subject, 'Prisvagten: 1 tilbud i dag'); assert(d4.sent[0].text.includes('Dyson A'));
+  assert.strictEqual(byIdIn(d4, 'A').digest_price, null);
+  await runAt(d4, '2026-11-16T05:30:00Z'); assert.strictEqual(d4.sent.length, 1);
+  // without the morning mail everything is as before: a mail per run with new hits, nothing is collected
+  const d5 = newDb(); d5.products.push(dprod('A')); d5.profiles.push(dprofile());
+  await runAt(d5, '2026-11-16T03:00:00Z'); assert.strictEqual(d5.sent.length, 1); assert.strictEqual(byIdIn(d5, 'A').digest_price, null);
+  // a person without a profile row, and a database without the new columns, are unchanged too
+  const d6 = newDb(); d6.products.push(product('A', 'u1', 'dyson', { target_value: 4000 }));
+  await runAt(d6, '2026-11-16T03:00:00Z'); assert.strictEqual(d6.sent.length, 1); assert(!('digest_price' in byIdIn(d6, 'A')));
+});
+
+test('digest: DST days in a full run (07:00 is 05:00Z in summer time, 06:00Z in winter time)', async () => {
+  for (const [day, early, on] of [['2026-03-28', '05:59', '06:00'], ['2026-03-29', '04:59', '05:00'], ['2026-10-24', '04:59', '05:00'], ['2026-10-25', '05:59', '06:00'], ['2026-07-01', '04:59', '05:00']]) {
+    const db = newDb(); db.products.push(dprod('A')); db.profiles.push(dprofile({ mail_digest: true }));
+    await runAt(db, day + 'T' + early + ':00Z'); assert.strictEqual(db.sent.length, 0, day + ' ' + early);
+    await runAt(db, day + 'T' + on + ':00Z'); assert.strictEqual(db.sent.length, 1, day + ' ' + on);
+    await runAt(db, day + 'T' + on.slice(0, 3) + '30:00Z'); assert.strictEqual(db.sent.length, 1, day + ' second run');
+  }
+  // the person's last digest was claimed just before midnight Copenhagen time, which is still the day before in UTC
+  const db = newDb(); db.products.push(dprod('A')); db.profiles.push(dprofile({ mail_digest: true, digest_sent_at: '2026-10-24T21:59:00Z' }));
+  await runAt(db, '2026-10-25T05:00:00Z'); assert.strictEqual(db.sent.length, 0, 'before 07:00 CET'); await runAt(db, '2026-10-25T06:00:00Z'); assert.strictEqual(db.sent.length, 1);
 });
 
 // ---------------------------------------------------------------- live sanity check (opt-in)

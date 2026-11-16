@@ -141,6 +141,7 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 .empty { padding: 40px 0; color: var(--muted); border-bottom: 1px solid var(--line) }
 .empty b { display: block; color: var(--ink); font-weight: 600; font-size: 16px; margin-bottom: 2px }
 .item { border-bottom: 1px solid var(--line) }
+.item.bought { opacity: .6 }
 .item.hit { background: var(--good-wash); margin-inline: -14px; padding-inline: 14px; border-radius: 12px; border-bottom-color: transparent }
 .head { display: grid; grid-template-columns: minmax(0, 1fr) 96px auto; gap: 20px; align-items: center; width: 100%;
   background: none; border: 0; padding: 18px 0; text-align: left; cursor: pointer }
@@ -185,6 +186,7 @@ td .meta { font-size: 13px }
 details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 8px }
 details table { margin-top: 8px }
 .foot { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; justify-content: space-between; font-size: 13.5px; color: var(--muted) }
+.edit.bought-row { margin-bottom: 8px }
 .edit { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
 .edit input { width: 96px; height: 34px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px }
 .edit input:focus { outline: none; border-color: var(--ink); background: var(--bg) }

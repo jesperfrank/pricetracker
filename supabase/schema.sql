@@ -23,6 +23,11 @@ create table if not exists public.profiles (
     coalesce(cardinality(shops_always), 0) <= 100 and coalesce(cardinality(shops_exclude), 0) <= 100)
 );
 
+-- The one morning mail (opt-in, written by the person). digest_sent_at = when the job last claimed a morning mail for this
+-- person (job only: see profiles_guard). Added later, re-runnable.
+alter table public.profiles add column if not exists mail_digest boolean not null default false;
+alter table public.profiles add column if not exists digest_sent_at timestamptz;
+
 create table if not exists public.products (
   id              uuid primary key default gen_random_uuid(),
   user_id         uuid not null default auth.uid() references auth.users on delete cascade,
@@ -59,6 +64,19 @@ create table if not exists public.products (
 -- Older prices from the Internet Archive are fetched once per single-shop product. The job records the attempt here
 -- ({at, result: 'done' | 'retry', found, tries}); null = not attempted. Written by the job only (see products_guard).
 alter table public.products add column if not exists backfill_state jsonb;
+
+-- Bought products (the person's own marking, written from the browser): when, and at what price (kr.). A bought product
+-- stays in its list; the job never sends mails for it. bought_at is set by the server clock (see products_guard).
+alter table public.products add column if not exists bought_at timestamptz;
+alter table public.products add column if not exists bought_price numeric;
+alter table public.products drop constraint if exists products_bought_price_check;
+alter table public.products add constraint products_bought_price_check check (
+  bought_price is null or (bought_at is not null and bought_price > 0 and bought_price <= 10000000));
+
+-- One morning mail (profiles.mail_digest): a goal hit is collected instead of mailed at once. digest_price = the price that
+-- triggered the hit, digest_at = when it was collected. Written by the job only (see products_guard).
+alter table public.products add column if not exists digest_price numeric;
+alter table public.products add column if not exists digest_at timestamptz;
 
 -- A product may be added by name only (source_url null); the name must then not be blank.
 -- NOT VALID: enforced for every new/changed row without re-checking old rows.
@@ -163,6 +181,9 @@ begin
     new.title := null; new.variants := null; new.offers := null; new.history := null;
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
+    new.digest_price := null; new.digest_at := null;
+    -- bought_at / bought_price are the person's own, but the time is the server's
+    if new.bought_at is not null then new.bought_at := now(); end if;
     return new;
   end if;
 
@@ -173,6 +194,9 @@ begin
   new.normal_price := old.normal_price; new.verdict := old.verdict; new.warning := old.warning;
   new.check_note := old.check_note; new.last_checked := old.last_checked;
   new.notified_price := old.notified_price; new.notified_at := old.notified_at; new.backfill_state := old.backfill_state;
+  new.digest_price := old.digest_price; new.digest_at := old.digest_at;
+  -- marking as bought stamps the server time once; the time cannot be edited afterwards (only cleared, which also clears the price)
+  if new.bought_at is not null then new.bought_at := coalesce(old.bought_at, now()); end if;
 
   if new.source_url is distinct from old.source_url then
     new.status := 'pending';
@@ -180,6 +204,7 @@ begin
     new.title := null; new.variants := null; new.offers := null; new.history := null;
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
+    new.digest_price := null; new.digest_at := null;
   end if;
   return new;
 end;
@@ -209,6 +234,30 @@ drop trigger if exists products_limit_trg on public.products;
 create trigger products_limit_trg
   before insert on public.products
   for each row execute function public.products_limit();
+
+-- profiles: a browser user writes the settings, never digest_sent_at (when the job last claimed the morning mail).
+create or replace function public.profiles_guard()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+begin
+  if current_user not in ('authenticated', 'anon') then
+    return new;
+  end if;
+  if tg_op = 'INSERT' then
+    new.digest_sent_at := null;
+  else
+    new.digest_sent_at := old.digest_sent_at;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists profiles_guard_trg on public.profiles;
+create trigger profiles_guard_trg
+  before insert or update on public.profiles
+  for each row execute function public.profiles_guard();
 
 -- ---------------------------------------------------------------- lists
 -- A person can split what they track into named lists (fx "Elektronik"). A product belongs to at most one list
@@ -319,6 +368,17 @@ create table if not exists public.imports (
   done_at    timestamptz
 );
 
+-- A finished import stays a standing link between a list and the wish list (see job/lib/onskeskyen.js): once a day the job reads the
+-- wish list again and adds new wishes. All written by the job only (imports_guard): synced_at = last attempt, seen = ids of the
+-- wishes already handled (added, skipped or removed again by the person: never added a second time), title = the wish list's name,
+-- sync_fails = failed attempts in a row (the job gives up after 7).
+alter table public.imports add column if not exists synced_at timestamptz;
+alter table public.imports add column if not exists seen jsonb
+  check (seen is null or (case when jsonb_typeof(seen) = 'array' then jsonb_array_length(seen) <= 500 else false end));
+alter table public.imports add column if not exists title text check (title is null or char_length(title) <= 100);
+alter table public.imports add column if not exists sync_fails integer not null default 0 check (sync_fails >= 0);
+create index if not exists imports_sync_idx on public.imports (synced_at nulls first) where status = 'done';
+
 -- Only https links to onskeskyen.dk or gowish.com (optional www.): /s/<code>, or /wishlists/<id> with an optional
 -- locale prefix like /da/ or /da-dk/. Dropped and re-added by name so this can be tightened later and re-run.
 alter table public.imports drop constraint if exists imports_url_check;
@@ -356,10 +416,12 @@ begin
   end if;
   if tg_op = 'INSERT' then
     new.status := 'pending'; new.note := null; new.found := null; new.added := null; new.done_at := null;
+    new.synced_at := null; new.seen := null; new.title := null; new.sync_fails := 0;
     return new;
   end if;
   new.user_id := old.user_id; new.url := old.url;
   new.status := old.status; new.note := old.note; new.found := old.found; new.added := old.added; new.done_at := old.done_at;
+  new.synced_at := old.synced_at; new.seen := old.seen; new.title := old.title; new.sync_fails := old.sync_fails;
   return new;
 end;
 $$;
@@ -369,7 +431,7 @@ create trigger imports_guard_trg
   before insert or update on public.imports
   for each row execute function public.imports_guard();
 
--- At most 5 waiting imports and 20 rows per user (the done and failed ones stay until the person hides them).
+-- At most 5 waiting imports and 20 rows per user (a done import is a standing link until the person stops it; a failed one stays until hidden).
 create or replace function public.imports_limit()
 returns trigger
 language plpgsql
@@ -378,7 +440,7 @@ set search_path = public
 as $$
 begin
   if (select count(*) from public.imports where user_id = new.user_id) >= 20 then
-    raise exception 'Du kan højst have 20 importer. Skjul de gamle først.' using errcode = 'check_violation';
+    raise exception 'Du kan højst have 20 ønskelister. Stop eller skjul en først.' using errcode = 'check_violation';
   end if;
   if new.status = 'pending'
      and (select count(*) from public.imports where user_id = new.user_id and status = 'pending') >= 5 then

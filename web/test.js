@@ -26,7 +26,7 @@ const FAKE = `
   var ticks = [], realSetInterval = window.setInterval;
   window.setInterval = function (fn, ms) { if (ms === 60000) ticks.push(fn); return realSetInterval.apply(window, arguments); };
   window.__tick = function () { ticks.forEach(function (f) { f(); }); };
-  var JOB = ["status","title","variants","offers","history","normal_price","verdict","warning","check_note","last_checked","notified_price","notified_at","backfill_state"];
+  var JOB = ["status","title","variants","offers","history","normal_price","verdict","warning","check_note","last_checked","notified_price","notified_at","backfill_state","digest_price","digest_at"];
   function clone(x) { return JSON.parse(JSON.stringify(x)); }
   function builder(table) {
     var q = { op: "select", payload: null, filters: [], single: null, sel: false };
@@ -65,7 +65,7 @@ const FAKE = `
         if (table === "imports" && q.op === "insert") {   // what the database enforces for a new import
           var iu = String(q.payload.url || ""), irx = new RegExp("^https://(www[.])?(onskeskyen[.]dk|gowish[.]com)/(s/[a-z0-9_-]{1,64}|([a-z]{2}(-[a-z]{2})?/)?wishlists/[a-z0-9_-]{1,64})/?([?#][^ ]*)?$", "i");
           if (iu.length > 300 || !irx.test(iu)) return resolve({ data: null, error: { code: "23514", message: "check" } });
-          if (rows.length >= 20) return resolve({ data: null, error: { code: "23514", message: "Du kan højst have 20 importer. Skjul de gamle først." } });
+          if (rows.length >= 20) return resolve({ data: null, error: { code: "23514", message: "Du kan højst have 20 ønskelister. Stop eller skjul en først." } });
           if (rows.filter(function (x) { return x.status === "pending"; }).length >= 5) return resolve({ data: null, error: { code: "23514", message: "Du kan højst have 5 ønskelister i gang. Vent, til de er hentet." } });
           if (q.payload.list_id && !db.lists.some(function (l) { return l.id === q.payload.list_id; })) return resolve({ data: null, error: { code: "23503", message: "fk" } });
           var ir = { id: "im-" + (++db.seq), user_id: "u1", list_id: q.payload.list_id || null, url: iu, status: "pending", note: null, found: null, added: null, created_at: new Date().toISOString(), done_at: null };
@@ -77,10 +77,13 @@ const FAKE = `
           if (table === "products" && r.list_id && !db.lists.some(function (l) { return l.id === r.list_id; })) return resolve({ data: null, error: { code: "23503", message: "fk" } });
           rows.push(r); return resolve({ data: q.sel ? clone(r) : null, error: null });
         }
+        if (q.op === "update" && table === "products" && "bought_price" in q.payload && q.payload.bought_price !== null && !(q.payload.bought_price > 0 && q.payload.bought_price <= 10000000)) return resolve({ data: null, error: { code: "23514", message: "products_bought_price_check" } });
         if (q.op === "update") {
           rows.filter(match).forEach(function (r) {
             var newLink = "source_url" in q.payload && q.payload.source_url !== r.source_url;
+            if ("bought_price" in q.payload && q.payload.bought_price !== null && !(q.payload.bought_price > 0 && q.payload.bought_price <= 10000000)) return;   // check constraint (see below)
             Object.keys(q.payload).forEach(function (k) { if (JOB.indexOf(k) < 0) r[k] = clone(q.payload[k]); });
+            if (q.payload.bought_at) r.bought_at = "2026-11-16T12:00:00Z";   // products_guard: the server stamps the time
             if (newLink) { r.status = "pending"; r.check_note = null; }   // what products_guard does on a new link
           });
           return resolve({ data: null, error: null });
@@ -1002,37 +1005,52 @@ let base;
 
     // status lines
     {
+      const today = new Date().toISOString(), yest = new Date(Date.now() - 36 * 3600e3).toISOString(), old = "2026-10-03T10:00:00Z";
       const p = await open({ products: [row("test-sony")], lists: LISTS, label: "wish-lines", imports: [
         imp("a", { created_at: "2026-11-16T09:00:00Z" }),
-        imp("b", { status: "done", found: 12, added: 12, created_at: "2026-11-16T08:00:00Z", note: "De er lagt på en ny liste, Fødselsdagsønsker." }),
-        imp("c", { status: "done", found: 12, added: 7, created_at: "2026-11-16T07:00:00Z", note: "Der var kun plads til 7 af 12 ønsker. Du kan højst følge 40 varer." }),
+        imp("b", { status: "done", found: 12, added: 12, created_at: "2026-11-16T08:00:00Z", title: "Bastians ønskeliste", synced_at: today, sync_fails: 0, note: "De er lagt på en ny liste, Fødselsdagsønsker." }),
+        imp("c", { status: "done", found: 7, added: 7, created_at: "2026-11-16T07:00:00Z", title: "Jul", synced_at: yest }),
         imp("d", { status: "error", note: "Ønskelisten er ikke offentlig eller findes ikke. Bed ejeren om at dele den offentligt.", created_at: "2026-11-16T06:00:00Z" }),
-        imp("e", { status: "done", found: 1, added: 1, created_at: "2026-11-16T05:00:00Z" }),
+        imp("e", { status: "done", found: 1, added: 1, created_at: "2026-11-16T05:00:00Z", title: "Én ting", synced_at: old }),
         imp("f", { status: "done", found: 3, added: 0, created_at: "2026-11-16T04:00:00Z", note: "3 ønsker fandtes allerede." }),
         imp("g", { status: "error", created_at: "2026-11-16T03:00:00Z" }),
+        imp("h", { status: "done", found: 12, added: 12, created_at: "2026-11-16T02:00:00Z", title: "Bastians ønskeliste", synced_at: today, sync_fails: 2, note: "Ønskelisten er ikke offentlig lige nu. Prøver igen i morgen." }),
       ] });
       await p.waitForSelector("#importBox .impl");
       const ls = await lines(p);
-      check("status lines: pending, done (+ note), done with cap note, error note, singular, zero, error without note; newest first", JSON.stringify(ls) === JSON.stringify([
+      const oldTxt = new Intl.DateTimeFormat("da-DK", { day: "numeric", month: "short" }).format(new Date(old));
+      check("status lines: pending; a standing line per finished import (title, count, updated today / yesterday / date); no title; failing day with its note; errors as before; newest first", JSON.stringify(ls) === JSON.stringify([
         "Henter ønsker fra Ønskeskyen …",
-        "12 ønsker tilføjet fra Ønskeskyen. De er lagt på en ny liste, Fødselsdagsønsker.",
-        "7 ønsker tilføjet fra Ønskeskyen. Der var kun plads til 7 af 12 ønsker. Du kan højst følge 40 varer.",
+        "Følger Bastians ønskeliste · 12 ønsker · opdateret i dag",
+        "Følger Jul · 7 ønsker · opdateret i går",
         "Ønskelisten er ikke offentlig eller findes ikke. Bed ejeren om at dele den offentligt.",
-        "1 ønske tilføjet fra Ønskeskyen.",
-        "0 ønsker tilføjet fra Ønskeskyen. 3 ønsker fandtes allerede.",
+        "Følger Én ting · 1 ønske · opdateret " + oldTxt,
+        "Følger ønskelisten · 3 ønsker",
         "Ønskelisten kunne ikke hentes.",
+        "Følger Bastians ønskeliste · 12 ønsker · opdateret i dag · Ønskelisten er ikke offentlig lige nu. Prøver igen i morgen.",
       ]), JSON.stringify(ls));
-      check("status lines: 'Skjul' on done and error lines only, none on the pending one", (await p.locator('#importBox [data-iact="hide"]').count()) === 6 && (await p.locator('#importBox .impl[data-istatus="pending"] button').count()) === 0);
+      check("status lines: 'Stop' on finished lines, 'Skjul' on failed ones, no button on the pending one",
+        (await p.locator('#importBox [data-iact="stop"]').count()) === 5 && (await p.locator('#importBox [data-iact="hide"]').count()) === 2 && (await p.locator('#importBox .impl[data-istatus="pending"] button').count()) === 0);
       check("status lines sit right below the list chips", await p.evaluate(() => document.getElementById("listsBox").nextElementSibling.id === "importBox"));
-      // hide: deletes the row
-      await p.locator('#importBox .impl:nth-child(2) [data-iact="hide"]').click();
+      // stop: asks first, 'Behold' cancels, 'Ja, stop' deletes the import row only (the products stay)
+      await p.locator('#importBox .impl:nth-child(2) [data-iact="stop"]').click();
+      check("stop: asks first, nothing written yet", /Stop\? Varerne beholdes\./.test(await p.textContent("#importBox .impl:nth-child(2)")) && (await writesOf(p)).length === 0);
+      await p.locator('#importBox [data-iact="stop-no"]').click();
+      check("stop: 'Behold' cancels", (await writesOf(p)).length === 0 && /Følger Bastians ønskeliste · 12 ønsker/.test(await p.textContent("#importBox .impl:nth-child(2)")) && (await p.locator('#importBox [data-iact="stop-yes"]').count()) === 0);
+      await p.locator('#importBox .impl:nth-child(2) [data-iact="stop"]').click();
+      await p.locator('#importBox [data-iact="stop-yes"]').click();
+      await p.waitForFunction(() => document.querySelectorAll("#importBox .impl").length === 7);
+      let w = await writesOf(p);
+      check("stop: the import row is deleted (only that one), the line goes, the product stays", w.length === 1 && w[0].table === "imports" && w[0].op === "delete" && JSON.stringify(w[0].filters) === JSON.stringify([["id", "b"]]) && (await p.locator(".item").count()) === 1, JSON.stringify(w));
+      // hide on an error line
+      await p.locator('#importBox .impl[data-istatus="error"] [data-iact="hide"]').first().click();
       await p.waitForFunction(() => document.querySelectorAll("#importBox .impl").length === 6);
-      const w = await writesOf(p);
-      check("hide: the import row is deleted (only that one) and the line goes", w.length === 1 && w[0].table === "imports" && w[0].op === "delete" && JSON.stringify(w[0].filters) === JSON.stringify([["id", "b"]]) && !/12 ønsker tilføjet/.test(await p.textContent("#importBox")), JSON.stringify(w));
+      w = await writesOf(p);
+      check("hide: an error line is deleted at once, without a question", w.length === 2 && w[1].op === "delete" && w[1].filters[0][1] === "d", JSON.stringify(w[1]));
       // refresh by the same polling: the job finishes the pending one
-      await p.evaluate(() => { var r = window.__db.imports.filter(function (x) { return x.id === "a"; })[0]; r.status = "done"; r.added = 5; r.found = 5; window.__tick(); });
-      await p.waitForFunction(() => /5 ønsker tilføjet fra Ønskeskyen/.test(document.getElementById("importBox").textContent));
-      check("status line follows the poll: pending turns into done", !/Henter ønsker/.test(await p.textContent("#importBox")));
+      await p.evaluate(() => { var r = window.__db.imports.filter(function (x) { return x.id === "a"; })[0]; r.status = "done"; r.added = 5; r.found = 5; r.title = "Nyt navn"; r.synced_at = new Date().toISOString(); window.__tick(); });
+      await p.waitForFunction(() => /Følger Nyt navn · 5 ønsker · opdateret i dag/.test(document.getElementById("importBox").textContent));
+      check("status line follows the poll: pending turns into a standing line", !/Henter ønsker/.test(await p.textContent("#importBox")));
       await p.evaluate(() => { window.__db.imports.push({ id: "z", user_id: "u1", list_id: null, url: "https://gowish.com/s/zz", status: "pending", note: null, found: null, added: null, created_at: "2026-11-16T10:00:00Z" }); window.__emit(); });
       await p.waitForFunction(() => /Henter ønsker fra Ønskeskyen/.test(document.getElementById("importBox").textContent), null, { timeout: 8000 });
       check("status line follows the realtime event too", true);
@@ -1058,7 +1076,7 @@ let base;
       const r = await open({ products: [], label: "wish-20", imports: Array.from({ length: 20 }, (_, i) => imp("x" + i, { status: "done", added: 1, created_at: "2026-11-15T10:" + String(10 + i) + ":00Z" })) });
       await r.waitForSelector("#importBox .impl");
       await send(r, "https://onskeskyen.dk/s/ny");
-      check("20 rows: asks to hide some first", /Skjul nogle af dem først/.test(await msgOf(r)) && (await writesOf(r)).length === 0);
+      check("20 rows: asks to stop or hide one first", /^Du følger 20 ønskelister\. Stop eller skjul en først\.$/.test(await msgOf(r)) && (await writesOf(r)).length === 0);
       await r.context().close();
       const t = await open({ products: [], label: "wish-server-cap" });
       await t.waitForSelector("#addForm:not([hidden])");
@@ -1134,7 +1152,7 @@ let base;
     {
       const evil = "<script>window.__xss=1</script><img src=x onerror=window.__xss=2>";
       const p = await open({ products: [row("test-sony", { id: "h1", name: evil, source_url: "https://shop.dk/x" })], lists: [{ id: "l1", user_id: "u1", name: evil }], label: "wish-xss", imports: [
-        imp("n1", { status: "done", added: 1, found: 1, note: "De er lagt på listen " + evil + "." }), imp("n2", { status: "error", note: evil }),
+        imp("n1", { status: "done", added: 1, found: 1, title: evil, synced_at: new Date().toISOString(), sync_fails: 1, note: "De er lagt på listen " + evil + "." }), imp("n2", { status: "error", note: evil }),
       ] });
       await p.waitForSelector("#importBox .impl"); await p.waitForSelector(".item");
       await p.locator(".head").first().click();
@@ -1156,6 +1174,141 @@ let base;
       await p.click(".goal label:has(#fTypeAuto)");
       check("hint under the add field: none for the default, one short line for price and percent", none && price && pct && !(await p.isVisible("#fHint")));
       await p.context().close();
+    }
+  }
+
+  // 10d. standing imports per list, bought products, the morning-mail setting
+  {
+    const imp = (id, over) => Object.assign({ id, user_id: "u1", list_id: null, url: "https://onskeskyen.dk/s/e0mfx8", status: "done", note: null, found: 4, added: 4, created_at: "2026-11-16T09:00:00Z", done_at: null, title: "Ønsker " + id, synced_at: new Date().toISOString(), sync_fails: 0 }, over || {});
+    const LISTS = [{ id: "l1", user_id: "u1", name: "Elektronik" }, { id: "l2", user_id: "u1", name: "Bastian" }];
+    const lines = pg => pg.evaluate(() => Array.prototype.map.call(document.querySelectorAll("#importBox .impl"), e => e.firstChild.textContent));
+    const prods = [Object.assign(row("test-sony-xm5", { id: "x5" }), { list_id: "l1" }), Object.assign(row("test-lego-falcon", { id: "lg" }), { list_id: "l2" }), row("test-dyson-v15", { id: "dy" })];
+
+    // an import only shows when its list (or "Alle") is selected
+    {
+      const p = await open({ products: prods, lists: LISTS, label: "imp-lists", storage: { "pv-list": "all" }, imports: [imp("i1", { list_id: "l1" }), imp("i2", { list_id: "l2" }), imp("i3", { list_id: null })] });
+      await p.waitForSelector("#importBox .impl");
+      check("imports per list: 'Alle' shows every standing line", (await lines(p)).length === 3);
+      await p.click('#chips [data-lsel="l1"]');
+      check("imports per list: Elektronik shows only its own", JSON.stringify(await lines(p)) === JSON.stringify(["Følger Ønsker i1 · 4 ønsker · opdateret i dag"]), JSON.stringify(await lines(p)));
+      await p.click('#chips [data-lsel="l2"]');
+      check("imports per list: Bastian shows only its own", JSON.stringify(await lines(p)) === JSON.stringify(["Følger Ønsker i2 · 4 ønsker · opdateret i dag"]));
+      await p.click('#chips [data-lsel="none"]');
+      check("imports per list: 'Uden liste' shows the one without a list", JSON.stringify(await lines(p)) === JSON.stringify(["Følger Ønsker i3 · 4 ønsker · opdateret i dag"]));
+      await p.click('#chips [data-lsel="all"]');
+      check("imports per list: back on 'Alle' they are all there; the chips' counts are the products' only", (await lines(p)).length === 3 && (await p.textContent('#chips [data-lsel="l1"]')).replace(/\s+/g, " ").trim() === "Elektronik 1");
+      // a list with no import and no pending: the box is hidden
+      await p.evaluate(() => { window.__db.imports = window.__db.imports.filter(function (x) { return x.id !== "i2"; }); window.__tick(); });
+      await p.waitForFunction(() => document.querySelectorAll("#importBox .impl").length === 2);
+      await p.click('#chips [data-lsel="l2"]');
+      check("imports per list: a list without an import shows no line and no box", !(await p.isVisible("#importBox")));
+      await p.context().close();
+    }
+
+    // the caps still make sense with standing lines: only pending ones count towards 5, all rows towards 20
+    {
+      const p = await open({ products: [], label: "imp-caps", imports: [imp("s1"), imp("s2"), imp("s3"), imp("s4", { status: "pending" }), imp("s5", { status: "pending" }), imp("s6", { status: "pending" }), imp("s7", { status: "pending" })] });
+      await p.waitForSelector("#importBox .impl");
+      await p.fill("#fMain", "https://onskeskyen.dk/s/femte"); await p.click("#fSubmit"); await p.waitForTimeout(200);
+      check("caps: 3 standing + 4 pending: a 5th pending is accepted", (await p.evaluate(() => window.__db.imports.length)) === 8);
+      await p.fill("#fMain", "https://onskeskyen.dk/s/sjette"); await p.click("#fSubmit"); await p.waitForTimeout(200);
+      check("caps: the 6th pending is refused, standing lines do not count as pending", /Du har allerede 5 ønskelister i gang/.test(await p.textContent("#fMsg")) && (await p.evaluate(() => window.__db.imports.length)) === 8);
+      await p.context().close();
+    }
+
+    // Købt / Fortryd
+    {
+      const p = await open({ products: prods, lists: LISTS, label: "bought", storage: { "pv-list": "all" } });
+      await p.waitForSelector(".item");
+      const head = id => p.locator('.head[data-id="' + id + '"]');
+      check("bought: before, the hit sits first and is highlighted", (await p.locator(".item").first().getAttribute("class")).indexOf("hit") >= 0 && (await p.locator(".item h2").first().textContent()) === row("test-dyson-v15").name);
+      await head("dy").click();
+      check("bought: a small 'Købt' action in the detail view", (await p.locator('[data-act="buy"][data-id="dy"]').textContent()) === "Købt" && (await p.locator('[data-bought="dy"]').count()) === 0);
+      await p.click('[data-act="buy"][data-id="dy"]');
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      let o = (await ops(p))[0];
+      check("bought: one click, no question: bought_at = now and bought_price = the lowest in-stock price", o.table === "products" && o.op === "update" && o.filters[0][1] === "dy" && Object.keys(o.payload).sort().join() === "bought_at,bought_price" && o.payload.bought_price === 3999 && Math.abs(Date.parse(o.payload.bought_at) - Date.now()) < 60000, JSON.stringify(o));
+      await p.waitForFunction(() => /Købt for 3\.999 kr\./.test(document.body.textContent));
+      const it = p.locator(".item", { has: p.locator('.head[data-id="dy"]') });
+      check("bought: the line says 'Købt for 3.999 kr.', no goal text, no highlight, no 'Mål nået'", (await it.locator(".meta").first().textContent()) === "Købt for 3.999 kr." && (await it.getAttribute("class")).indexOf("hit") < 0 && !/Mål nået|Godt tilbud/.test(await it.locator(".head").textContent()) && (await it.locator(".price span").textContent()) === "");
+      check("bought: dimmed, and at the bottom of the list", (await it.getAttribute("class")).indexOf("bought") >= 0 && +(await it.evaluate(e => getComputedStyle(e).opacity)) < 1 && (await p.locator(".item").last().getAttribute("class")).indexOf("bought") >= 0 && (await p.locator(".item").first().getAttribute("class")).indexOf("bought") < 0);
+      const cel = await p.evaluate(() => (window.__pvCelebrations || []).length);
+      await p.evaluate(() => window.__tick()); await p.waitForTimeout(200);
+      check("bought: no sound or celebration for it (the one before the click was the hit it used to be)", (await p.evaluate(() => (window.__pvCelebrations || []).length)) === cel);
+      check("bought: counts in the chips as before", (await p.textContent('#chips [data-lsel="all"]')).replace(/\s+/g, " ").trim() === "Alle 3");
+      // edit the price
+      await p.fill("#bp-dy", "4100"); await p.click('[data-bought="dy"] button[type=submit]');
+      await p.waitForFunction(() => window.__db.writes().length === 2);
+      o = (await ops(p))[1];
+      check("bought: the price can be edited afterwards (only that column)", JSON.stringify(o.payload) === '{"bought_price":4100}' && o.filters[0][1] === "dy", JSON.stringify(o));
+      await p.waitForFunction(() => /Købt for 4\.100 kr\. · nu 3\.999 kr\./.test(document.body.textContent));
+      check("bought: when today's price differs it says 'nu ...'", true);
+      await p.fill("#bp-dy", "0"); await p.click('[data-bought="dy"] button[type=submit]');
+      check("bought: a price of 0 is refused locally", (await ops(p)).length === 2 && /Skriv en pris/.test(await p.textContent('[data-rowmsg="b-dy"]')));
+      await p.fill("#bp-dy", "3999"); await p.click('[data-bought="dy"] button[type=submit]');
+      await p.waitForFunction(() => window.__db.writes().length === 3);
+      check("bought: same price as today: no 'nu'", (await it.locator(".meta").first().textContent()) === "Købt for 3.999 kr.");
+      await p.fill("#bp-dy", ""); await p.click('[data-bought="dy"] button[type=submit]');
+      await p.waitForFunction(() => window.__db.writes().length === 4);
+      check("bought: an empty price is allowed (price unknown): just 'Købt'", JSON.stringify((await ops(p))[3].payload) === '{"bought_price":null}' && (await it.locator(".meta").first().textContent()) === "Købt");
+      // undo
+      await p.click('[data-act="unbuy"][data-id="dy"]');
+      await p.waitForFunction(() => window.__db.writes().length === 5);
+      o = (await ops(p))[4];
+      check("Fortryd: clears both columns, the product is a hit again and back on top", JSON.stringify(o.payload) === '{"bought_at":null,"bought_price":null}' && (await p.locator(".item").first().getAttribute("class")).indexOf("hit") >= 0 && (await p.locator(".item.bought").count()) === 0);
+      // a product whose price is not known: the price is stored as null
+      await head("lg").click();
+      await p.evaluate(() => { var r = window.__db.products.filter(function (x) { return x.id === "lg"; })[0]; r.offers = r.offers.map(function (o) { o.inStock = false; return o; }); window.__tick(); });
+      await p.waitForTimeout(150);
+      await p.click('[data-act="buy"][data-id="lg"]');
+      await p.waitForFunction(() => window.__db.writes().length === 6);
+      check("bought: nothing in stock, so no price is guessed (null)", (await ops(p))[5].payload.bought_price === null);
+      await p.context().close();
+    }
+
+    // not offered on rows that have no price yet, nor to people who may not write; a denied write says so
+    {
+      const p = await open({ products: [pendingRow, errorRow, row("test-sony-xm5", { id: "x5" })], label: "bought-none" });
+      await p.waitForSelector(".item");
+      for (const id of ["p1", "e1"]) await p.locator('.head[data-id="' + id + '"]').click();
+      await p.locator('.head[data-id="x5"]').click();
+      check("bought: no 'Købt' on pending or failed rows, only on the one with prices", (await p.locator('[data-act="buy"]').count()) === 1 && (await p.locator('[data-act="buy"]').getAttribute("data-id")) === "x5");
+      await p.evaluate(() => { window.__db.deny = true; });
+      await p.click('[data-act="buy"][data-id="x5"]');
+      await p.waitForSelector("#readonly:not([hidden])");
+      check("bought: a denied write turns the page read-only, no 'Købt' any more", (await p.locator('[data-act="buy"]').count()) === 0 && (await p.locator(".item.bought").count()) === 0);
+      await p.context().close();
+      const q = await open({ products: [Object.assign(row("test-sony-xm5", { id: "x5" }), { bought_at: "2026-11-10T10:00:00Z", bought_price: 2100 })], label: "bought-warn" });
+      await q.waitForSelector(".item");
+      await q.locator('.head[data-id="x5"]').click();
+      check("bought: Fortryd and the price field are there from the stored values", (await q.inputValue("#bp-x5")) === "2100" && (await q.locator('[data-act="unbuy"]').count()) === 1 && /Købt for 2\.100 kr\. · nu 2\.049 kr\./.test(await q.textContent(".head")));
+      await q.context().close();
+    }
+
+    // the morning mail setting
+    {
+      const p = await open({ products: [], label: "digest" });
+      await p.waitForSelector("#addForm:not([hidden])");
+      await p.locator("#settingsBox summary").click();
+      check("digest: the setting 'Saml tilbud i én morgenmail', off by default", /^\s*Saml tilbud i én morgenmail\s*$/.test(await p.textContent('label.chk:has(#shDigest)')) && !(await p.isChecked("#shDigest")) && !(await p.isDisabled("#shDigest")));
+      await p.check("#shDigest"); await p.click('#shopForm button[type=submit]');
+      await p.waitForFunction(() => window.__db.profiles[0] && window.__db.profiles[0].mail_digest === true);
+      const pr = await p.evaluate(() => window.__db.ops.filter(x => x.table === "profiles" && "mail_digest" in x.payload).pop().payload);
+      check("digest: saved as mail_digest true with the other settings; never digest_sent_at", pr.mail_digest === true && pr.notify_email === true && !("digest_sent_at" in pr), JSON.stringify(pr));
+      await p.uncheck("#shNotify");
+      check("digest: follows the e-mail switch (off means no mails at all, so the choice is greyed out)", await p.isDisabled("#shDigest"));
+      await p.check("#shNotify");
+      check("digest: and is available again", !(await p.isDisabled("#shDigest")));
+      await p.uncheck("#shDigest"); await p.click('#shopForm button[type=submit]');
+      await p.waitForFunction(() => window.__db.profiles[0].mail_digest === false);
+      check("digest: switched off again", true);
+      await p.context().close();
+      const q = await open({ products: [], label: "digest-on", profiles: [{ user_id: "u1", notify_email: true, mail_digest: true, shops_always: [], shops_exclude: [], shops_only: false }] });
+      await q.waitForSelector("#addForm:not([hidden])");
+      await q.locator("#settingsBox summary").click();
+      await q.waitForFunction(() => document.getElementById("shDigest").checked);
+      check("digest: shown on when the profile has it on", true);
+      await q.context().close();
     }
   }
 

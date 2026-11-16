@@ -324,6 +324,7 @@ begin execute q; return 'ok';
 exception when check_violation then return 'check';
   when unique_violation then return 'unique';
   when foreign_key_violation then return 'fk';
+  when not_null_violation then return 'notnull';
   when insufficient_privilege then return 'denied'; end $$;
 grant execute on function t.try(text) to public;
 -- lists of A and B by name, and "put product p into list l" as a statement
@@ -600,6 +601,167 @@ select t.chk('imports: migration from a database without the table is clean (twi
   and (select count(*) = 3 from pg_trigger where tgname in ('imports_guard_trg', 'imports_limit_trg', 'imports_list_check_trg'))
   and not has_table_privilege('authenticated', 'public.imports', 'update') and has_table_privilege('service_role', 'public.imports', 'update'));
 delete from public.imports; delete from public.lists;
+
+create function t.denied_as_a(q text) returns boolean language plpgsql as $$
+begin
+  set local role authenticated;
+  perform t.asA();
+  begin execute q; reset role; return false; exception when insufficient_privilege then reset role; return true; end;
+end $$;
+-- 11d. bought products, the morning mail and standing imports: start from the shape the live database has at HEAD
+-- (none of the new columns, no profiles guard), with rows in it, then run the file twice.
+insert into public.lists (name, user_id) values ('Onsker A', '00000000-0000-0000-0000-0000000000a1');
+insert into public.profiles (user_id, notify_email) values ('00000000-0000-0000-0000-0000000000a1', true), ('00000000-0000-0000-0000-0000000000b2', false);
+insert into public.products (user_id, name, source_url, target_type, target_value, status, notified_price) values
+  ('00000000-0000-0000-0000-0000000000a1', 'gammel', 'https://shop.example.dk/gammel', 'price', 100, 'tracking', 90);
+insert into public.imports (user_id, url, status, found, added, done_at) values
+  ('00000000-0000-0000-0000-0000000000a1', 'https://onskeskyen.dk/s/gammel', 'done', 12, 12, now());
+drop trigger profiles_guard_trg on public.profiles;
+drop function public.profiles_guard();
+alter table public.products drop column bought_at, drop column bought_price, drop column digest_price, drop column digest_at;
+alter table public.profiles drop column mail_digest, drop column digest_sent_at;
+drop index public.imports_sync_idx;
+alter table public.imports drop column synced_at, drop column seen, drop column title, drop column sync_fails;
+\o /dev/null
+\i :schema
+\i :schema
+\o
+select t.chk('migration at HEAD shape: new columns exist exactly once after two runs',
+  (select count(*) = 4 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name in ('bought_at', 'bought_price', 'digest_price', 'digest_at'))
+  and (select count(*) = 2 from information_schema.columns where table_schema = 'public' and table_name = 'profiles' and column_name in ('mail_digest', 'digest_sent_at'))
+  and (select count(*) = 4 from information_schema.columns where table_schema = 'public' and table_name = 'imports' and column_name in ('synced_at', 'seen', 'title', 'sync_fails'))
+  and (select count(*) = 1 from pg_trigger where tgname = 'profiles_guard_trg')
+  and (select count(*) = 1 from pg_constraint where conname = 'products_bought_price_check' and conrelid = 'public.products'::regclass));
+select t.chk('migration keeps the rows and gives sane defaults',
+  (select bool_and(not mail_digest) and bool_and(digest_sent_at is null) and count(*) = 2 from public.profiles)
+  and (select bought_at is null and bought_price is null and digest_price is null and notified_price = 90 from public.products where name = 'gammel')
+  and (select sync_fails = 0 and seen is null and synced_at is null and title is null and status = 'done' and added = 12 from public.imports where url = 'https://onskeskyen.dk/s/gammel'));
+select t.chk('profiles: the guard does not get in the way of reading',
+  (select count(*) = 2 from public.profiles));
+
+-- bought: written by the owner in the browser
+set role authenticated;
+select t.asA();
+update public.products set bought_at = '2000-01-01', bought_price = 1099 where name = 'gammel';
+select t.chk('bought: the owner can mark a product, the time is the server clock',
+  (select bought_price = 1099 and abs(extract(epoch from now() - bought_at)) < 60 from public.products where name = 'gammel'));
+update public.products set bought_price = 999.5 where name = 'gammel';
+select t.chk('bought: the price can be edited afterwards, the time stays',
+  (select bought_price = 999.5 and abs(extract(epoch from now() - bought_at)) < 60 from public.products where name = 'gammel'));
+update public.products set bought_at = '2001-01-01', name = 'gammel2' where name = 'gammel';
+select t.chk('bought: bought_at cannot be edited once set (the rest of the update goes through)',
+  (select bought_at > now() - interval '1 minute' and name = 'gammel2' from public.products where name = 'gammel2'));
+select t.chk('bought: a price without bought_at is refused', t.try($$update public.products set bought_at = null where name = 'gammel2'$$) = 'check');
+select t.chk('bought: zero, negative and absurd prices refused',
+  t.try($$update public.products set bought_price = 0 where name = 'gammel2'$$) = 'check'
+  and t.try($$update public.products set bought_price = -5 where name = 'gammel2'$$) = 'check'
+  and t.try($$update public.products set bought_price = 10000001 where name = 'gammel2'$$) = 'check');
+select t.chk('bought: the upper bound itself is fine', t.try($$update public.products set bought_price = 10000000 where name = 'gammel2'$$) = 'ok');
+update public.products set bought_at = null, bought_price = null where name = 'gammel2';
+select t.chk('bought: undo clears both', (select bought_at is null and bought_price is null from public.products where name = 'gammel2'));
+update public.products set bought_at = now() where name = 'gammel2';
+select t.chk('bought: a time without a price is fine (price not known)', (select bought_at is not null and bought_price is null from public.products where name = 'gammel2'));
+update public.products set bought_at = null where name = 'gammel2';
+insert into public.products (name, target_type, bought_at, bought_price) values ('koebt-ved-oprettelse', 'auto', '1999-01-01', 50);
+select t.chk('bought: an insert gets the server time too', (select abs(extract(epoch from now() - bought_at)) < 60 and bought_price = 50 from public.products where name = 'koebt-ved-oprettelse'));
+-- job columns stay out of reach
+update public.products set digest_price = 5, digest_at = now() where name = 'gammel2';
+select t.chk('digest columns: a browser update cannot set them', (select digest_price is null and digest_at is null from public.products where name = 'gammel2'));
+insert into public.products (name, target_type, digest_price, digest_at) values ('digest-forsoeg', 'auto', 5, now());
+select t.chk('digest columns: a browser insert cannot preset them', (select digest_price is null and digest_at is null from public.products where name = 'digest-forsoeg'));
+reset role;
+update public.products set digest_price = 80, digest_at = now() where name = 'gammel2';
+set role authenticated;
+select t.asA();
+update public.products set digest_price = null, digest_at = null, target_value = 120 where name = 'gammel2';
+select t.chk('digest columns: a browser update cannot clear them either', (select digest_price = 80 and digest_at is not null and target_value = 120 from public.products where name = 'gammel2'));
+update public.products set source_url = 'https://shop.example.dk/ny-adresse' where name = 'gammel2';
+select t.chk('digest columns: a new link starts the product over, digest included', (select digest_price is null and digest_at is null and status = 'pending' from public.products where name = 'gammel2'));
+-- isolation
+select t.asB();
+select t.chk('bought: B sees none of A''s products and cannot change them', (select count(*) = 0 from public.products)
+  and t.try($$update public.products set bought_at = now()$$) = 'ok' and (select count(*) = 0 from public.products));
+reset role;
+select t.chk('bought: A''s product untouched by B', (select bought_at is null from public.products where name = 'gammel2'));
+set role service_role;
+update public.products set bought_at = now(), bought_price = 10, digest_price = 7, digest_at = now() where name = 'gammel2';
+select t.chk('bought/digest: the job (service role) can write all of them', (select bought_price = 10 and digest_price = 7 from public.products where name = 'gammel2'));
+reset role;
+delete from public.products where name in ('gammel2', 'koebt-ved-oprettelse', 'digest-forsoeg');
+
+-- profiles: mail_digest is the person's, digest_sent_at is the job's
+set role authenticated;
+select t.asA();
+update public.profiles set mail_digest = true, digest_sent_at = '2020-01-01' where user_id = '00000000-0000-0000-0000-0000000000a1';
+select t.chk('profiles: the owner can switch the morning mail on; digest_sent_at cannot be set',
+  (select mail_digest and digest_sent_at is null from public.profiles));
+select t.chk('profiles: an upsert of the settings is accepted', t.try($$insert into public.profiles (user_id, mail_digest, digest_sent_at) values ('00000000-0000-0000-0000-0000000000a1', false, '2020-01-01')
+          on conflict (user_id) do update set mail_digest = excluded.mail_digest, digest_sent_at = excluded.digest_sent_at$$) = 'ok');
+select t.chk('profiles: ... and it cannot touch digest_sent_at', (select not mail_digest and digest_sent_at is null from public.profiles));
+select t.chk('profiles: mail_digest cannot be null', t.try($$update public.profiles set mail_digest = null$$) = 'notnull');
+reset role;
+set role service_role;
+update public.profiles set digest_sent_at = '2026-11-16 06:10:00+00' where user_id = '00000000-0000-0000-0000-0000000000a1';
+reset role;
+select t.chk('profiles: the job can write digest_sent_at', (select digest_sent_at = '2026-11-16 06:10:00+00' from public.profiles where user_id = '00000000-0000-0000-0000-0000000000a1'));
+set role authenticated;
+select t.asA();
+update public.profiles set digest_sent_at = null, mail_digest = true where user_id = '00000000-0000-0000-0000-0000000000a1';
+select t.chk('profiles: the owner cannot clear digest_sent_at (to get a second mail the same day)', (select mail_digest and digest_sent_at = '2026-11-16 06:10:00+00' from public.profiles));
+select t.asB();
+select t.chk('profiles: B sees only own profile, cannot change A''s', (select count(*) = 1 and bool_and(user_id = '00000000-0000-0000-0000-0000000000b2') from public.profiles)
+  and t.try($$update public.profiles set mail_digest = true where user_id = '00000000-0000-0000-0000-0000000000a1'$$) = 'ok');
+reset role;
+select t.chk('profiles: A''s setting untouched by B', (select mail_digest from public.profiles where user_id = '00000000-0000-0000-0000-0000000000a1')
+  and (select not mail_digest from public.profiles where user_id = '00000000-0000-0000-0000-0000000000b2'));
+delete from public.profiles where user_id = '00000000-0000-0000-0000-0000000000b2';
+set role authenticated;
+select t.asB();
+insert into public.profiles (user_id, notify_email, mail_digest, digest_sent_at) values ('00000000-0000-0000-0000-0000000000b2', true, true, '2020-01-01');
+select t.chk('profiles: a browser insert cannot preset digest_sent_at', (select mail_digest and digest_sent_at is null from public.profiles));
+select t.asX();
+select t.chk('profiles: a signed-in stranger sees and writes nothing', (select count(*) = 0 from public.profiles)
+  and t.try($$insert into public.profiles (user_id, mail_digest) values ('00000000-0000-0000-0000-0000000000c3', true)$$) = 'denied');
+reset role;
+
+-- imports: the sync columns belong to the job
+set role authenticated;
+select t.asA();
+insert into public.imports (url, synced_at, seen, title, sync_fails) values ('https://onskeskyen.dk/s/ny1', now(), '["a","b"]'::jsonb, 'Falsk', 5);
+select t.chk('imports sync: a browser insert cannot preset synced_at, seen, title or sync_fails',
+  (select synced_at is null and seen is null and title is null and sync_fails = 0 from public.imports where url = 'https://onskeskyen.dk/s/ny1'));
+reset role;
+grant update on public.imports to authenticated;
+set role authenticated;
+select t.asA();
+update public.imports set synced_at = now(), seen = '["x"]'::jsonb, title = 'Hacket', sync_fails = 7 where url = 'https://onskeskyen.dk/s/gammel';
+reset role;
+revoke update on public.imports from authenticated;
+select t.chk('imports sync guard: an UPDATE cannot change synced_at, seen, title or sync_fails',
+  (select synced_at is null and seen is null and title is null and sync_fails = 0 from public.imports where url = 'https://onskeskyen.dk/s/gammel'));
+select t.chk('imports sync: browser users still have no UPDATE right', t.denied_as_a($$update public.imports set seen = '[]'::jsonb$$));
+set role service_role;
+update public.imports set synced_at = '2026-11-16 05:00:00+00', seen = '["w1","w2"]'::jsonb, title = 'Bastians ønskeliste', sync_fails = 2, status = 'done'
+ where url = 'https://onskeskyen.dk/s/gammel';
+reset role;
+select t.chk('imports sync: the job writes all four', (select seen = '["w1","w2"]'::jsonb and title = 'Bastians ønskeliste' and sync_fails = 2 and synced_at is not null from public.imports where url = 'https://onskeskyen.dk/s/gammel'));
+select t.chk('imports sync: seen must be an array of at most 500', t.try($$update public.imports set seen = '{"a":1}'::jsonb where url = 'https://onskeskyen.dk/s/gammel'$$) = 'check'
+  and t.try($$update public.imports set seen = '"x"'::jsonb where url = 'https://onskeskyen.dk/s/gammel'$$) = 'check'
+  and t.try($$update public.imports set seen = (select jsonb_agg(g) from generate_series(1, 501) g) where url = 'https://onskeskyen.dk/s/gammel'$$) = 'check'
+  and t.try($$update public.imports set seen = (select jsonb_agg(g) from generate_series(1, 500) g) where url = 'https://onskeskyen.dk/s/gammel'$$) = 'ok');
+select t.chk('imports sync: title over 100 and negative sync_fails refused', t.try(format('update public.imports set title = %L where url = %L', repeat('t', 101), 'https://onskeskyen.dk/s/gammel')) = 'check'
+  and t.try($$update public.imports set sync_fails = -1 where url = 'https://onskeskyen.dk/s/gammel'$$) = 'check');
+-- the person stops following: the row goes, the products stay
+insert into public.products (user_id, name, target_type) values ('00000000-0000-0000-0000-0000000000a1', 'fra-oenskelisten', 'auto');
+set role authenticated;
+select t.asB();
+select t.chk('imports sync: B cannot stop (delete) A''s import', t.dels($$delete from public.imports where url = 'https://onskeskyen.dk/s/gammel'$$) = 0);
+select t.asA();
+select t.chk('imports sync: A can stop an import', t.dels($$delete from public.imports where url = 'https://onskeskyen.dk/s/gammel'$$) = 1);
+reset role;
+select t.chk('imports sync: stopping keeps the products', (select count(*) = 1 from public.products where name = 'fra-oenskelisten'));
+delete from public.products where name = 'fra-oenskelisten';
+delete from public.imports; delete from public.lists; delete from public.profiles;
 
 -- 12. final whole-file run on the populated database
 \o /dev/null

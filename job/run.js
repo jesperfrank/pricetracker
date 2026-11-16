@@ -15,6 +15,7 @@ const PJ = require('./lib/prisjagt');
 const SHOP = require('./lib/shop');
 const WB = require('./lib/wayback');
 const ONSKE = require('./lib/onskeskyen');
+const D = require('./lib/digest');
 const { composeMail, composeOwnerMail, composeApprovedMail, sendResend } = require('./lib/mail');
 const { makeClient } = require('./lib/supabase');
 
@@ -103,12 +104,20 @@ function trackingPatch(prod, profile, parsed, now) {
   const saleSignal = low ? (rows.some((r) => r.saleKnown) ? rows.some((r) => r.inStock && r.price === low.price && r.sale) : null) : null;
   const verdict = P.verdictFor(low ? low.price : null, normal, history, today, saleSignal);
   const warning = P.priceWarning(history, today, low ? low.price : undefined);
-  const goal = P.goalOutcome(prod, low, normal, iso, { verdict, history });
+  // A bought product is still checked (the person can see what the price did after buying), but never notifies.
+  const bought = !!prod.bought_at;
+  const goal = bought ? { hit: false, newHit: false, fields: {}, reason: null } : P.goalOutcome(prod, low, normal, iso, { verdict, history });
 
   const patch = Object.assign({
     status: 'tracking', title: prod.title || parsed.title || null, variants, offers, history, normal_price: normal, verdict, warning,
     check_note: filtered.length === 0 ? 'Ingen butikker matcher dine butiksvalg.' : (parsed.note || null), last_checked: iso,
   }, goal.fields);
+  // One morning mail: a new hit of a person who wants it is collected (price and time) instead of mailed at once. A collected hit
+  // that is no longer a hit, or a product that has been bought, is forgotten. Only where the database has the columns.
+  if (Object.prototype.hasOwnProperty.call(prod, 'digest_price')) {
+    if (goal.newHit && D.isDigestUser(profile)) { patch.digest_price = low.price; patch.digest_at = iso; }
+    else if (prod.digest_price != null && (bought || goal.fields.notified_price === null)) { patch.digest_price = null; patch.digest_at = null; }
+  }
   return {
     patch,
     hit: goal.newHit ? { productId: prod.id, userId: prod.user_id, name: prod.name, price: low.price, store: low.store, url: low.url, verdict: verdict.text, warning, reason: goal.reason } : null,
@@ -222,13 +231,14 @@ async function run(ctx) {
   const fetchImpl = ctx.fetch || fetch;
   const sb = makeClient(ctx.supabaseUrl, ctx.serviceKey, fetchImpl);
   const started = Date.now();
-  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null };
+  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false, digests: 0, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null };
 
   // 0. wish-list imports (Ønskeskyen): before the price checks, so that the new products get their first price in this run.
   // Own step: it never fails the run, and it is skipped quietly when the imports table does not exist yet.
   try {
     stats.imports = await ONSKE.runImports({ sb, fetch: ctx.onskeFetch || fetchImpl, sleep: ctx.onskeSleep || sleep, pauseMs: ctx.onskePauseMs, log, now: ctx.now || (() => now), deadlineAt: started + IMPORT_BUDGET_MS });
     if (stats.imports.pending) log('Ønskelister: ' + stats.imports.pending + ' behandlet, ' + stats.imports.done + ' færdige, ' + stats.imports.error + ' fejlede, ' + stats.imports.added + ' varer tilføjet.');
+    if (stats.imports.synced) log('Ønskelister fulgt: ' + stats.imports.synced + ' læst igen, ' + stats.imports.syncAdded + ' nye varer, ' + stats.imports.syncFailed + ' kunne ikke læses.');
   } catch (e) { log('Ønskelister: ' + (e && e.message || e)); }
 
   // 1. load (a failure here means Supabase is unreachable: let it throw)
@@ -330,35 +340,98 @@ async function run(ctx) {
   }
 
   // 5. e-mail
+  // A person with "one morning mail" switched on gets their hits collected (see trackingPatch) and mailed in one go, once a day, at the
+  // first run from 07:00 Copenhagen time. Everybody else gets a mail per run with hits, as before.
   const hitsByUser = {};
   results.forEach((r) => { if (r.hit) (hitsByUser[r.hit.userId] = hitsByUser[r.hit.userId] || []).push(r); });
   stats.hits = results.filter((r) => r.hit).length;
   const revert = (rs) => rs.forEach((r) => { r.patch.notified_price = typeof r.prod.notified_price === 'number' ? r.prod.notified_price : null; delete r.patch.notified_at; });
   const canMail = !!ctx.resendKey && !!ctx.mailFrom;
   if (stats.hits && !canMail) { stats.mailNote = ctx.resendKey ? 'MAIL_FROM mangler' : 'RESEND_API_KEY mangler'; log('E-mail springes over: ' + stats.mailNote + '.'); }
-  for (const userId of Object.keys(hitsByUser)) {
-    const rs = hitsByUser[userId];
-    const profile = profiles[userId];
-    if (profile && profile.notify_email === false) { stats.mailSkipped++; continue; }       // opted out: hit is recorded, no mail
-    if (!canMail) { revert(rs); stats.mailSkipped++; continue; }                            // retry once mail is configured
+  const resultOf = new Map(results.map((r) => [r.prod.id, r]));
+  // products with a collected hit: from an earlier run, or collected just now
+  const collected = (p) => { const r = resultOf.get(p.id); return typeof p.digest_price === 'number' || !!(r && typeof r.patch.digest_price === 'number'); };
+  const withDigest = new Set(products.filter(collected).map((p) => p.user_id));
+  // the product as it is after this run's check, and the collected hits of one person that are waiting
+  const waiting = (userId, profile) => products.filter((p) => p.user_id === userId && collected(p)).map((prod) => {
+    const r = resultOf.get(prod.id), state = Object.assign({}, prod, r ? r.patch : {}), low = D.pendingLow(state, profile && profile.digest_sent_at);
+    return low ? { prod, r, hit: r && r.hit ? r.hit : D.hitFromState(state, low) } : null;
+  }).filter(Boolean);
+  // the address of a person who may be mailed, or null (and why in the log)
+  const addressOf = async (userId) => {
+    const u = await sb.authUser(userId);
+    const addr = String(u && u.email || '').trim().toLowerCase();
+    if (!addr) { stats.mailSkipped++; return null; }
+    const allowed = await sb.select('allowed_emails', 'select=email&email=eq.' + encodeURIComponent(addr));
+    if (!allowed.length) { log('  Bruger ' + userId + ' står ikke i allowed_emails: ingen e-mail.'); stats.mailSkipped++; return null; }
+    return addr;
+  };
+
+  // the morning mail. Claim-then-send: the day is claimed in profiles.digest_sent_at (only if nobody else changed it meanwhile)
+  // BEFORE the mail goes out, so a crash or a parallel run can never send a second one for the same day. A failed send gives the
+  // claim back, so the next run tries again. The hits found in this run are saved first, so they cannot turn up as "new" again.
+  const sendDigest = async (userId, profile) => {
+    const sentAt = profile.digest_sent_at || null;
+    const items = waiting(userId, profile);
+    if (!items.length || !D.digestWindow(now, sentAt)) return;
+    if (!canMail) { stats.mailSkipped++; stats.mailNote = ctx.resendKey ? 'MAIL_FROM mangler' : 'RESEND_API_KEY mangler'; return; }
+    if (stats.sent >= MAX_MAILS) { stats.mailSkipped++; stats.mailNote = 'loft på ' + MAX_MAILS + ' e-mails nået'; return; }
+    const addr = await addressOf(userId);
+    if (!addr) return;
+    const send = [];
+    for (const it of items) {
+      if (it.r && it.r.hit && !it.r.written) {
+        try { await sb.patch('products', 'id=eq.' + encodeURIComponent(it.prod.id), it.r.patch); it.r.written = true; stats.written++; }
+        catch (e) { it.r.skipWrite = true; stats.writeFail++; log('  Kunne ikke skrive ' + (it.prod.name || it.prod.id) + ': ' + (e && e.message || e)); continue; }   // found again, as new, in the next run
+      }
+      send.push(it);
+    }
+    if (!send.length) return;
+    const claim = isoNow(now);
+    const rows = await sb.patch('profiles', 'user_id=eq.' + encodeURIComponent(userId) + '&digest_sent_at=' + (sentAt ? 'eq.' + encodeURIComponent(sentAt) : 'is.null'), { digest_sent_at: claim }, true);
+    if (!Array.isArray(rows) || !rows.length) { log('  Morgenmail til bruger ' + userId + ' er allerede taget af en anden kørsel.'); return; }
     try {
-      if (stats.sent >= MAX_MAILS) { revert(rs); stats.mailSkipped++; stats.mailNote = 'loft på ' + MAX_MAILS + ' e-mails nået'; continue; }
-      const u = await sb.authUser(userId);
-      const addr = String(u && u.email || '').trim().toLowerCase();
-      if (!addr) { stats.mailSkipped++; continue; }
-      const allowed = await sb.select('allowed_emails', 'select=email&email=eq.' + encodeURIComponent(addr));
-      if (!allowed.length) { log('  Bruger ' + userId + ' står ikke i allowed_emails: ingen e-mail.'); stats.mailSkipped++; continue; }
-      const mail = composeMail(rs.map((r) => r.hit), ctx.siteUrl);
+      const mail = composeMail(send.map((it) => it.hit), ctx.siteUrl);
+      mail.subject = D.digestSubject(send.length);
       await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, addr, mail);
+      stats.sent++; stats.digests++;
+    } catch (e) {
+      log('  Morgenmail til bruger ' + userId + ' fejlede: ' + (e && e.message || e));
+      stats.mailSkipped++;
+      try { await sb.patch('profiles', 'user_id=eq.' + encodeURIComponent(userId) + '&digest_sent_at=eq.' + encodeURIComponent(claim), { digest_sent_at: sentAt }); }
+      catch (e2) { log('  Kunne ikke give dagens morgenmail tilbage: ' + (e2 && e2.message || e2)); }
+    }
+  };
+
+  for (const userId of Array.from(new Set(Object.keys(hitsByUser).concat(Array.from(withDigest))))) {
+    const rs = hitsByUser[userId] || [];
+    const profile = profiles[userId];
+    try {
+      if (profile && profile.notify_email === false) { if (rs.length) stats.mailSkipped++; continue; }       // opted out: hit is recorded, no mail
+      if (D.isDigestUser(profile)) { await sendDigest(userId, profile); continue; }
+      // everybody else: a mail per run. Hits still waiting from a time the morning mail was switched on go along (switched off again).
+      const flush = withDigest.has(userId) ? waiting(userId, profile).filter((it) => !rs.some((r) => r === it.r)) : [];
+      if (!rs.length && !flush.length) continue;
+      if (!canMail) { revert(rs); stats.mailSkipped++; continue; }                            // retry once mail is configured
+      if (stats.sent >= MAX_MAILS) { revert(rs); stats.mailSkipped++; stats.mailNote = 'loft på ' + MAX_MAILS + ' e-mails nået'; continue; }
+      const addr = await addressOf(userId);
+      if (!addr) continue;
+      await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, addr, composeMail(rs.map((r) => r.hit).concat(flush.map((it) => it.hit)), ctx.siteUrl));
       stats.sent++;
+      flush.forEach((it) => {                                                                    // sent now: no longer waiting
+        if (it.r) Object.assign(it.r.patch, { digest_price: null, digest_at: null });
+        else { const nr = { prod: it.prod, patch: { digest_price: null, digest_at: null }, hit: null }; results.push(nr); resultOf.set(it.prod.id, nr); }
+      });
     } catch (e) {
       log('  E-mail til bruger ' + userId + ' fejlede: ' + (e && e.message || e));
-      revert(rs); stats.mailSkipped++;
+      if (!D.isDigestUser(profile)) revert(rs);                // a collected hit stays collected; a hit for a normal mail is found again next run
+      stats.mailSkipped++;
     }
   }
 
   // write (one product failing does not stop the others)
   for (const r of results) {
+    if (r.written || r.skipWrite) continue;
     try { await sb.patch('products', 'id=eq.' + encodeURIComponent(r.prod.id), r.patch); stats.written++; }
     catch (e) { stats.writeFail++; log('  Kunne ikke skrive ' + (r.prod.name || r.prod.id) + ': ' + (e && e.message || e)); }
   }
@@ -372,7 +445,7 @@ async function run(ctx) {
     'Produkter: ' + stats.total + ' aktive (nye: ' + stats.pending + ', følges: ' + stats.tracking + ', venter på valg: ' + stats.choose + ', fejl: ' + stats.error + ').',
     'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.blockedHosts.length ? ' (afvist af ' + stats.blockedHosts.join(', ') + ': resten derfra sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
     'Nye hits: ' + stats.hits + '.' + (stats.backfilled ? ' Ældre priser fra Internet Archive: ' + stats.backfillPoints + ' for ' + stats.backfilled + ' produkt(er).' : ''),
-    'E-mails sendt: ' + stats.sent + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte.',
+    'E-mails sendt: ' + stats.sent + (stats.digests ? ' (heraf morgenmails: ' + stats.digests + ')' : '') + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte.',
     'Skrevet til databasen: ' + stats.written + ', skrivefejl: ' + stats.writeFail + '. Tid: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s.',
   ];
   summary.forEach((l) => log(l));

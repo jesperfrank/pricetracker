@@ -19,8 +19,8 @@
     return window.supabase.createClient(url, key);
   }
 
-  var state = { imports: [], importsOk: false, importMsg: "", lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
-    prefs: { always: [], exclude: [], only: false, notify: true }, profileSound: null };
+  var state = { imports: [], importsOk: false, importMsg: "", confirmImport: null, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
+    prefs: { always: [], exclude: [], only: false, notify: true, digest: false }, profileSound: null };
   var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
   var sb = null, user = null, channel = null, pollTimer = null, fetching = false, again = false, lastFetch = 0, fetchSeq = 0;
 
@@ -175,7 +175,8 @@
       warning: r.warning || "", checkNote: r.check_note || "", lastChecked: r.last_checked || null,
       targetType: r.target_type === "pct" ? "pct" : r.target_type === "auto" ? "auto" : "price", targetValue: num(r.target_value),
       shopsAlways: r.shops_always, shopsExclude: r.shops_exclude, shopsOnly: !!r.shops_only,
-      url: r.source_url || null, createdAt: r.created_at || "", listId: r.list_id || null
+      url: r.source_url || null, createdAt: r.created_at || "", listId: r.list_id || null,
+      boughtAt: r.bought_at || null, boughtPrice: num(r.bought_price)
     };
   }
   function offersOf(p) {
@@ -190,6 +191,11 @@
     var os = offersOf(p), inStock = os.filter(function (o) { return o.inStock !== false; });
     var pool = inStock.length ? inStock : os;
     return pool.slice().sort(function (a, b) { return a.price - b.price; })[0] || null;
+  }
+  // the lowest in-stock price now (own shop choices applied), or null
+  function inStockLow(p) {
+    var ps = offersOf(p).filter(function (o) { return o.inStock !== false; }).map(function (o) { return o.price; });
+    return ps.length ? Math.min.apply(null, ps) : null;
   }
   function targetKr(p) {
     if (p.targetType === "auto") return null;
@@ -218,6 +224,7 @@
     return null;
   }
   function isHit(p) {
+    if (p.boughtAt) return false;                               // bought: no goal, no highlight, no sound
     if (p.targetType === "auto") return autoReason(p) !== null;
     var b = bestOf(p), t = targetKr(p); return p.status === "tracking" && !!(b && t != null && b.inStock !== false && b.price <= t);
   }
@@ -290,15 +297,19 @@
     else if (p.status === "error") st = '<span class="warn">' + esc(p.checkNote || "Produktet kunne ikke hentes") + '</span>';
     else if (awaitingFetch(p)) st = "Henter priser for den valgte variant …";
     else if (p.status === "choose") st = '<span class="out">Vælg variant</span>';
+    else if (p.boughtAt && p.status === "tracking") {
+      st = esc(p.boughtPrice != null ? "Købt for " + kr(p.boughtPrice) : "Købt");
+      if (b && p.boughtPrice != null && Math.round(b.price) !== Math.round(p.boughtPrice)) st += " · nu " + esc(kr(b.price));
+    }
     else if (isHit(p)) st = '<span class="ok">' + (p.targetType === "auto" ? "Godt tilbud" : "Mål nået") + '</span> · på lager hos ' + esc(b.store || "en butik");
     else if (!p.lastChecked) st = "Venter på første tjek";
     else if (!b) st = esc(p.checkNote || "Ingen pris fundet");
     else if (!anyStock) st = '<span class="out">Udsolgt alle steder</span> · senest hos ' + esc(b.store || "en butik");
     else st = (t != null ? esc(kr(b.price - t)) + " over målet · " : "") + "billigst hos " + esc(b.store || "en butik");
-    if (p.status === "tracking" && p.warning) st += ' · <span class="warn">Oppustet førpris</span>';
+    if (p.status === "tracking" && p.warning && !p.boughtAt) st += ' · <span class="warn">Oppustet førpris</span>';
     var showPrice = p.status === "tracking" && b;
     return '<div><h2>' + esc(p.name) + '</h2><div class="meta">' + st + '</div></div>' + (p.status === "tracking" ? sparkHtml(p) : '<span class="spark"></span>') +
-      '<div class="price n"><b>' + (showPrice ? esc(kr(b.price)) : "–") + '</b><span>' + esc(targetText(p)) + '</span></div>';
+      '<div class="price n"><b>' + (showPrice ? esc(kr(b.price)) : "–") + '</b><span>' + (p.boughtAt ? "" : esc(targetText(p))) + '</span></div>';
   }
 
   function chooserHtml(p) {
@@ -326,8 +337,18 @@
         return '<option value="' + esc(l.id) + '"' + (known && p.listId === l.id ? " selected" : "") + '>' + esc(l.name) + '</option>';
       }).join("") + '</select></div>';
   }
+  // "Købt": one click, no question. Then the price paid can be corrected, or the click undone.
+  function boughtHtml(p) {
+    var id = p._id;
+    if (!state.canWrite || p.status === "pending" || p.status === "error") return "";
+    if (!p.boughtAt) return '<div class="foot"><span></span><button type="button" class="link" data-act="buy" data-id="' + esc(id) + '">Købt</button></div>';
+    return '<form class="edit bought-row" data-bought="' + esc(id) + '" novalidate><label for="bp-' + esc(id) + '">Købt for</label>' +
+      '<input class="n" type="number" id="bp-' + esc(id) + '" min="1" max="10000000" step="any" inputmode="decimal" value="' + esc(p.boughtPrice != null ? p.boughtPrice : "") + '"> <span>kr.</span>' +
+      '<button class="link" type="submit">Gem</button><button type="button" class="link" data-act="unbuy" data-id="' + esc(id) + '">Fortryd</button>' +
+      '<span class="meta" data-rowmsg="b-' + esc(id) + '">' + esc(state.rowMsg["b-" + id] || "") + '</span></form>';
+  }
   function footHtml(p, fixLink) {
-    var id = p._id, link = safeUrl(p.url), html = listPickHtml(p);
+    var id = p._id, link = safeUrl(p.url), html = listPickHtml(p) + boughtHtml(p);
     html += '<div class="foot"><span>' + (link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">Dit link</a>' : '') + '</span>';
     if (state.canWrite) {
       if (state.confirmDel === id) {
@@ -576,19 +597,43 @@
   // ---- imports: a shared wish list from Ønskeskyen is read by the price job; a quiet status line per import ----
   // The imports table only exists once schema.sql has been run again. Until then nothing is shown and nothing breaks.
   var IMPORT_PENDING = "Henter ønsker fra Ønskeskyen …";
+  function dayWord(iso) {
+    var t = Date.parse(iso); if (!isFinite(t)) return "";
+    var d = new Date(t), n = new Date(), y = new Date(n.getFullYear(), n.getMonth(), n.getDate() - 1);
+    if (d.toDateString() === n.toDateString()) return "i dag";
+    if (d.toDateString() === y.toDateString()) return "i går";
+    return dFmt.format(d);
+  }
+  // A finished import is a standing link between a list and the wish list: one quiet line, "Stop" ends it (the products stay).
   function importLine(im) {
-    var txt;
+    var txt, id = esc(im.id), act = "";
     if (im.status === "pending") txt = IMPORT_PENDING;
-    else if (im.status === "done") { var n = im.added || 0; txt = nf.format(n) + (n === 1 ? " ønske" : " ønsker") + " tilføjet fra Ønskeskyen." + (im.note ? " " + im.note : ""); }
+    else if (im.status === "done") {
+      var n = im.found != null ? im.found : im.added, parts = ["Følger " + (im.title || "ønskelisten")];
+      if (n != null) parts.push(nf.format(n) + (n === 1 ? " ønske" : " ønsker"));
+      var when = im.syncedAt ? dayWord(im.syncedAt) : "";
+      if (when) parts.push("opdateret " + when);
+      txt = parts.join(" · ");
+      if (im.fails > 0 && im.note) txt += " · " + im.note;
+    }
     else txt = im.note || "Ønskelisten kunne ikke hentes.";
-    return '<p class="impl' + (im.status === "error" ? " bad" : "") + '" data-istatus="' + esc(im.status) + '"><span>' + esc(txt) + '</span>' +
-      (im.status !== "pending" && state.canWrite ? ' <button type="button" class="link" data-iact="hide" data-id="' + esc(im.id) + '">Skjul</button>' : "") + '</p>';
+    if (im.status !== "pending" && state.canWrite) {
+      if (im.status === "done" && state.confirmImport === im.id)
+        act = ' <span>Stop? Varerne beholdes.</span> <button type="button" class="link warn" data-iact="stop-yes" data-id="' + id + '">Ja, stop</button>' +
+          '<button type="button" class="link" data-iact="stop-no" data-id="' + id + '">Behold</button>';
+      else if (im.status === "done") act = ' <button type="button" class="link" data-iact="stop" data-id="' + id + '">Stop</button>';
+      else act = ' <button type="button" class="link" data-iact="hide" data-id="' + id + '">Skjul</button>';
+    }
+    return '<p class="impl' + (im.status === "error" || im.fails > 0 ? " bad" : "") + '" data-istatus="' + esc(im.status) + '"><span>' + esc(txt) + '</span>' + act + '</p>';
   }
   function renderImports() {
-    var box = $("importBox"), show = !!(user && state.importsOk && state.imports.length);
+    var box = $("importBox"), sel = curSel();
+    // an import shows with its list (or with "Alle"); one without a known list shows under "Alle" and "Uden liste"
+    var list = state.imports.filter(function (im) { return inSel({ listId: im.listId }, sel); });
+    var show = !!(user && state.importsOk && list.length);
     box.hidden = !show;
     if (!show) { box.innerHTML = ""; return; }
-    var list = state.imports.slice().sort(function (a, b) { return String(b.createdAt).localeCompare(String(a.createdAt)); });
+    list.sort(function (a, b) { return String(b.createdAt).localeCompare(String(a.createdAt)); });
     box.innerHTML = list.map(importLine).join("") + (state.importMsg ? '<p class="msg">' + esc(state.importMsg) + '</p>' : "");
   }
   function fetchImports() {
@@ -598,17 +643,22 @@
       if (!user || user.id !== uid) return;
       if (r.error) return;                                   // no table yet, or a hiccup: keep what is shown, say nothing
       state.imports = (r.data || []).map(function (x) {
-        return { id: x.id, status: x.status === "done" || x.status === "error" ? x.status : "pending", note: x.note || "", added: num(x.added), found: num(x.found), createdAt: x.created_at || "" };
+        return { id: x.id, status: x.status === "done" || x.status === "error" ? x.status : "pending", note: x.note || "", added: num(x.added), found: num(x.found), createdAt: x.created_at || "",
+          title: x.title ? String(x.title) : "", syncedAt: x.synced_at || null, fails: num(x.sync_fails) || 0, listId: x.list_id || null };
       });
       state.importsOk = true; render();
     }, function () {});
   }
   $("importBox").addEventListener("click", function (ev) {
-    var b = ev.target.closest('[data-iact="hide"]'); if (!b || !sb) return;
-    var id = b.dataset.id; b.disabled = true; state.importMsg = "";
+    var b = ev.target.closest("[data-iact]"); if (!b || !sb) return;
+    var act = b.dataset.iact, id = b.dataset.id; state.importMsg = "";
+    if (act === "stop") { state.confirmImport = id; renderImports(); return; }
+    if (act === "stop-no") { state.confirmImport = null; renderImports(); return; }
+    if (act !== "hide" && act !== "stop-yes") return;
+    b.disabled = true;
     sb.from("imports").delete().eq("id", id).then(function (r) {
       if (r && r.error) { b.disabled = false; state.importMsg = isDenied(r.error) ? "Du har ikke adgang til at gemme." : "Kunne ikke gemme lige nu. Prøv igen om lidt."; onWriteError(r.error); renderImports(); return; }
-      state.imports = state.imports.filter(function (x) { return x.id !== id; }); render(); fetchImports();
+      state.confirmImport = null; state.imports = state.imports.filter(function (x) { return x.id !== id; }); render(); fetchImports();
     }, function () { b.disabled = false; state.importMsg = "Kunne ikke gemme lige nu. Prøv igen om lidt."; renderImports(); });
   });
 
@@ -621,7 +671,7 @@
       (a.type === "checkbox" || a.type === "radio" ? a.checked !== a.defaultChecked : a.value !== a.defaultValue)) { renderPending = true; return; }
     renderPending = false;
     renderLists(); renderImports();
-    var rank = function (p) { return isHit(p) ? 0 : (p.status === "choose" && !awaitingFetch(p)) ? 1 : 2; };
+    var rank = function (p) { return p.boughtAt ? 3 : isHit(p) ? 0 : (p.status === "choose" && !awaitingFetch(p)) ? 1 : 2; };
     var sel = curSel();
     var ps = state.products.filter(function (p) { return inSel(p, sel); }).sort(function (x, y) {
       return (rank(x) - rank(y)) || String(y.createdAt || "").localeCompare(String(x.createdAt || ""));
@@ -639,7 +689,7 @@
     }
     list.innerHTML = ps.map(function (p) {
       var open = isOpen(p);
-      return '<article class="item' + (isHit(p) ? " hit" : "") + '" data-status="' + esc(p.status) + '">' +
+      return '<article class="item' + (isHit(p) ? " hit" : "") + (p.boughtAt ? " bought" : "") + '" data-status="' + esc(p.status) + '">' +
         '<button type="button" class="head" data-act="toggle" data-id="' + esc(p._id) + '" aria-expanded="' + open + '">' + headHtml(p) + '</button>' +
         (open ? '<div class="body">' + bodyHtml(p) + '</div>' : '') + '</article>';
     }).join("");
@@ -770,9 +820,10 @@
   }
   function refreshSoon() { if (Date.now() - lastFetch > 2500) fetchProducts(); else { again = true; setTimeout(function () { if (again && !fetching) { again = false; fetchProducts(); } }, 2600); } }
   function setPrefs(d) {
-    state.prefs = { always: shopList(d.shops_always), exclude: shopList(d.shops_exclude), only: !!d.shops_only, notify: d.notify_email !== false };
+    state.prefs = { always: shopList(d.shops_always), exclude: shopList(d.shops_exclude), only: !!d.shops_only, notify: d.notify_email !== false, digest: d.mail_digest === true };
     $("shAlways").value = state.prefs.always.join(", "); $("shExclude").value = state.prefs.exclude.join(", ");
     $("shOnly").checked = state.prefs.only; $("shNotify").checked = state.prefs.notify;
+    $("shDigest").checked = state.prefs.digest; $("shDigest").disabled = !state.prefs.notify;
     render();
   }
   function ensureProfile() {
@@ -792,7 +843,7 @@
   }
   function startSession() {
     state.loaded = false; state.products = []; state.canWrite = true;
-    state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.imports = []; state.importsOk = false; state.importMsg = "";
+    state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null;
     $("status").textContent = "Henter listen …";
     loadSounds();
     ensureProfile(); fetchProducts(); fetchAccess();
@@ -804,7 +855,7 @@
   function stopSession() {
     clearInterval(pollTimer); pollTimer = null;
     try { if (channel) sb.removeChannel(channel); } catch (e) {}
-    channel = null; state.products = []; state.loaded = false; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.imports = []; state.importsOk = false; state.importMsg = ""; renderImports();
+    channel = null; state.products = []; state.loaded = false; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null; renderImports();
     access.admin = false; access.requests = []; access.allowed = []; access.confirm = null; access.seq++; accMsg(""); renderAccess();
   }
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && user) fetchProducts(); });
@@ -824,6 +875,21 @@
       sb.from("products").update({ target_type: "price", target_value: gv }).eq("id", id).then(function (r) {
         if (r && r.error) { b.disabled = false; onWriteError(r.error); return; }
         p.targetType = "price"; p.targetValue = gv; render(); fetchProducts();
+      }, function () { b.disabled = false; });
+    }
+    else if (act === "buy" && sb && p && !p.boughtAt) {
+      var paid = inStockLow(p);                                   // the lowest price in stock now, if there is one; the price can be edited afterwards
+      b.disabled = true;
+      sb.from("products").update({ bought_at: new Date().toISOString(), bought_price: paid }).eq("id", id).then(function (r) {
+        if (r && r.error) { b.disabled = false; state.rowMsg["b-" + id] = ""; onWriteError(r.error); if (schemaOld(r.error)) { state.note[id] = SCHEMA_OLD; render(); } return; }
+        p.boughtAt = new Date().toISOString(); p.boughtPrice = paid; render(); fetchProducts();
+      }, function () { b.disabled = false; });
+    }
+    else if (act === "unbuy" && sb && p) {
+      b.disabled = true;
+      sb.from("products").update({ bought_at: null, bought_price: null }).eq("id", id).then(function (r) {
+        if (r && r.error) { b.disabled = false; onWriteError(r.error); return; }
+        p.boughtAt = null; p.boughtPrice = null; render(); fetchProducts();
       }, function () { b.disabled = false; });
     }
     else if (act === "del") { state.confirmDel = id; render(); }
@@ -882,6 +948,19 @@
         if (wasTracking) state.note[cid] = "Gemt. Priserne opdateres inden for et kvarter.";
         render(); fetchProducts();
       }, function () { setRowMsg(cid, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+      return;
+    }
+    var boF = ev.target.closest("[data-bought]");
+    if (boF) {
+      ev.preventDefault();
+      var bid = boF.dataset.bought, bp = prod(bid), raw = boF.querySelector("input").value.trim().replace(",", "."), bv = raw === "" ? null : Number(raw);
+      if (!bp) return;
+      if (bv !== null && !(bv > 0 && bv <= 10000000)) { setRowMsg("b-" + bid, "Skriv en pris."); return; }
+      setRowMsg("b-" + bid, "");
+      sb.from("products").update({ bought_price: bv }).eq("id", bid).then(function (r) {
+        if (r && r.error) { setRowMsg("b-" + bid, "Kunne ikke gemme."); onWriteError(r.error); return; }
+        bp.boughtPrice = bv; document.activeElement && document.activeElement.blur && document.activeElement.blur(); render(); fetchProducts();
+      }, function () { setRowMsg("b-" + bid, "Kunne ikke gemme."); });
       return;
     }
     var shF = ev.target.closest("[data-shops]");
@@ -1089,7 +1168,7 @@
     if (!sb) return;
     var pend = state.imports.filter(function (x) { return x.status === "pending"; }).length;
     if (pend >= 5) { fail("Du har allerede 5 ønskelister i gang. Vent, til de er hentet."); return; }
-    if (state.imports.length >= 20) { fail("Du har mange ønskelister liggende. Skjul nogle af dem først."); return; }
+    if (state.imports.length >= 20) { fail("Du følger 20 ønskelister. Stop eller skjul en først."); return; }
     var btn = $("fSubmit"); btn.disabled = true;
     var row = { url: url }, into = curSel();
     if (listKnown(into)) row.list_id = into;
@@ -1108,17 +1187,18 @@
   }
 
   // ---- settings ----
+  $("shNotify").addEventListener("change", function () { $("shDigest").disabled = !$("shNotify").checked; });
   $("shopForm").addEventListener("submit", function (ev) {
     ev.preventDefault();
     if (!sb || !user) return;
     var data = { user_id: user.id, shops_always: shopList($("shAlways").value), shops_exclude: shopList($("shExclude").value), shops_only: $("shOnly").checked,
-      notify_email: $("shNotify").checked, sound: muted ? "off" : "on" };
+      notify_email: $("shNotify").checked, mail_digest: $("shDigest").checked, sound: muted ? "off" : "on" };
     var msg = $("shMsg");
     if (data.shops_only && !data.shops_always.length) { msg.textContent = "Skriv mindst én butik på “tjek altid”-listen først."; return; }
     msg.textContent = "Gemmer …";
     sb.from("profiles").upsert(data).then(function (r) {
       if (r && r.error) { msg.textContent = isDenied(r.error) ? "Din adresse har ikke adgang til at gemme endnu." : "Kunne ikke gemme lige nu. Prøv igen om lidt."; onWriteError(r.error); return; }
-      setPrefs({ shops_always: data.shops_always, shops_exclude: data.shops_exclude, shops_only: data.shops_only, notify_email: data.notify_email });
+      setPrefs({ shops_always: data.shops_always, shops_exclude: data.shops_exclude, shops_only: data.shops_only, notify_email: data.notify_email, mail_digest: data.mail_digest });
       msg.textContent = "Gemt.";
     }, function () { msg.textContent = "Kunne ikke gemme lige nu. Prøv igen om lidt."; });
   });

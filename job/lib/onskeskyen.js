@@ -15,6 +15,11 @@ const MAX_REDIRECTS = 5;
 const MAX_WISHES = 60;
 const PAGE_SIZE = 30;
 const MAX_PER_RUN = 3;
+const MAX_SYNCS_PER_RUN = 3;     // standing imports re-read per run, on top of MAX_PER_RUN new imports
+const SYNC_EVERY_MS = 22 * 3600 * 1000;   // a finished import is read again at most once a day
+const MAX_SYNC_FAILS = 7;        // a wish list that cannot be read this many days in a row is given up (status 'error')
+const SEEN_MAX = 300;            // wish ids remembered per import (imports.seen allows 500)
+const TITLE_MAX = 100;           // imports.title
 const NAME_MAX = 140;            // products.name
 const LIST_NAME_MAX = 40;        // lists.name
 const PRODUCT_CAP = 40;          // products per user (products_limit)
@@ -33,6 +38,8 @@ const NOTE = {
   badUrl: 'Linket til ønskelisten kan ikke bruges.',
   saveFail: 'Ønskerne kunne ikke gemmes. Prøv igen senere.',
   full: 'Du følger allerede ' + PRODUCT_CAP + ' varer, så der er ikke plads til flere. Fjern nogle varer først.',
+  retryPrivate: 'Ønskelisten er ikke offentlig lige nu. Prøver igen i morgen.',
+  retryUnavailable: 'Ønskeskyen svarede ikke. Prøver igen i morgen.',
 };
 
 class ImportError extends Error {
@@ -148,7 +155,13 @@ function listError(j) {
   return hit ? new ImportError('private', 'error from the API') : new ImportError('unavailable', 'API error: ' + String(errs[0] && errs[0].message || '').slice(0, 80));
 }
 
-// {title, wishes: [{title, url}], total, truncated}. Up to MAX_WISHES wishes, PAGE_SIZE per request.
+// The id of a wish as text, or null (a wish without an id is added by the first import but never by a later sync).
+function wishId(v) {
+  if (typeof v === 'number' && isFinite(v)) return String(v);
+  return typeof v === 'string' && v.length > 0 && v.length <= 100 ? v : null;
+}
+
+// {title, wishes: [{id, title, url}], total, truncated}. Up to MAX_WISHES wishes, PAGE_SIZE per request.
 async function fetchWishList(id, http) {
   const state = { endpoint: API_URL };
   let cursor = 0, title = null, total = null;
@@ -165,7 +178,7 @@ async function fetchWishList(id, http) {
     if (!w || !Array.isArray(w.data)) throw new ImportError('unavailable', 'unexpected answer');
     if (title === null && typeof wl.title === 'string') title = wl.title;
     if (typeof w.totalCount === 'number') total = w.totalCount;
-    w.data.forEach((x) => { if (x && typeof x === 'object') wishes.push({ title: x.title, url: x.url }); });
+    w.data.forEach((x) => { if (x && typeof x === 'object') wishes.push({ id: wishId(x.id), title: x.title, url: x.url }); });
     const next = w.nextCursor;
     if (typeof next !== 'number' || next <= cursor || !w.data.length) break;
     cursor = next;
@@ -237,10 +250,40 @@ async function pickList(sb, imp, title, log) {
   return { listId: null, name: null, note: '' };
 }
 
-// Returns {status, note, found, added}. Throws ImportError('deadline') when out of time (the import then stays pending).
+const uniqueTail = (ids, max) => {
+  const seen = new Set(), out = [];
+  ids.forEach((i) => { if (!seen.has(i)) { seen.add(i); out.push(i); } });
+  return out.slice(-max);
+};
+
+// From the wishes still to be looked at: the ones that become products (cands), how many were links the person already follows (dup)
+// and how many had no usable name. have: link keys of the person's products, extended here so that a link listed twice counts once.
+function pickCandidates(wishList, have) {
+  let noTitle = 0, dup = 0;
+  const cands = [];
+  wishList.forEach((w) => {
+    const name = cleanName(w.title);
+    if (!name) { noTitle++; return; }
+    const url = cleanWishUrl(w.url), key = url ? urlKey(url) : null;
+    if (key) { if (have.has(key)) { dup++; return; } have.add(key); }
+    cands.push({ id: w.id, name, source_url: url });
+  });
+  return { cands, dup, noTitle };
+}
+
+async function addProducts(sb, imp, take, title, log) {
+  const pl = await pickList(sb, imp, title, log);
+  // status exactly as a product added in the browser: 'pending' (the job fetches the first price), goal 'auto'
+  const rows = take.map((c) => ({ user_id: imp.user_id, name: c.name, source_url: c.source_url, target_type: 'auto', target_value: null, list_id: pl.listId, active: true, status: 'pending' }));
+  await sb.insert('products', rows, false);
+  return pl;
+}
+
+// Returns {status, note, found, added, ...}. Throws ImportError('deadline') when out of time (the import then stays pending).
+// On success it also returns what makes the import a standing link: title, seen (ids of the wishes handled) and listId.
 async function importOne(imp, deps) {
   const { sb, http, log, now } = deps;
-  const result = (status, note, found, added) => ({ status, note: String(note).slice(0, 300), found: found == null ? null : found, added: added == null ? null : added });
+  const result = (status, note, found, added, extra) => Object.assign({ status, note: String(note).slice(0, 300), found: found == null ? null : found, added: added == null ? null : added }, extra || {});
   let listData;
   try {
     const id = await resolveListId(imp.url, http);
@@ -259,26 +302,14 @@ async function importOne(imp, deps) {
   const have = new Set();
   mine.forEach((p) => { const k = p.source_url ? urlKey(p.source_url) : null; if (k) have.add(k); });
 
-  let noTitle = 0, dup = 0;
-  const cands = [];
-  listData.wishes.forEach((w) => {
-    const name = cleanName(w.title);
-    if (!name) { noTitle++; return; }
-    const url = cleanWishUrl(w.url), key = url ? urlKey(url) : null;
-    if (key) { if (have.has(key)) { dup++; return; } have.add(key); }
-    cands.push({ name, source_url: url });
-  });
+  const { cands, dup, noTitle } = pickCandidates(listData.wishes, have);
 
   const room = Math.max(0, PRODUCT_CAP - mine.length);
   if (cands.length && !room) return result('error', NOTE.full, found, 0);
   const take = cands.slice(0, room);
   let listNote = '', listId = null;
   if (take.length) {
-    const pl = await pickList(sb, imp, listData.title, log);
-    listId = pl.listId; listNote = pl.note;
-    // status exactly as a product added in the browser: 'pending' (the job fetches the first price), goal 'auto'
-    const rows = take.map((c) => ({ user_id: imp.user_id, name: c.name, source_url: c.source_url, target_type: 'auto', target_value: null, list_id: listId, active: true, status: 'pending' }));
-    try { await sb.insert('products', rows, false); }
+    try { const pl = await addProducts(sb, imp, take, listData.title, log); listId = pl.listId; listNote = pl.note; }
     catch (e) { log('  Import ' + imp.id + ': kunne ikke gemme varerne: ' + (e && e.message || e)); return result('error', NOTE.saveFail, found, 0); }
   }
 
@@ -289,7 +320,59 @@ async function importOne(imp, deps) {
   if (listData.truncated) parts.push('Kun de første ' + MAX_WISHES + ' ønsker blev hentet.');
   let note = parts.join(' ');
   if (listNote) note = (note ? note + ' ' : '') + listNote.trim();
-  return result('done', note, found, take.length);
+  // every wish with an id has been handled now (added, already followed, no name) except the ones that did not fit
+  const left = new Set(cands.slice(take.length).map((c) => c.id));
+  const seen = uniqueTail(listData.wishes.filter((w) => w.id && !left.has(w.id)).map((w) => w.id), SEEN_MAX);
+  return result('done', note, found, take.length, { title: cleanName(listData.title, TITLE_MAX) || null, seen, listId: imp.list_id ? null : listId });
+}
+
+// One daily re-read of a finished import. Adds the wishes that are new since last time (not in imp.seen); never deletes or
+// changes a product, never adds a wish again that is in imp.seen (also when the person removed the product).
+// imp.seen null = an import from before this feature: the list is only memorised, nothing is added.
+// Returns {ok: true, patch} or {ok: false, kind}. Throws ImportError('deadline') when out of time.
+async function syncOne(imp, deps) {
+  const { sb, http, log } = deps;
+  let listData;
+  try {
+    const id = await resolveListId(imp.url, http);
+    listData = await fetchWishList(id, http);
+  } catch (e) {
+    if (!(e instanceof ImportError)) throw e;
+    if (e.kind === 'deadline') throw e;
+    log('  Opdatering ' + imp.id + ': ' + e.kind + (e.detail ? ' (' + e.detail + ')' : ''));
+    return { ok: false, kind: e.kind === 'private' ? 'private' : 'unavailable' };
+  }
+  const found = listData.wishes.length;
+  const title = cleanName(listData.title, TITLE_MAX) || imp.title || null;
+  const known = Array.isArray(imp.seen) ? imp.seen.map(String) : null;
+  const patch = { found, title, sync_fails: 0, note: null };
+  if (known === null) {
+    patch.seen = uniqueTail(listData.wishes.filter((w) => w.id).map((w) => w.id), SEEN_MAX);
+    return { ok: true, patch, added: 0 };
+  }
+  const knownSet = new Set(known);
+  const fresh = listData.wishes.filter((w) => w.id && !knownSet.has(w.id));
+  let added = 0, handled = [];
+  if (fresh.length) {
+    const mine = await sb.select('products', 'select=id,source_url&user_id=eq.' + encodeURIComponent(imp.user_id) + '&limit=200');
+    const have = new Set();
+    mine.forEach((p) => { const k = p.source_url ? urlKey(p.source_url) : null; if (k) have.add(k); });
+    const { cands } = pickCandidates(fresh, have);
+    const take = cands.slice(0, Math.max(0, PRODUCT_CAP - mine.length));
+    if (take.length) {
+      let pl;
+      try { pl = await addProducts(sb, imp, take, listData.title, log); }
+      catch (e) { log('  Opdatering ' + imp.id + ': kunne ikke gemme varerne: ' + (e && e.message || e)); return { ok: false, kind: 'save' }; }
+      added = take.length;
+      if (!imp.list_id && pl.listId) patch.list_id = pl.listId;
+    }
+    // handled: new wishes that were added, were already followed or had no name; those that did not fit are looked at again tomorrow
+    const left = new Set(cands.slice(take.length).map((c) => c.id));
+    handled = fresh.filter((w) => !left.has(w.id)).map((w) => w.id);
+  }
+  patch.seen = uniqueTail(known.concat(handled), SEEN_MAX);
+  if (added) patch.added = (imp.added || 0) + added;
+  return { ok: true, patch, added };
 }
 
 // ---------------------------------------------------------------- the step in the run
@@ -299,11 +382,14 @@ function isMissingTable(e) {
   return (e && e.status === 404) || /PGRST205|42P01|does not exist|schema cache/i.test(m);
 }
 
-// Pending imports, oldest first, at most MAX_PER_RUN. Quiet when the table does not exist yet.
-// ctx: {sb, fetch, sleep, log, now, pauseMs, timeoutMs, deadlineAt}. Returns {pending, done, error, added, missing}.
+const isoSec = (d) => d.toISOString().replace(/\.\d+Z$/, 'Z');
+
+// 1) Pending imports, oldest first, at most MAX_PER_RUN. 2) Then the standing ones: finished imports not read for a day, the
+// longest-unread first, at most MAX_SYNCS_PER_RUN. Quiet when the table does not exist yet.
+// ctx: {sb, fetch, sleep, log, now, pauseMs, timeoutMs, deadlineAt}. Returns {pending, done, error, added, missing, synced, syncAdded, syncFailed}.
 async function runImports(ctx) {
   const log = ctx.log || (() => {});
-  const stats = { pending: 0, done: 0, error: 0, added: 0, missing: false };
+  const stats = { pending: 0, done: 0, error: 0, added: 0, missing: false, synced: 0, syncAdded: 0, syncFailed: 0 };
   let rows;
   try {
     rows = await ctx.sb.select('imports', 'select=id,user_id,list_id,url&status=eq.pending&order=created_at.asc&limit=' + MAX_PER_RUN);
@@ -312,29 +398,77 @@ async function runImports(ctx) {
     log('Ønskelister: kunne ikke læse importer: ' + (e && e.message || e));
     return stats;
   }
-  if (!Array.isArray(rows) || !rows.length) return stats;
   const http = makeHttp({ fetch: ctx.fetch, sleep: ctx.sleep, pauseMs: ctx.pauseMs, timeoutMs: ctx.timeoutMs, deadlineAt: ctx.deadlineAt });
   const deps = { sb: ctx.sb, http, log, now: ctx.now };
-  for (const imp of rows.slice(0, MAX_PER_RUN)) {
+  const nowIso = () => isoSec(ctx.now ? ctx.now() : new Date());
+  let outOfTime = false;
+  for (const imp of (Array.isArray(rows) ? rows : []).slice(0, MAX_PER_RUN)) {
     stats.pending++;
     let res;
     try { res = await importOne(imp, deps); }
     catch (e) {
-      if (e instanceof ImportError && e.kind === 'deadline') { log('Ønskelister: tidsgrænse, resten venter til næste kørsel.'); break; }
+      if (e instanceof ImportError && e.kind === 'deadline') { log('Ønskelister: tidsgrænse, resten venter til næste kørsel.'); outOfTime = true; break; }
       log('  Import ' + imp.id + ': ' + (e && e.message || e));      // a database read failed: the import stays pending, tried again next run
       continue;
     }
+    const body = { status: res.status, note: res.note || null, found: res.found, added: res.added, done_at: nowIso() };
+    const full = Object.assign({}, body);
+    if (res.status === 'done') { full.synced_at = body.done_at; full.sync_fails = 0; full.title = res.title; full.seen = res.seen; if (res.listId) full.list_id = res.listId; }
+    const filter = 'id=eq.' + encodeURIComponent(imp.id) + '&status=eq.pending';
     try {
-      await ctx.sb.patch('imports', 'id=eq.' + encodeURIComponent(imp.id) + '&status=eq.pending',
-        { status: res.status, note: res.note || null, found: res.found, added: res.added, done_at: (ctx.now ? ctx.now() : new Date()).toISOString().replace(/\.\d+Z$/, 'Z') });
+      try { await ctx.sb.patch('imports', filter, full); }
+      catch (e) {
+        // a database without the sync columns yet (schema.sql not run again): save the plain result so the import is not read twice
+        if (full === body || !/42703|PGRST204|column/i.test(String(e && (e.body || e.message) || ''))) throw e;
+        await ctx.sb.patch('imports', filter, body);
+      }
     } catch (e) { log('  Import ' + imp.id + ': kunne ikke gemme resultatet: ' + (e && e.message || e)); continue; }
     if (res.status === 'done') { stats.done++; stats.added += res.added || 0; } else stats.error++;
     log('  Ønskeliste: ' + res.status + (res.added != null ? ', ' + res.added + ' tilføjet' : '') + (res.note ? ' (' + res.note + ')' : ''));
   }
+  if (!outOfTime) await runSyncs(ctx, deps, stats, nowIso);
   return stats;
 }
 
+async function runSyncs(ctx, deps, stats, nowIso) {
+  const { sb, log } = deps;
+  const now = (ctx.now ? ctx.now() : new Date()).getTime();
+  let rows;
+  try {
+    rows = await sb.select('imports', 'select=id,user_id,list_id,url,seen,sync_fails,synced_at,title,added&status=eq.done&order=synced_at.asc.nullsfirst&limit=50');
+  } catch (e) { log('Ønskelister: kunne ikke læse opdateringer: ' + (e && e.message || e)); return; }
+  const due = (Array.isArray(rows) ? rows : []).filter((r) => {
+    const at = r.synced_at ? Date.parse(r.synced_at) : NaN;
+    return !isFinite(at) || now - at >= SYNC_EVERY_MS;
+  }).slice(0, MAX_SYNCS_PER_RUN);
+  for (const imp of due) {
+    let res;
+    try { res = await syncOne(imp, deps); }
+    catch (e) {
+      if (e instanceof ImportError && e.kind === 'deadline') { log('Ønskelister: tidsgrænse, resten opdateres næste gang.'); return; }
+      log('  Opdatering ' + imp.id + ': ' + (e && e.message || e));
+      res = { ok: false, kind: 'save' };
+    }
+    stats.synced++;
+    const filter = 'id=eq.' + encodeURIComponent(imp.id) + '&status=eq.done';
+    let body;
+    if (res.ok) body = Object.assign({ synced_at: nowIso() }, res.patch);
+    else if (res.kind === 'save') body = { synced_at: nowIso() };           // our own trouble: try again tomorrow, no failure counted against the list
+    else {
+      const fails = (imp.sync_fails || 0) + 1;
+      body = { synced_at: nowIso(), sync_fails: fails };
+      if (fails >= MAX_SYNC_FAILS) { body.status = 'error'; body.note = res.kind === 'private' ? NOTE.private : NOTE.unavailable; }
+      else body.note = res.kind === 'private' ? NOTE.retryPrivate : NOTE.retryUnavailable;
+      stats.syncFailed++;
+    }
+    try { await sb.patch('imports', filter, body); }
+    catch (e) { log('  Opdatering ' + imp.id + ': kunne ikke gemme: ' + (e && e.message || e)); continue; }
+    if (res.ok) stats.syncAdded += res.added || 0;
+    log('  Ønskeliste fulgt: ' + (res.ok ? res.added + ' nye' : 'kunne ikke læses (' + res.kind + ')'));
+  }
+}
+
 module.exports = {
-  runImports, importOne, parseListUrl, resolveListId, fetchWishList, makeHttp, cleanWishUrl, urlKey, cleanName, isMissingTable,
-  ImportError, QUERY, API_URL, NOTE, MAX_PER_RUN, MAX_WISHES, PAGE_SIZE, PRODUCT_CAP, LIST_CAP, NAME_MAX,
+  runImports, runSyncs, importOne, syncOne, parseListUrl, resolveListId, fetchWishList, makeHttp, cleanWishUrl, urlKey, cleanName, isMissingTable,
+  ImportError, QUERY, API_URL, NOTE, MAX_PER_RUN, MAX_SYNCS_PER_RUN, MAX_SYNC_FAILS, SYNC_EVERY_MS, MAX_WISHES, PAGE_SIZE, PRODUCT_CAP, LIST_CAP, NAME_MAX,
 };

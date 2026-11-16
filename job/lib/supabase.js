@@ -23,7 +23,8 @@ function makeClient(baseUrl, key, fetchImpl) {
   }
   return {
     select: (table, query) => call('GET', '/rest/v1/' + table + '?' + query),
-    patch: (table, filter, body) => call('PATCH', '/rest/v1/' + table + '?' + filter, body, { Prefer: 'return=minimal' }),
+    // returning: true gives the changed rows back (to tell how many were changed), otherwise nothing.
+    patch: (table, filter, body, returning) => call('PATCH', '/rest/v1/' + table + '?' + filter, body, { Prefer: returning ? 'return=representation' : 'return=minimal' }),
     // rows: one object or an array (one request). returning: true gives the stored rows back (ids), otherwise nothing.
     insert: (table, rows, returning) => call('POST', '/rest/v1/' + table, rows, { Prefer: returning ? 'return=representation' : 'return=minimal' }),
     authUser: (id) => call('GET', '/auth/v1/admin/users/' + encodeURIComponent(id)),
