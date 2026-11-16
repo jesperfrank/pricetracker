@@ -6,7 +6,8 @@ Du skal bruge: en GitHub-konto med repoet, en gratis Supabase-konto og en gratis
 
 1. Opret et projekt på supabase.com (region EU, f.eks. Frankfurt). Gem database-adgangskoden.
 2. Åbn **SQL Editor** > **New query**, indsæt hele indholdet af `supabase/schema.sql` og tryk **Run**. Filen kan køres igen uden skade.
-3. Åbn **Table Editor** > `allowed_emails` og tilføj en række pr. person, der må bruge siden: `email` med **små bogstaver**, evt. en `note`. Husk din egen adresse. (Kun du kan se og redigere tabellen; almindelige brugere har ingen adgang.)
+3. Åbn **Table Editor** > `allowed_emails` og tilføj en række pr. person, der må bruge siden: `email` med **små bogstaver**, evt. en `note`. Husk din egen adresse. (Kun du kan se og redigere tabellen; almindelige brugere har ingen adgang.) Du behøver ikke tilføje alle i hånden: andre kan bede om adgang på siden, se "Adgangsanmodninger" nedenfor.
+4. Din egen række bliver automatisk administrator (`is_admin`): kør `schema.sql` igen, efter du har tilføjet dig selv (ved en ny database er tabellen tom første gang). Filen gør rækken med den tidligste `added_at` til administrator, hvis ingen er det endnu. Kør filen igen, når du får en opdatering: den ændrer ikke på, hvem der er administrator. Vil du have en ekstra administrator, så sæt `is_admin` til `true` på den række i Table Editor.
 
 ## 2. Log ind med e-mail (magic link)
 
@@ -68,8 +69,19 @@ Man kan skrive et produktnavn i stedet for et link. Produktet står så som "Fin
 3. Teksten er værdien til hemmeligheden `x-resolver-token`, som navne-assistenten bruger (sendes som HTTP-headeren `x-resolver-token`). Assistenten bruger kun den offentlige anon/publishable-nøgle, aldrig service_role-nøglen. Del ikke tokenet andre steder, og læg det ikke i repoet.
 4. Vil du skifte tokenet: `update public.resolver_secret set token = replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');`, og opdatér hemmeligheden hos assistenten.
 
+## Adgangsanmodninger ("bed om adgang")
+
+Kør hele `supabase/schema.sql` igen i **SQL Editor** (det er sikkert og kan gentages), så tabellen `access_requests` og funktionerne bag oprettes.
+
+- Den, der ikke har adgang, kan på login-skærmen trykke "Har du ikke adgang endnu? Bed om adgang" og skrive sin e-mail og sit navn. Prøver nogen at logge ind med en adresse, der ikke er godkendt, får de samme formular med adressen udfyldt. Der kan højst vente 30 anmodninger ad gangen.
+- Prisjobbet (hvert 15. minut) sender dig, og alle andre administratorer, én mail med de nye anmodninger. Det kræver **Resend** (`RESEND_API_KEY`, `MAIL_FROM` og `SITE_URL`, trin 5 og 6). Uden Resend sendes ingen mails; anmodningerne ligger stadig i siden.
+- Log ind på siden som administrator. Nederst findes afsnittet **Adgang**, og et tal ved siden af navnet viser, hvor mange der venter. Tryk **Godkend** eller **Afvis** (Afvis spørger først). Godkender du, kommer adressen i `allowed_emails`, og personen kan logge ind med det samme.
+- Næste gang jobbet kører, får den godkendte en mail: "Du har fået adgang til Prisvagten" med link til siden og en linje om, hvordan man logger ind.
+- Under **Hvem har adgang** kan du trykke **Fjern adgang** (med bekræftelse). Administratorer kan ikke fjernes her. Personens produkter bliver liggende. Kommer personen tilbage, skal vedkommende bede om adgang igen.
+- Siden kan ikke selv sende mails, så uden Resend skal du selv give besked til dem, du godkender.
+
 ## Hverdagen
 
-- Ny person: tilføj e-mailen i `allowed_emails` og send dem linket til siden.
+- Ny person: de kan bede om adgang på siden (se ovenfor), eller du tilføjer e-mailen i `allowed_emails` og sender dem linket.
 - Jobbet henter hver produktside højst én gang pr. kørsel, med 1,5 sekunds pause, og forsøger aldrig at omgå en blokering. Svarer Prisjagt med 403/429, springer jobbet resten over i den kørsel, og produktet får en note.
 - Et produkt i fejl-tilstand prøves igen efter 6 timer (produkter uden link, altså kun et navn, springes over, til der er et link). Skifter nogen linket, starter produktet forfra.

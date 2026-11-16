@@ -20,8 +20,12 @@ const FAKE = `
 (function () {
   var init = window.__INIT || {};
   var db = window.__db = { products: init.products || [], profiles: init.profiles || [], ops: [], deny: false, otpError: null,
-    session: init.session || null, seq: 100 };
+    session: init.session || null, seq: 100, admin: !!init.admin, requests: init.requests || [], allowedList: init.allowed || [], rpcs: [], askReply: "requested" };
   var authCb = null, rt = [];
+  // the 60-second poll: remember its callback so a test can run it at once
+  var ticks = [], realSetInterval = window.setInterval;
+  window.setInterval = function (fn, ms) { if (ms === 60000) ticks.push(fn); return realSetInterval.apply(window, arguments); };
+  window.__tick = function () { ticks.forEach(function (f) { f(); }); };
   var JOB = ["status","title","variants","offers","history","normal_price","verdict","warning","check_note","last_checked","notified_price","notified_at"];
   function clone(x) { return JSON.parse(JSON.stringify(x)); }
   function builder(table) {
@@ -74,10 +78,33 @@ const FAKE = `
   }
   db.writes = function () { return db.ops.filter(function (o) { return o.table !== 'profiles'; }); };
   window.__emit = function () { rt.forEach(function (f) { f({ eventType: "UPDATE" }); }); };
+  function rpc(name, args) {
+    db.rpcs.push({ name: name, args: clone(args || {}) });
+    return new Promise(function (resolve) { setTimeout(function () {
+      var ADMIN = ["admin_list_requests", "admin_decide", "admin_list_allowed", "admin_remove_allowed"];
+      if (ADMIN.indexOf(name) >= 0 && !db.admin) return resolve({ data: null, error: { code: "42501", message: "admin only" } });
+      if (db.rpcFail && name !== "admin_list_requests" && name !== "admin_list_allowed") return resolve({ data: null, error: { message: "boom" } });
+      if (name === "request_access") return resolve(db.askError ? { data: null, error: { message: "boom" } } : { data: db.askReply, error: null });
+      if (name === "admin_list_requests") return resolve({ data: clone(db.requests), error: null });
+      if (name === "admin_list_allowed") return resolve({ data: clone(db.allowedList), error: null });
+      if (name === "admin_decide") {
+        var had = db.requests.some(function (r) { return r.email === args.p_email; });
+        db.requests = db.requests.filter(function (r) { return r.email !== args.p_email; });
+        if (had && args.p_approve) db.allowedList.push({ email: args.p_email, note: "Godkendt via adgangsanmodning", added_at: new Date().toISOString(), is_admin: false });
+        return resolve({ data: had, error: null });
+      }
+      if (name === "admin_remove_allowed") {
+        var n0 = db.allowedList.length;
+        db.allowedList = db.allowedList.filter(function (a) { return a.email !== args.p_email || a.is_admin; });
+        return resolve({ data: db.allowedList.length < n0, error: null });
+      }
+      resolve({ data: null, error: { message: "unknown rpc" } });
+    }, 5); });
+  }
   window.PV_CREATE_CLIENT = function (url, key) {
     db.created = { url: url, key: key };
     return {
-      from: builder,
+      from: builder, rpc: rpc,
       auth: {
         getSession: function () { return Promise.resolve({ data: { session: db.session }, error: null }); },
         onAuthStateChange: function (cb) { authCb = cb; return { data: { subscription: { unsubscribe: function () {} } } }; },
@@ -114,7 +141,7 @@ async function open(opts = {}) {
   await page.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
   // config.js in the repo holds the real project's values, so both cases are served from the test, never from the file.
   await page.route(/\/config\.js$/, r => r.fulfill({ contentType: "text/javascript", body: opts.config === false ? "window.PV_CONFIG={supabaseUrl:\"\",supabaseAnonKey:\"\"};" : 'window.PV_CONFIG={supabaseUrl:"https://x.supabase.test",supabaseAnonKey:"anon"};' }));
-  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], profiles: opts.profiles || [] };
+  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [] };
   await page.addInitScript("window.__INIT = " + JSON.stringify(init) + ";");
   if (opts.fake !== false) await page.addInitScript(FAKE);
   if (opts.storage) await page.addInitScript(s => { for (const k in s) localStorage.setItem(k, s[k]); }, opts.storage);
@@ -426,6 +453,145 @@ let base;
     await p.waitForFunction(() => document.querySelectorAll(".item").length === 2, null, { timeout: 6000 });
     check("refetch on tab focus picks up new rows", true);
     await p.context().close();
+  }
+
+  // 13. ask for access (signed out)
+  {
+    const p = await open({ session: false, label: "ask" });
+    check("ask: link under the login form, form hidden at first", /Har du ikke adgang endnu\? Bed om adgang/.test(await p.textContent("#askToggle")) && !(await p.isVisible("#askForm")));
+    await p.click("#askToggle");
+    check("ask: link reveals e-mail and name fields", await p.isVisible("#aEmail") && await p.isVisible("#aName") && await p.isVisible("#aSubmit"));
+    await p.fill("#aEmail", "ikke-en-adresse"); await p.click("#aSubmit");
+    check("ask: bad address rejected locally, no rpc", /gyldig/.test(await p.textContent("#aMsg")) && (await p.evaluate(() => window.__db.rpcs.length)) === 0);
+    const replies = [
+      ["requested", /Tak\. Du får en mail, når du er godkendt\./],
+      ["pending", /allerede bedt om adgang/],
+      ["allowed", /allerede adgang.*login-formularen ovenfor/],
+      ["full", /mange anmodninger/],
+      ["invalid", /gyldig e-mailadresse/],
+      ["rejected", /ikke givet adgang/]
+    ];
+    for (const [reply, re] of replies) {
+      await p.evaluate(r => { window.__db.askReply = r; window.__db.rpcs.length = 0; }, reply);
+      await p.click("#askToggle"); await p.click("#askToggle");        // close and open again: form visible
+      if (!(await p.isVisible("#askForm"))) await p.evaluate(() => { document.getElementById("askForm").hidden = false; });
+      await p.fill("#aEmail", "  Ny@Person.dk "); await p.fill("#aName", "Ny  Person");
+      await p.click("#aSubmit");
+      await p.waitForFunction(() => window.__db.rpcs.length === 1 && !/Sender/.test(document.getElementById("aMsg").textContent));
+      const t = await p.textContent("#aMsg"), call = await p.evaluate(() => window.__db.rpcs[0]);
+      check("ask: '" + reply + "' -> specific Danish message", re.test(t) && call.name === "request_access" && call.args.p_email === "Ny@Person.dk" && call.args.p_name === "Ny Person", t + " " + JSON.stringify(call));
+    }
+    await p.evaluate(() => { window.__db.askError = true; document.getElementById("askForm").hidden = false; });
+    await p.fill("#aEmail", "a@b.dk"); await p.click("#aSubmit");
+    await p.waitForFunction(() => /Kunne ikke/.test(document.getElementById("aMsg").textContent));
+    check("ask: rpc failure -> honest message, form stays", await p.isVisible("#askForm"));
+    check("ask: no sign-in attempt was made", (await ops(p)).filter(o => o.op === "otp").length === 0);
+    await p.context().close();
+
+    // a failed login for an address that is not allowed opens the form, pre-filled
+    const q = await open({ session: false, label: "ask-prefill" });
+    await q.evaluate(() => { window.__db.otpError = { status: 422, message: "Signups not allowed for otp" }; });
+    await q.fill("#lEmail", "ukendt@familie.dk"); await q.click("#lSubmit");
+    await q.waitForSelector("#askForm:not([hidden])");
+    check("ask: not-allowed login shows the form pre-filled with that address", (await q.inputValue("#aEmail")) === "ukendt@familie.dk" && /jeren/i.test(await q.textContent("#lMsg")));
+    check("ask: name field gets focus", await q.evaluate(() => document.activeElement && document.activeElement.id === "aName"));
+    await q.evaluate(() => { window.__db.otpError = { status: 429, message: "email rate limit exceeded" }; document.getElementById("askBox").hidden = true; });
+    await q.fill("#lEmail", "x@familie.dk"); await q.click("#lSubmit");
+    await q.waitForFunction(() => !document.getElementById("lMsg").hidden && /for mange/.test(document.getElementById("lMsg").textContent));
+    check("ask: other login errors (rate limit) do not open the form", !(await q.isVisible("#askBox")));
+    await q.context().close();
+
+    const w = await open({ session: false, width: 400, label: "ask-400" });
+    await w.click("#askToggle"); await w.fill("#aEmail", "en.meget.lang.adresse.der.fylder.en.del@et-langt-domaenenavn-til-test.example.dk");
+    await w.evaluate(() => { window.__db.askReply = "rejected"; }); await w.click("#aSubmit");
+    await w.waitForFunction(() => /ikke givet adgang/.test(document.getElementById("aMsg").textContent));
+    const ow = await w.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    check("ask: no horizontal overflow at 400 px (form open, message shown)", ow.sw <= ow.cw, JSON.stringify(ow));
+    await w.context().close();
+  }
+
+  // 14. owner (admin): requests and who has access
+  {
+    const reqs = () => [{ email: "kim@example.dk", name: "Kim <b>Hansen</b>", created_at: "2026-11-15T10:00:00Z" }, { email: "lis@example.dk", name: null, created_at: "2026-11-16T08:00:00Z" }];
+    const allowed = () => [{ email: "mor@familie.dk", note: "ejer", added_at: "2026-01-01T00:00:00Z", is_admin: true }, { email: "far@familie.dk", note: null, added_at: "2026-02-01T00:00:00Z", is_admin: false }];
+    const p = await open({ admin: true, requests: reqs(), allowed: allowed(), label: "admin" });
+    await p.waitForSelector("#accessBox:not([hidden])");
+    await p.waitForSelector("#reqList .req");
+    check("admin: 'Adgang' section with both pending requests", /Adgang/.test(await p.textContent("#accessBox h3")) && (await p.locator("#reqList .req").count()) === 2 && /kim@example\.dk/.test(await p.textContent("#reqList")));
+    check("admin: name shown as text (escaped), missing name handled", (await p.locator("#reqList b").first().textContent()) === "Kim <b>Hansen</b>" && (await p.locator("#reqList .req b b").count()) === 0 && /Uden navn/.test(await p.textContent("#reqList")));
+    check("admin: count next to the wordmark", await p.isVisible("#reqBadge") && /^2 /.test(await p.textContent("#reqBadge")));
+    check("admin: no error text on screen", !/fejl|Kunne ikke/i.test(await p.textContent("#accMsg")));
+    // approve
+    await p.evaluate(() => { window.__db.rpcs.length = 0; });
+    await p.click('#reqList [data-aact="approve"][data-email="kim@example.dk"]');
+    await p.waitForFunction(() => !/kim@example\.dk/.test(document.getElementById("reqList").textContent));
+    let calls = await p.evaluate(() => window.__db.rpcs.filter(r => r.name === "admin_decide"));
+    check("admin: Godkend calls admin_decide(email, true) and the row disappears", calls.length === 1 && calls[0].args.p_email === "kim@example.dk" && calls[0].args.p_approve === true && (await p.locator("#reqList .req").count()) === 1);
+    check("admin: badge count follows", /^1 /.test(await p.textContent("#reqBadge")));
+    await p.waitForFunction(() => /kim@example\.dk/.test(document.getElementById("allowedList").textContent));
+    check("admin: approved person appears in the access list", true);
+    // reject needs confirmation
+    await p.evaluate(() => { window.__db.rpcs.length = 0; });
+    await p.click('#reqList [data-aact="reject"]');
+    check("admin: Afvis asks first, no rpc yet", /Afvis lis@example\.dk\?/.test(await p.textContent("#reqList")) && (await p.evaluate(() => window.__db.rpcs.filter(r => r.name === "admin_decide").length)) === 0);
+    await p.click('#reqList [data-aact="cancel"]');
+    check("admin: 'Behold' cancels", (await p.locator('#reqList [data-aact="approve"]').count()) === 1 && (await p.evaluate(() => window.__db.rpcs.filter(r => r.name === "admin_decide").length)) === 0);
+    await p.click('#reqList [data-aact="reject"]'); await p.click('#reqList [data-aact="reject-yes"]');
+    await p.waitForFunction(() => /Ingen venter/.test(document.getElementById("reqList").textContent));
+    calls = await p.evaluate(() => window.__db.rpcs.filter(r => r.name === "admin_decide"));
+    check("admin: confirmed Afvis calls admin_decide(email, false) and the row disappears", calls.length === 1 && calls[0].args.p_email === "lis@example.dk" && calls[0].args.p_approve === false);
+    check("admin: badge hidden when nothing waits", !(await p.isVisible("#reqBadge")));
+    // who has access
+    await p.click("#allowedBox summary");
+    check("admin: list of who has access; no removal offered for the owner", (await p.locator('#allowedList [data-aact="remove"]').count()) === 2 && !/mor@familie\.dk[^]*Fjern adgang[^]*kim/.test("") && /Ejer/.test(await p.textContent("#allowedList")) && /produkter bliver liggende/.test(await p.textContent("#allowedBox")));
+    check("admin: owner row has no 'Fjern adgang'", (await p.locator('#allowedList .req', { hasText: "mor@familie.dk" }).locator('[data-aact="remove"]').count()) === 0);
+    await p.evaluate(() => { window.__db.rpcs.length = 0; });
+    await p.click('#allowedList .req:has-text("far@familie.dk") [data-aact="remove"]');
+    check("admin: Fjern adgang asks first, no rpc yet", /Fjern adgang for far@familie\.dk\?/.test(await p.textContent("#allowedList")) && (await p.evaluate(() => window.__db.rpcs.filter(r => r.name === "admin_remove_allowed").length)) === 0);
+    check("admin: the list stays open while confirming", await p.evaluate(() => document.getElementById("allowedBox").open));
+    const ow = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    await p.click('#allowedList [data-aact="remove-yes"]');
+    await p.waitForFunction(() => !/far@familie\.dk/.test(document.getElementById("allowedList").textContent));
+    calls = await p.evaluate(() => window.__db.rpcs.filter(r => r.name === "admin_remove_allowed"));
+    check("admin: confirmed removal calls admin_remove_allowed(email) and the row disappears", calls.length === 1 && calls[0].args.p_email === "far@familie.dk" && /Adgang fjernet/.test(await p.textContent("#accMsg")));
+    // a failing call is reported honestly and changes nothing on screen
+    await p.context().close();
+    await (async () => {
+      const r = await open({ admin: true, requests: [{ email: "nina@example.dk", name: "Nina", created_at: "2026-11-16T09:00:00Z" }], allowed: allowed(), label: "admin-fail" });
+      await r.waitForSelector("#reqList .req");
+      await r.evaluate(() => { window.__db.rpcFail = true; });
+      await r.click('#reqList [data-aact="approve"]');
+      await r.waitForFunction(() => /Kunne ikke gemme/.test(document.getElementById("accMsg").textContent));
+      check("admin: failing decision -> message, row stays", (await r.locator("#reqList .req").count()) === 1);
+      await r.context().close();
+    })();
+
+    // the 60-second poll refreshes the section (the timer is faked to run at once)
+    const t = await open({ admin: true, requests: [], allowed: allowed(), label: "admin-poll" });
+    await t.waitForSelector("#accessBox:not([hidden])");
+    check("admin: empty state text", /Ingen venter på svar/.test(await t.textContent("#reqList")) && !(await t.isVisible("#reqBadge")));
+    await t.evaluate(() => { window.__db.requests.push({ email: "ny@example.dk", name: "Ny", created_at: "2026-11-16T09:00:00Z" }); });
+    await t.evaluate(() => { window.__tick(); });
+    await t.waitForFunction(() => /ny@example\.dk/.test(document.getElementById("reqList").textContent));
+    check("admin: the 60-second poll picks up a new request and shows the count", /^1 /.test(await t.textContent("#reqBadge")));
+    await t.context().close();
+
+    // non-admin: nothing at all, and no error
+    const n = await open({ admin: false, products: [row("test-sony-xm5", { id: "x5" })], label: "non-admin" });
+    await n.waitForSelector(".item"); await n.waitForTimeout(300);
+    const calls2 = await n.evaluate(() => window.__db.rpcs.map(r => r.name));
+    check("non-admin: asked the server (admin_list_requests) but sees no 'Adgang' section, badge or message", calls2.indexOf("admin_list_requests") >= 0 && !(await n.isVisible("#accessBox")) && !(await n.isVisible("#reqBadge")) && !(await n.isVisible("#accMsg")) && !/Adgang/.test(await n.evaluate(() => document.body.innerText)));
+    check("non-admin: no admin data fetched", calls2.every(x => x !== "admin_list_allowed"));
+    await n.context().close();
+
+    // 400 px: admin with everything open, confirmation shown
+    const m = await open({ admin: true, width: 400, requests: [{ email: "en.meget.lang.adresse.der.fylder.en.del@et-langt-domaenenavn-til-test.example.dk", name: "Et meget langt navn der også fylder en hel del på en smal skærm", created_at: "2026-11-15T10:00:00Z" }], allowed: allowed().concat([{ email: "en.anden.meget.lang.adresse.der.fylder@et-langt-domaenenavn-til-test.example.dk", note: "en lang note om hvem det er", added_at: "2026-03-01T00:00:00Z", is_admin: false }]), label: "admin-400" });
+    await m.waitForSelector("#reqList .req"); await m.click("#allowedBox summary");
+    await m.waitForSelector('#allowedList [data-aact="remove"]');
+    await m.click('#reqList [data-aact="reject"]'); await m.click('#allowedList .req:nth-child(3) [data-aact="remove"]');
+    const mw = await m.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    check("admin: no horizontal overflow at 400 px (requests, list and confirmations open)", mw.sw <= mw.cw, JSON.stringify(mw) + " before: " + JSON.stringify(ow));
+    await m.context().close();
   }
 
   // 11. layout at 400px, 12. screenshots

@@ -4,7 +4,7 @@
 const { fmtKr } = require('./pricing');
 
 function clean(s, max) {
-  return String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max || 160);
+  return String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max || 160);
 }
 
 // hits: [{name, price, store, url, verdict (text|null), warning (text|null)}]
@@ -25,6 +25,28 @@ function composeMail(hits, siteUrl) {
   return { subject, text: lines.join('\n') + '\n' };
 }
 
+// requests: [{email, name}] (untrusted text: plain text only, line breaks and control characters removed, lengths capped)
+function composeOwnerMail(requests, siteUrl) {
+  const n = requests.length;
+  const subject = n === 1 ? 'Prisvagten: 1 ny anmodning om adgang' : 'Prisvagten: ' + n + ' nye anmodninger om adgang';
+  const lines = [n === 1 ? 'En person har bedt om adgang til Prisvagten:' : n + ' personer har bedt om adgang til Prisvagten:', ''];
+  requests.forEach((r) => {
+    const name = clean(r.name, 80);
+    lines.push('- ' + (name ? name + ' ' : '') + '<' + clean(r.email, 200) + '>');
+  });
+  lines.push('');
+  if (siteUrl) lines.push('Åbn Prisvagten: ' + clean(siteUrl, 300), '');
+  lines.push('Log ind og tryk "Godkend" eller "Afvis" under "Adgang" nederst på siden.');
+  return { subject, text: lines.join('\n') + '\n' };
+}
+
+function composeApprovedMail(siteUrl) {
+  const lines = ['Din anmodning er godkendt. Du kan nu bruge Prisvagten.', ''];
+  if (siteUrl) lines.push('Åbn siden: ' + clean(siteUrl, 300), '');
+  lines.push('Sådan logger du ind: skriv din e-mailadresse på siden, og tryk "Send login-link". Så får du et link på mail. Åbn det, så er du inde.');
+  return { subject: 'Du har fået adgang til Prisvagten', text: lines.join('\n') + '\n' };
+}
+
 async function sendResend(fetchImpl, apiKey, from, to, mail) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), 30000);
@@ -32,7 +54,7 @@ async function sendResend(fetchImpl, apiKey, from, to, mail) {
     const r = await fetchImpl('https://api.resend.com/emails', {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from, to: [to], subject: mail.subject, text: mail.text }),
+      body: JSON.stringify({ from, to: Array.isArray(to) ? to : [to], subject: mail.subject, text: mail.text }),
       signal: ctl.signal,
     });
     if (!r.ok) {
@@ -42,4 +64,4 @@ async function sendResend(fetchImpl, apiKey, from, to, mail) {
   } finally { clearTimeout(t); }
 }
 
-module.exports = { composeMail, sendResend, clean };
+module.exports = { composeMail, composeOwnerMail, composeApprovedMail, sendResend, clean };

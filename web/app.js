@@ -21,6 +21,7 @@
 
   var state = { products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
     prefs: { always: [], exclude: [], only: false, notify: true }, profileSound: null };
+  var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
   var sb = null, user = null, channel = null, pollTimer = null, fetching = false, again = false, lastFetch = 0, fetchSeq = 0;
 
   // ---- sound: recorded clips (public domain / CC0, Wikimedia Commons), confetti and a price count-down ----
@@ -566,16 +567,17 @@
     state.loaded = false; state.products = []; state.canWrite = true;
     $("status").textContent = "Henter listen …";
     loadSounds();
-    ensureProfile(); fetchProducts();
+    ensureProfile(); fetchProducts(); fetchAccess();
     try {
       channel = sb.channel("pv-products").on("postgres_changes", { event: "*", schema: "public", table: "products" }, function () { refreshSoon(); }).subscribe();
     } catch (e) { channel = null; }
-    pollTimer = setInterval(function () { if (document.visibilityState === "visible") fetchProducts(); }, 60000);
+    pollTimer = setInterval(function () { if (document.visibilityState === "visible") { fetchProducts(); fetchAccess(); } }, 60000);
   }
   function stopSession() {
     clearInterval(pollTimer); pollTimer = null;
     try { if (channel) sb.removeChannel(channel); } catch (e) {}
     channel = null; state.products = []; state.loaded = false;
+    access.admin = false; access.requests = []; access.allowed = []; access.confirm = null; access.seq++; accMsg(""); renderAccess();
   }
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && user) fetchProducts(); });
   window.addEventListener("focus", function () { if (user && Date.now() - lastFetch > 3000) fetchProducts(); });
@@ -670,6 +672,84 @@
   });
   $("list").addEventListener("focusout", function () { setTimeout(function () { if (renderPending) render(); }, 0); });
 
+  // ---- access section for the owner (admin): requests waiting, and who has access ----
+  // admin_list_requests only succeeds for an admin. For everybody else it fails and nothing is shown, and nothing is said.
+  function accMsg(t) { access.msg = t || ""; var el = $("accMsg"); el.textContent = access.msg; el.hidden = !access.msg; }
+  function renderAccess() {
+    var box = $("accessBox"), badge = $("reqBadge"), n = access.requests.length;
+    box.hidden = !(user && access.admin);
+    badge.hidden = box.hidden || !n;
+    badge.textContent = n + " venter på adgang";
+    if (box.hidden) return;
+    var conf = access.confirm;
+    $("reqList").innerHTML = n ? access.requests.map(function (r) {
+      var e = esc(r.email), act;
+      if (conf && conf.kind === "reject" && conf.email === r.email)
+        act = '<span>Afvis ' + e + '?</span><button type="button" class="link warn" data-aact="reject-yes" data-email="' + e + '">Ja, afvis</button>' +
+          '<button type="button" class="link" data-aact="cancel">Behold</button>';
+      else
+        act = '<button type="button" class="link" data-aact="approve" data-email="' + e + '">Godkend</button>' +
+          '<button type="button" class="link warn" data-aact="reject" data-email="' + e + '">Afvis</button>';
+      var when = Date.parse(r.created_at);
+      return '<div class="req"><div><b>' + esc(r.name || "Uden navn") + '</b><div class="meta">' + e +
+        (isFinite(when) ? " · bad om adgang " + esc(dtFmt.format(new Date(when))) : "") + '</div></div><div class="acts2">' + act + '</div></div>';
+    }).join("") : '<p class="meta">Ingen venter på svar.</p>';
+    $("allowedSum").textContent = "Hvem har adgang" + (access.allowed.length ? " (" + access.allowed.length + ")" : "");
+    $("allowedList").innerHTML = access.allowed.map(function (a) {
+      var e = esc(a.email), act = "";
+      if (a.is_admin) act = '<span class="meta">Ejer</span>';
+      else if (conf && conf.kind === "remove" && conf.email === a.email)
+        act = '<span>Fjern adgang for ' + e + '?</span><button type="button" class="link warn" data-aact="remove-yes" data-email="' + e + '">Ja, fjern adgang</button>' +
+          '<button type="button" class="link" data-aact="cancel">Behold</button>';
+      else act = '<button type="button" class="link warn" data-aact="remove" data-email="' + e + '">Fjern adgang</button>';
+      return '<div class="req"><div>' + e + (a.note ? '<div class="meta">' + esc(a.note) + '</div>' : '') + '</div><div class="acts2">' + act + '</div></div>';
+    }).join("");
+  }
+  function fetchAccess() {
+    if (!sb || !user) return;
+    var uid = user.id, seq = ++access.seq;
+    sb.rpc("admin_list_requests").then(function (r) {
+      if (!user || user.id !== uid || seq !== access.seq) return;
+      if (r.error) {
+        if (isDenied(r.error)) { access.admin = false; access.requests = []; access.allowed = []; access.confirm = null; renderAccess(); }
+        return;                                                         // any other failure: keep what is shown, say nothing
+      }
+      access.admin = true;
+      access.requests = Array.isArray(r.data) ? r.data : [];
+      if (access.confirm && access.confirm.kind === "reject" && !access.requests.some(function (x) { return x.email === access.confirm.email; })) access.confirm = null;
+      renderAccess();
+      sb.rpc("admin_list_allowed").then(function (a) {
+        if (!user || user.id !== uid || seq !== access.seq || a.error) return;
+        access.allowed = Array.isArray(a.data) ? a.data : [];
+        if (access.confirm && access.confirm.kind === "remove" && !access.allowed.some(function (x) { return x.email === access.confirm.email; })) access.confirm = null;
+        renderAccess();
+      }, function () {});
+    }, function () {});
+  }
+  $("reqBadge").addEventListener("click", function () { try { $("accessBox").scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {} });
+  $("accessBox").addEventListener("click", function (ev) {
+    var b = ev.target.closest("[data-aact]"); if (!b || !sb || !user) return;
+    var act = b.dataset.aact, email = b.dataset.email;
+    if (act === "reject") { access.confirm = { kind: "reject", email: email }; renderAccess(); return; }
+    if (act === "remove") { access.confirm = { kind: "remove", email: email }; renderAccess(); return; }
+    if (act === "cancel") { access.confirm = null; renderAccess(); return; }
+    var rpcName, args, okText;
+    if (act === "approve") { rpcName = "admin_decide"; args = { p_email: email, p_approve: true }; okText = "Godkendt. " + email + " får en mail inden for et kvarter."; }
+    else if (act === "reject-yes") { rpcName = "admin_decide"; args = { p_email: email, p_approve: false }; okText = "Afvist. " + email + " får ingen besked."; }
+    else if (act === "remove-yes") { rpcName = "admin_remove_allowed"; args = { p_email: email }; okText = "Adgang fjernet for " + email + ". Produkterne ligger stadig i databasen."; }
+    else return;
+    b.disabled = true;
+    sb.rpc(rpcName, args).then(function (r) {
+      b.disabled = false;
+      if (r && r.error) { accMsg(isDenied(r.error) ? "Du har ikke ret til det her." : "Kunne ikke gemme lige nu. Prøv igen om lidt."); return; }
+      access.confirm = null;
+      if (rpcName === "admin_decide") access.requests = access.requests.filter(function (x) { return x.email !== email; });
+      else access.allowed = access.allowed.filter(function (x) { return x.email !== email; });
+      accMsg(r && r.data === false ? "Den ændring var allerede foretaget." : okText);
+      renderAccess(); fetchAccess();
+    }, function () { b.disabled = false; accMsg("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+  });
+
   // ---- add form ----
   function syncType() {
     var pct = $("fTypePct").checked;
@@ -730,6 +810,12 @@
   });
 
   // ---- sign-in ----
+  function otpNotAllowed(e) {
+    var m = String(e && e.message || "").toLowerCase(), c = e && e.status, code = String(e && e.code || "").toLowerCase(), all = m + " " + code;
+    if (c === 429 || /rate.?limit|too many|only request this after/.test(all)) return false;
+    if (/invalid.*e-?mail|e-?mail.*invalid|validation_failed|unable to validate email/.test(all)) return false;
+    return /not allowed|signups? (are |is )?(not allowed|disabled)|hook|database error|not (on|in) the|forbidden|unauthori[sz]ed|otp_disabled|user_not_found|not_allowed/.test(all) || c === 422 || c === 403;
+  }
   function otpMessage(e) {
     var m = String(e && e.message || "").toLowerCase(), c = e && e.status, code = String(e && e.code || "").toLowerCase(), all = m + " " + code;
     if (c === 429 || /rate.?limit|too many|only request this after/.test(all)) return "Der er sendt for mange login-links lige nu. Vent et par minutter, og prøv igen.";
@@ -747,9 +833,44 @@
     var btn = $("lSubmit"); btn.disabled = true;
     sb.auth.signInWithOtp({ email: email, options: { emailRedirectTo: location.origin + location.pathname } }).then(function (r) {
       btn.disabled = false;
-      if (r && r.error) { msg.textContent = otpMessage(r.error); msg.hidden = false; return; }
+      if (r && r.error) { msg.textContent = otpMessage(r.error); msg.hidden = false; if (otpNotAllowed(r.error)) openAsk(email, true); return; }
       $("sentTo").textContent = email; $("sentBox").hidden = false; $("loginForm").hidden = true;
-    }, function (e) { btn.disabled = false; msg.textContent = otpMessage(e); msg.hidden = false; });
+    }, function (e) { btn.disabled = false; msg.textContent = otpMessage(e); msg.hidden = false; if (otpNotAllowed(e)) openAsk(email, true); });
+  });
+  // ---- ask for access (signed out) ----
+  var ASK_TEXT = {
+    requested: "Tak. Du får en mail, når du er godkendt.",
+    pending: "Du har allerede bedt om adgang. Vent på, at ejeren svarer. Du får en mail, når du er godkendt.",
+    allowed: "Du har allerede adgang. Brug login-formularen ovenfor, og få et login-link på mail.",
+    full: "Der er mange anmodninger i kø lige nu, så vi kan ikke tage flere imod. Prøv igen om nogle dage.",
+    invalid: "Det ligner ikke en gyldig e-mailadresse. Skriv den som navn@eksempel.dk.",
+    rejected: "Ejeren har ikke givet adgang til den adresse. Kender du ejeren, så spørg vedkommende direkte."
+  };
+  function askMsg(t) { var el = $("aMsg"); el.textContent = t || ""; el.hidden = !t; }
+  function openAsk(email, focusName) {
+    $("askBox").hidden = false; $("askToggle").setAttribute("aria-expanded", "true"); $("askForm").hidden = false;
+    if (email) $("aEmail").value = email;
+    askMsg("");
+    if (focusName) { try { $("aName").focus(); } catch (e) {} }
+  }
+  $("askToggle").addEventListener("click", function () {
+    if ($("askBox").hidden) openAsk($("lEmail").value.trim(), false);
+    else { $("askBox").hidden = true; $("askToggle").setAttribute("aria-expanded", "false"); }
+  });
+  $("askForm").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var email = $("aEmail").value.trim(), name = $("aName").value.trim().replace(/\s+/g, " ");
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { askMsg(ASK_TEXT.invalid); return; }
+    if (!sb) return;
+    var btn = $("aSubmit"); btn.disabled = true; askMsg("Sender …");
+    sb.rpc("request_access", { p_email: email, p_name: name }).then(function (r) {
+      btn.disabled = false;
+      var res = r && !r.error && typeof r.data === "string" ? r.data : null;
+      if (!res || !ASK_TEXT[res]) { askMsg("Kunne ikke sende anmodningen lige nu. Prøv igen om lidt."); return; }
+      askMsg(ASK_TEXT[res]);
+      if (res === "requested" || res === "pending" || res === "allowed") $("askForm").hidden = true;
+      if (res === "allowed" && !$("lEmail").value.trim()) $("lEmail").value = email;
+    }, function () { btn.disabled = false; askMsg("Kunne ikke sende anmodningen lige nu. Prøv igen om lidt."); });
   });
   $("sentBack").addEventListener("click", function () { $("sentBox").hidden = true; $("loginForm").hidden = false; $("lEmail").focus(); });
   $("logoutBtn").addEventListener("click", function () {
@@ -757,7 +878,7 @@
   });
 
   function showAuth(errText) {
-    $("authView").hidden = false; $("appView").hidden = true; $("acts").hidden = true;
+    $("authView").hidden = false; $("appView").hidden = true; $("acts").hidden = true; $("reqBadge").hidden = true;
     $("status").textContent = "";
     if (errText) { $("lMsg").textContent = errText; $("lMsg").hidden = false; }
   }

@@ -12,7 +12,7 @@ if (require.main === module && !process.env.NODE_USE_ENV_PROXY && (process.env.H
 
 const P = require('./lib/pricing');
 const PJ = require('./lib/prisjagt');
-const { composeMail, sendResend } = require('./lib/mail');
+const { composeMail, composeOwnerMail, composeApprovedMail, sendResend } = require('./lib/mail');
 const { makeClient } = require('./lib/supabase');
 
 const PAUSE_MS = 1500;
@@ -98,6 +98,56 @@ function trackingPatch(prod, profile, parsed, now) {
   };
 }
 
+// ---------------------------------------------------------------- access requests
+
+// Pending requests not yet reported -> ONE e-mail to every admin. Approved requests not yet reported -> one e-mail each.
+// Nothing is marked as notified unless the e-mail was accepted by Resend. Both count towards MAX_MAILS; the rest waits.
+async function accessMails(ctx, sb, fetchImpl, stats, log, canMail, now) {
+  const iso = isoNow(now);
+  const mark = (email, col) => sb.patch('access_requests', 'email=eq.' + encodeURIComponent(email) + '&' + col + '=is.null', { [col]: iso });
+  const note = () => { if (!stats.mailNote) stats.mailNote = ctx.resendKey ? 'MAIL_FROM mangler' : 'RESEND_API_KEY mangler'; };
+
+  // 1. the owner(s)
+  try {
+    const pending = await sb.select('access_requests', 'select=email,name,created_at&status=eq.pending&owner_notified_at=is.null&order=created_at.asc&limit=50');
+    if (pending.length) {
+      if (!canMail) { note(); log('Adgangsanmodninger til ejer springes over: ' + stats.mailNote + '.'); }
+      else if (stats.sent >= MAX_MAILS) { stats.mailNote = stats.mailNote || 'loft på ' + MAX_MAILS + ' e-mails nået'; }
+      else {
+        const admins = Array.from(new Set((await sb.select('allowed_emails', 'select=email&is_admin=eq.true'))
+          .map((a) => String(a.email || '').trim().toLowerCase()).filter(Boolean)));
+        if (!admins.length) log('Adgangsanmodninger: ingen administrator i allowed_emails, ingen e-mail.');
+        else {
+          await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, admins, composeOwnerMail(pending, ctx.siteUrl));
+          stats.sent++; stats.accessOwner++;
+          for (const r of pending) { try { await mark(r.email, 'owner_notified_at'); } catch (e) { log('  Kunne ikke markere anmodning som meldt: ' + (e && e.message || e)); } }
+        }
+      }
+    }
+  } catch (e) { log('Adgangsanmodninger til ejer fejlede: ' + (e && e.message || e)); }
+
+  // 2. approved requesters
+  try {
+    const approved = await sb.select('access_requests', 'select=email&status=eq.approved&requester_notified_at=is.null&order=decided_at.asc&limit=50');
+    if (approved.length) {
+      if (!canMail) { note(); log('Godkendelsesmails springes over: ' + stats.mailNote + '.'); }
+      else {
+        const allowed = new Set((await sb.select('allowed_emails', 'select=email')).map((a) => String(a.email || '').toLowerCase()));
+        for (const r of approved) {
+          const addr = String(r.email || '').trim().toLowerCase();
+          if (!addr || !allowed.has(addr)) continue;                       // approved, but access was removed again: say nothing
+          if (stats.sent >= MAX_MAILS) { stats.mailNote = stats.mailNote || 'loft på ' + MAX_MAILS + ' e-mails nået'; break; }
+          try {
+            await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, addr, composeApprovedMail(ctx.siteUrl));
+            stats.sent++; stats.accessApproved++;
+            await mark(addr, 'requester_notified_at');
+          } catch (e) { log('  En godkendelsesmail fejlede: ' + (e && e.message || e)); }
+        }
+      }
+    }
+  } catch (e) { log('Godkendelsesmails fejlede: ' + (e && e.message || e)); }
+}
+
 // ---------------------------------------------------------------- the run
 
 async function run(ctx) {
@@ -108,7 +158,7 @@ async function run(ctx) {
   const fetchImpl = ctx.fetch || fetch;
   const sb = makeClient(ctx.supabaseUrl, ctx.serviceKey, fetchImpl);
   const started = Date.now();
-  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, hits: 0, sent: 0, mailSkipped: 0, mailNote: '', written: 0, writeFail: 0, deadline: false };
+  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false };
 
   // 1. load (a failure here means Supabase is unreachable: let it throw)
   // Products added by name only (source_url null) wait for a link (from the name-lookup assistant or the user):
@@ -216,12 +266,16 @@ async function run(ctx) {
     catch (e) { stats.writeFail++; log('  Kunne ikke skrive ' + (r.prod.name || r.prod.id) + ': ' + (e && e.message || e)); }
   }
 
+  // access requests: e-mails to the owner(s) and to approved requesters (own step: a failure here changes nothing above)
+  try { await accessMails(ctx, sb, fetchImpl, stats, log, canMail, now); }
+  catch (e) { log('Adgangsanmodninger: ' + (e && e.message || e)); }
+
   // 6. summary (5 lines)
   const summary = [
     'Produkter: ' + stats.total + ' aktive (nye: ' + stats.pending + ', følges: ' + stats.tracking + ', venter på valg: ' + stats.choose + ', fejl: ' + stats.error + ').',
     'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.blocked ? ' (Prisjagt afviste: resten sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
     'Nye hits: ' + stats.hits + '.',
-    'E-mails sendt: ' + stats.sent + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + '.',
+    'E-mails sendt: ' + stats.sent + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte.',
     'Skrevet til databasen: ' + stats.written + ', skrivefejl: ' + stats.writeFail + '. Tid: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s.',
   ];
   summary.forEach((l) => log(l));

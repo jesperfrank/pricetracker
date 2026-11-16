@@ -255,11 +255,27 @@ function makeFake(db) {
           rows = rows.filter((r) => r.active !== false && (r.source_url || db.ignoreLinkFilter));   // db.ignoreLinkFilter: a server that wrongly returns name-only rows
         }
         if (q.get('user_id') && /^in\.\((.*)\)$/.test(q.get('user_id'))) { const ids = /^in\.\((.*)\)$/.exec(q.get('user_id'))[1].split(','); rows = rows.filter((r) => ids.indexOf(r.user_id) !== -1); }
+        if (mm[1] === 'access_requests') {
+          ['status', 'owner_notified_at', 'requester_notified_at'].forEach((c) => {
+            const f = q.get(c); if (!f) return;
+            if (f === 'is.null') rows = rows.filter((r) => r[c] == null); else if (/^eq\./.test(f)) rows = rows.filter((r) => r[c] === f.slice(3));
+          });
+        }
+        if (mm[1] === 'allowed_emails' && q.get('is_admin') === 'eq.true') rows = rows.filter((r) => r.is_admin === true);
         if (q.get('email') && /^eq\./.test(q.get('email'))) rows = rows.filter((r) => r.email === q.get('email').slice(3));
         return reply(200, JSON.parse(JSON.stringify(rows)));
       }
       if (m === 'PATCH') {
         assert.strictEqual(h.Prefer, 'return=minimal');
+        if (mm[1] === 'access_requests') {
+          const em = /^eq\.(.+)$/.exec(q.get('email'))[1];
+          assert.strictEqual(Object.keys(JSON.parse(opts.body)).length, 1, 'only one *_notified_at column is written');
+          const rr = t.find((r) => r.email === em); if (!rr) return reply(204);
+          const col = Object.keys(JSON.parse(opts.body))[0]; assert(/_notified_at$/.test(col));
+          if (q.get(col) === 'is.null' && rr[col] != null) return reply(204);
+          if (db.accessPatchFail) return reply(500, { message: 'db error' });
+          rr[col] = JSON.parse(opts.body)[col]; return reply(204);
+        }
         const id = /^eq\.(.+)$/.exec(q.get('id'))[1];
         const row = t.find((r) => r.id === id); if (!row) return reply(204);
         if (db.patchFail && db.patchFail === id) return reply(500, { message: 'db error' });
@@ -275,7 +291,7 @@ function makeFake(db) {
 
 function newDb() {
   return {
-    products: [], profiles: [], allowed_emails: [{ email: 'anna@example.dk' }, { email: 'bo@example.dk' }],
+    products: [], profiles: [], allowed_emails: [{ email: 'anna@example.dk', is_admin: true }, { email: 'bo@example.dk' }], access_requests: [],
     users: { u1: 'Anna@Example.dk', u2: 'eve@evil.dk', u3: 'bo@example.dk' }, sent: [], patches: [],
   };
 }
@@ -480,6 +496,83 @@ test('name-only products (source_url null) are skipped silently: no fetch, no wr
     assert(db.products.slice(0, 3).every((x) => x.source_url === null) && db.products[1].status === 'error' && db.products[1].check_note === 'Ikke fundet');
     assert(!logs.some((l) => /Kun et navn|N1|N2|N3/.test(l)), 'nothing logged about them');
   }
+});
+
+test('access requests: one e-mail to the admins, one to each approved person, sanitised, never twice, never without Resend', async () => {
+  const mk = () => {
+    const db = newDb();
+    db.allowed_emails.push({ email: 'far@example.dk', is_admin: true }, { email: 'ny@example.dk' }, { email: 'tidligere@example.dk' });
+    db.access_requests.push(
+      { email: 'kim@example.dk', name: 'Kim\r\nBcc: spam@evil.dk\u0000\u202e Hansen', status: 'pending', owner_notified_at: null, requester_notified_at: null },
+      { email: 'lis@example.dk', name: null, status: 'pending', owner_notified_at: null, requester_notified_at: null },
+      { email: 'gammel@example.dk', name: 'Allerede meldt', status: 'pending', owner_notified_at: '2026-11-15T10:00:00Z', requester_notified_at: null },
+      { email: 'ny@example.dk', name: 'Ny', status: 'approved', owner_notified_at: '2026-11-15T10:00:00Z', requester_notified_at: null },
+      { email: 'tidligere@example.dk', name: 'Tidligere', status: 'approved', owner_notified_at: '2026-11-15T10:00:00Z', requester_notified_at: '2026-11-15T11:00:00Z' },
+      { email: 'nej@example.dk', name: 'Afvist', status: 'rejected', owner_notified_at: '2026-11-15T10:00:00Z', requester_notified_at: null });
+    return db;
+  };
+  const arq = (db, e) => db.access_requests.find((r) => r.email === e);
+
+  // no Resend key: nothing sent, nothing marked; the price work is unaffected
+  const db0 = mk();
+  const logs = [];
+  const r0 = await R.run(ctxFor(db0, {}, { resendKey: '', log: (l) => logs.push(l) }));
+  assert.strictEqual(db0.sent.length, 0);
+  assert.strictEqual(arq(db0, 'kim@example.dk').owner_notified_at, null); assert.strictEqual(arq(db0, 'ny@example.dk').requester_notified_at, null);
+  assert(/RESEND_API_KEY/.test(r0.summary.join('\n')) && logs.some((l) => /springes over/.test(l)));
+
+  // with a key: one mail to both admins, one to the approved person
+  const db = mk();
+  const r1 = await R.run(ctxFor(db, {}));
+  assert.strictEqual(db.sent.length, 2); assert.strictEqual(r1.stats.sent, 2);
+  const owner = db.sent.find((m) => m.to.length === 2), req = db.sent.find((m) => m.to.length === 1);
+  assert.deepStrictEqual(owner.to.slice().sort(), ['anna@example.dk', 'far@example.dk']);
+  assert(/2 nye anmodninger/.test(owner.subject) && owner.text.includes('kim@example.dk') && owner.text.includes('lis@example.dk'));
+  assert(owner.text.includes('https://example.github.io/prisvagten/') && /Godkend/.test(owner.text));
+  assert(!/gammel@|nej@|ny@example|tidligere@/.test(owner.text), 'only requests not yet reported');
+  assert(!/Allerede meldt/.test(owner.text));
+  assert(/Kim Bcc: spam@evil\.dk Hansen/.test(owner.text), 'newlines, NUL and bidi control characters in the name become spaces: ' + owner.text);
+  assert(!/[\u0000-\u0009\u000b-\u001f\u202e]/.test(owner.text) && !/\r/.test(owner.text) && !/^Bcc:/m.test(owner.text), 'no injected line');
+  assert(!/<html|<a /i.test(owner.text) && owner.subject.indexOf('Kim') < 0, 'plain text, nothing untrusted in the subject');
+  assert.deepStrictEqual(req.to, ['ny@example.dk']); assert.strictEqual(req.subject, 'Du har fået adgang til Prisvagten');
+  assert(req.text.includes('https://example.github.io/prisvagten/') && /Send login-link/.test(req.text) && /mail/.test(req.text));
+  assert.strictEqual(arq(db, 'kim@example.dk').owner_notified_at, '2026-11-16T10:00:00Z');
+  assert.strictEqual(arq(db, 'lis@example.dk').owner_notified_at, '2026-11-16T10:00:00Z');
+  assert.strictEqual(arq(db, 'ny@example.dk').requester_notified_at, '2026-11-16T10:00:00Z');
+  assert.strictEqual(arq(db, 'nej@example.dk').requester_notified_at, null, 'a rejected requester is never mailed');
+  assert(!db.sent.some((m) => m.to.indexOf('nej@example.dk') >= 0 || m.to.indexOf('kim@example.dk') >= 0 || m.to.indexOf('lis@example.dk') >= 0), 'pending and rejected requesters get nothing');
+
+  // second run: nothing more
+  await R.run(ctxFor(db, {}));
+  assert.strictEqual(db.sent.length, 2, 'a second run sends nothing more');
+
+  // a late approval is mailed once, next run
+  arq(db, 'kim@example.dk').status = 'approved'; db.allowed_emails.push({ email: 'kim@example.dk' });
+  await R.run(ctxFor(db, {})); assert.strictEqual(db.sent.length, 3); assert.deepStrictEqual(db.sent[2].to, ['kim@example.dk']);
+  await R.run(ctxFor(db, {})); assert.strictEqual(db.sent.length, 3);
+
+  // Resend failing: not marked, retried next run
+  const dbf = mk(); dbf.resendFail = true;
+  await R.run(ctxFor(dbf, {}));
+  assert.strictEqual(arq(dbf, 'kim@example.dk').owner_notified_at, null); assert.strictEqual(arq(dbf, 'ny@example.dk').requester_notified_at, null);
+  dbf.resendFail = false; await R.run(ctxFor(dbf, {})); assert.strictEqual(dbf.sent.length, 2);
+
+  // approved but access removed again: no "you have access" mail
+  const dbr = mk(); dbr.allowed_emails = dbr.allowed_emails.filter((a) => a.email !== 'ny@example.dk');
+  await R.run(ctxFor(dbr, {})); assert(!dbr.sent.some((m) => m.to.indexOf('ny@example.dk') >= 0));
+
+  // counts towards the cap of 20; the rest waits for the next run
+  const dbc = newDb();
+  for (let i = 0; i < 25; i++) { dbc.allowed_emails.push({ email: 'g' + i + '@example.dk' }); dbc.access_requests.push({ email: 'g' + i + '@example.dk', name: 'G' + i, status: 'approved', decided_at: '2026-11-15T10:00:00Z', owner_notified_at: null, requester_notified_at: null }); }
+  const rc = await R.run(ctxFor(dbc, {}));
+  assert.strictEqual(dbc.sent.length, 20, 'one owner mail (pending ones: none here) + approved up to the cap'); assert.strictEqual(rc.stats.sent, 20);
+  assert.strictEqual(dbc.access_requests.filter((r) => r.requester_notified_at).length, 20);
+  await R.run(ctxFor(dbc, {})); assert.strictEqual(dbc.sent.length, 25);
+
+  // one failing step does not stop the other: marking fails -> logged, run still completes
+  const dbm = mk(); dbm.accessPatchFail = true;
+  const rm = await R.run(ctxFor(dbm, {}));
+  assert.strictEqual(rm.summary.length, 5); assert.strictEqual(dbm.sent.length, 2);
 });
 
 // ---------------------------------------------------------------- live sanity check (opt-in)

@@ -8,6 +8,8 @@ create table if not exists public.allowed_emails (
   note     text,
   added_at timestamptz default now()
 );
+-- Added later (access requests): the owner is an admin and decides on requests. Re-runnable.
+alter table public.allowed_emails add column if not exists is_admin boolean not null default false;
 
 create table if not exists public.profiles (
   user_id      uuid primary key default auth.uid() references auth.users on delete cascade,
@@ -103,7 +105,7 @@ create policy products_own on public.products
 
 grant select, insert, update, delete on public.profiles, public.products to authenticated;
 -- The price job signs in with the service key. Newer Supabase projects do not grant table rights by default, so state them.
-grant select, insert, update, delete on public.allowed_emails, public.profiles, public.products, public.resolver_secret to service_role;
+grant select, insert, update, delete on public.allowed_emails, public.profiles, public.products to service_role;
 
 -- ---------------------------------------------------------------- triggers on products
 
@@ -223,6 +225,7 @@ create table if not exists public.resolver_secret (
 );
 alter table public.resolver_secret enable row level security;     -- and no policy: no access via the API
 revoke all on public.resolver_secret from public, anon, authenticated;
+grant select, insert, update, delete on public.resolver_secret to service_role;
 
 -- First run only: one random token (two v4 UUIDs = 64 hex chars from the server's CSPRNG;
 -- gen_random_uuid() is built into Postgres 13+, so no pgcrypto/search_path dependency).
@@ -331,6 +334,196 @@ revoke all on function public.resolver_fail(uuid, text) from public;
 grant execute on function public.resolver_list() to anon, authenticated;
 grant execute on function public.resolver_set(uuid, text) to anon, authenticated;
 grant execute on function public.resolver_fail(uuid, text) to anon, authenticated;
+
+-- ---------------------------------------------------------------- access requests
+-- A visitor asks for access on the login screen (request_access, callable without login). The owner
+-- (an admin row in allowed_emails) approves or rejects inside the site. Approving inserts the address
+-- into allowed_emails, so the Before User Created hook and RLS above let the person in. The price job
+-- (service role) sends the e-mails: owner_notified_at / requester_notified_at record that it has.
+
+create or replace function public.is_admin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select exists (
+    select 1 from public.allowed_emails a
+    where a.email = lower(coalesce(auth.jwt() ->> 'email', '')) and a.is_admin
+  );
+$$;
+revoke all on function public.is_admin() from public, anon;
+grant execute on function public.is_admin() to authenticated, service_role;
+
+create table if not exists public.access_requests (
+  email               text primary key check (email = lower(email) and char_length(email) <= 200),
+  name                text check (name is null or char_length(name) <= 80),
+  status              text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+  created_at          timestamptz default now(),
+  decided_at          timestamptz,
+  owner_notified_at   timestamptz,
+  requester_notified_at timestamptz
+);
+alter table public.access_requests enable row level security;      -- and no policy: only the functions below and the service role
+revoke all on public.access_requests from public, anon, authenticated;
+grant select, insert, update, delete on public.access_requests to service_role;
+
+-- Returns 'requested' | 'pending' | 'allowed' | 'rejected' | 'full' | 'invalid'. Never raises on bad input.
+create or replace function public.request_access(p_email text, p_name text)
+returns text
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  e  text := lower(btrim(coalesce(p_email, '')));
+  n  text := nullif(left(btrim(regexp_replace(coalesce(p_name, ''), '[[:cntrl:]]+', ' ', 'g')), 80), '');
+  st text;
+  k  integer;
+begin
+  if char_length(e) > 200 or e !~ '^[^[:space:][:cntrl:]@]+@[^[:space:][:cntrl:]@]+\.[^[:space:][:cntrl:]@]+$' then
+    return 'invalid';
+  end if;
+  if exists (select 1 from public.allowed_emails a where a.email = e) then
+    return 'allowed';
+  end if;
+  select r.status into st from public.access_requests r where r.email = e;
+  if st = 'pending' then return 'pending'; end if;
+  if st = 'rejected' then return 'rejected'; end if;
+  if (select count(*) from public.access_requests r where r.status = 'pending') >= 30 then
+    return 'full';
+  end if;
+  if st = 'approved' then
+    -- approved earlier, but the address is no longer in allowed_emails (access was removed): ask again
+    update public.access_requests
+       set status = 'pending', name = coalesce(n, name), created_at = now(), decided_at = null,
+           owner_notified_at = null, requester_notified_at = null
+     where email = e;
+    return 'requested';
+  end if;
+  insert into public.access_requests (email, name) values (e, n) on conflict (email) do nothing;
+  get diagnostics k = row_count;
+  if k = 0 then   -- a parallel request for the same address won the race
+    return 'pending';
+  end if;
+  return 'requested';
+end;
+$$;
+revoke all on function public.request_access(text, text) from public;
+grant execute on function public.request_access(text, text) to anon, authenticated, service_role;
+
+-- Admin-only functions: anyone else gets SQLSTATE 42501.
+create or replace function public.admin_list_requests()
+returns table (email text, name text, created_at timestamptz)
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if not public.is_admin() then
+    raise exception 'admin only' using errcode = '42501';
+  end if;
+  return query
+    select r.email, r.name, r.created_at
+    from public.access_requests r
+    where r.status = 'pending'
+    order by r.created_at, r.email
+    limit 50;
+end;
+$$;
+
+-- Approve (inserts the address into allowed_emails) or reject a request. A rejected request can be approved later.
+-- Returns true when a request was changed.
+create or replace function public.admin_decide(p_email text, p_approve boolean)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  e text := lower(btrim(coalesce(p_email, '')));
+  rn text;
+  k  integer;
+begin
+  if not public.is_admin() then
+    raise exception 'admin only' using errcode = '42501';
+  end if;
+  if p_approve is null then return false; end if;
+  if p_approve then
+    update public.access_requests r
+       set status = 'approved', decided_at = now()
+     where r.email = e and r.status in ('pending', 'rejected')
+    returning r.name into rn;
+    get diagnostics k = row_count;
+    if k = 0 then return false; end if;
+    insert into public.allowed_emails (email, note)
+    values (e, 'Godkendt via adgangsanmodning' || coalesce(' (' || rn || ')', ''))
+    on conflict (email) do nothing;
+    return true;
+  end if;
+  update public.access_requests r
+     set status = 'rejected', decided_at = now()
+   where r.email = e and r.status = 'pending';
+  get diagnostics k = row_count;
+  return k = 1;
+end;
+$$;
+
+create or replace function public.admin_list_allowed()
+returns table (email text, note text, added_at timestamptz, is_admin boolean)
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if not public.is_admin() then
+    raise exception 'admin only' using errcode = '42501';
+  end if;
+  return query
+    select a.email, a.note, a.added_at, a.is_admin
+    from public.allowed_emails a
+    order by a.is_admin desc, a.added_at, a.email;
+end;
+$$;
+
+-- Removes a non-admin address. Only stops future access: the person's products stay stored. Never removes an admin row.
+create or replace function public.admin_remove_allowed(p_email text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  k integer;
+begin
+  if not public.is_admin() then
+    raise exception 'admin only' using errcode = '42501';
+  end if;
+  delete from public.allowed_emails a
+   where a.email = lower(btrim(coalesce(p_email, ''))) and not a.is_admin;
+  get diagnostics k = row_count;
+  return k = 1;
+end;
+$$;
+
+revoke all on function public.admin_list_requests() from public, anon;
+revoke all on function public.admin_decide(text, boolean) from public, anon;
+revoke all on function public.admin_list_allowed() from public, anon;
+revoke all on function public.admin_remove_allowed(text) from public, anon;
+grant execute on function public.admin_list_requests() to authenticated;
+grant execute on function public.admin_decide(text, boolean) to authenticated;
+grant execute on function public.admin_list_allowed() to authenticated;
+grant execute on function public.admin_remove_allowed(text) to authenticated;
+
+-- First run only: nobody is admin yet, so the address added first (the owner added themselves first) becomes admin.
+-- Later runs change nothing, so admin never moves.
+update public.allowed_emails
+   set is_admin = true
+ where email = (select a.email from public.allowed_emails a order by a.added_at asc nulls last, a.email limit 1)
+   and not exists (select 1 from public.allowed_emails x where x.is_admin);
 
 -- Shows the token (copy it from the result of this last query; see docs/SETUP.md).
 select token as resolver_token_copy_this from public.resolver_secret;

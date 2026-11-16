@@ -15,6 +15,7 @@
   <header>
     <div class="top">
       <h1>Prisvagten</h1>
+      <button type="button" class="badge" id="reqBadge" hidden></button>
       <span class="acts" id="acts" hidden>
         <button type="button" class="link sound" id="soundBtn" aria-pressed="true">Lyd til</button>
         <span class="who" id="who"></span>
@@ -41,7 +42,18 @@
       <p>Vi har sendt et login-link til <span class="n" id="sentTo"></span>. Åbn det på denne enhed. Kommer der ikke noget inden for et par minutter, så kig i uønsket post.</p>
       <button type="button" class="link" id="sentBack">Brug en anden adresse</button>
     </div>
-    <p class="hint">Siden er kun for inviterede. Står din adresse ikke på listen, skal ejeren tilføje den først.</p>
+    <p class="hint">Siden er kun for inviterede. Har du ikke adgang endnu, kan du bede ejeren om den.</p>
+    <p class="fine ask-row"><button type="button" class="link" id="askToggle" aria-expanded="false" aria-controls="askBox">Har du ikke adgang endnu? Bed om adgang</button></p>
+    <div id="askBox" hidden>
+      <form class="login ask" id="askForm" novalidate>
+        <label class="vh" for="aEmail">E-mailadresse</label>
+        <input class="inp" type="email" id="aEmail" autocomplete="email" inputmode="email" maxlength="200" required placeholder="Din e-mailadresse">
+        <label class="vh" for="aName">Dit navn</label>
+        <input class="inp" type="text" id="aName" autocomplete="name" maxlength="80" placeholder="Dit navn, så ejeren ved, hvem du er">
+        <button class="btn" id="aSubmit" type="submit">Bed om adgang</button>
+      </form>
+      <p class="info" id="aMsg" role="status" hidden></p>
+    </div>
   </section>
 
   <!-- signed in -->
@@ -81,6 +93,16 @@
         <span><button class="link" type="submit">Gem</button> <span id="shMsg" role="status"></span></span>
       </form>
     </details>
+    <section class="fine access" id="accessBox" hidden>
+      <h3>Adgang</h3>
+      <p class="info" id="accMsg" role="status" hidden></p>
+      <div id="reqList"></div>
+      <details id="allowedBox">
+        <summary id="allowedSum">Hvem har adgang</summary>
+        <div id="allowedList"></div>
+        <p class="meta">Fjerner du en persons adgang, stopper det kun fremtidig adgang. Personens produkter bliver liggende i databasen.</p>
+      </details>
+    </section>
     <p class="fine" id="tryRow"><button type="button" class="link" id="tryBtn">Prøv lyden</button></p>
   </section>
 </div>
