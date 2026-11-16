@@ -13,6 +13,7 @@ if (require.main === module && !process.env.NODE_USE_ENV_PROXY && (process.env.H
 const P = require('./lib/pricing');
 const PJ = require('./lib/prisjagt');
 const SHOP = require('./lib/shop');
+const X = require('./lib/extras');
 const WB = require('./lib/wayback');
 const ONSKE = require('./lib/onskeskyen');
 const D = require('./lib/digest');
@@ -123,7 +124,10 @@ function trackingPatch(prod, profile, parsed, now) {
   const bought = !!prod.bought_at;
   let goal = bought ? { hit: false, newHit: false, fields: {}, reason: null } : P.goalOutcome(prod, low, normal, iso, { verdict, history });
   // Silent: a would-be hit is only remembered (notified_price), never announced. Only a later, lower price mails.
-  if (firstAfterSwitch && !bought) goal = { hit: goal.hit, newHit: false, fields: goal.hit && low ? { notified_price: low.price } : { notified_price: null }, reason: null };
+  // The same when the cheapest offer comes from an extra shop (products.extra_urls) that has not been read before: a newly added shop being
+  // cheaper than the one shop followed so far is no price drop (the rows carry extraNew, see runWithExtras).
+  const silent = firstAfterSwitch || !!(low && low.extraNew);
+  if (silent && !bought) goal = { hit: goal.hit, newHit: false, fields: goal.hit && low ? { notified_price: low.price } : { notified_price: null }, reason: null };
 
   const patch = Object.assign({
     status: 'tracking', title: prod.title || parsed.title || null, variants, offers, history, normal_price: normal, verdict, warning,
@@ -186,6 +190,37 @@ function wantedPatch(prod, now) {
   const patch = { compare_state: 'wanted', compare_at: isoNow(now) };
   if (Object.prototype.hasOwnProperty.call(prod, 'compare_tries')) patch.compare_tries = (Number(prod.compare_tries) || 0) + 1;
   return patch;
+}
+
+// AUTOMATIC COMPARE MARKINGS (the job marks a single-shop product 'wanted' so that the AI agent looks for it in other shops). All rules:
+//  1. wantsCompare: compare_state null and the shop refused / has no readable price / not in kroner (at the fetch).
+//  2. oldErrorWantsCompare / wantsCompareAgain: an error row (refusing shop) answered 'none' more than 24 hours ago, while tries < 3.
+//  3. autoCompare 'first' (rule A): EVERY active single-shop product that is not bought, compare_state null, gets 'wanted', whatever its status.
+//  4. autoCompare 'second' (rule B): compare_state 'none', no extra_urls, compare_tries < 2, compare_at at least 1 hour old: 'wanted' once more.
+// Rules 1 to 3 start from null, which only exists before the first marking, after an import without a marking, and after a browser link
+// change (the guard resets compare_tries to 0 then). Every marking made here goes through wantedPatch and adds 1 to compare_tries, and rules 2
+// and 4 need compare_tries < 3 / < 2. So after the first marking (tries 1) a product can get at most two more: B at tries < 2 (1 -> 2, and
+// 0 -> 1 -> 2 for rows from before compare_tries existed), then the 24-hour error rule at tries < 3 (2 -> 3). From 3 on nothing marks it
+// again: the MAXIMUM is 3 automatic markings per product and link (a row that went through rule 4 twice from tries 0 still ends at 3),
+// plus the one an import writes at insert (not counted) and the person's own "Find flere butikker" (never counted, one click each).
+// A browser link change starts a new count. A database without compare_tries / compare_state never gets any of them.
+// To protect the agent's queue (10 rows per hourly run) rules 3 and 4 together mark at most AUTO_COMPARE_MAX products per run; markings
+// of rules 1 and 2 count against that budget but are never held back by it.
+const AUTO_COMPARE_MAX = 10;
+const COMPARE_SECOND_AFTER_MS = 3600 * 1000;
+const COMPARE_SECOND_TRIES = 2;
+
+// 'first' | 'second' | null: which automatic marking (rules 3 and 4) applies to this product now.
+function autoCompare(prod, target, now) {
+  if (!target || !target.shop || prod.bought_at || prod.active === false) return null;
+  if (!Object.prototype.hasOwnProperty.call(prod, 'compare_state')) return null;
+  if (prod.compare_state === null) return 'first';
+  if (prod.compare_state !== 'none') return null;
+  if (!Object.prototype.hasOwnProperty.call(prod, 'compare_tries') || !(Number(prod.compare_tries) < COMPARE_SECOND_TRIES)) return null;
+  if (prod.extra_urls !== undefined && prod.extra_urls !== null) return null;
+  const at = prod.compare_at ? Date.parse(prod.compare_at) : NaN;
+  if (isFinite(at) && now.getTime() - at < COMPARE_SECOND_AFTER_MS) return null;
+  return 'second';
 }
 
 // The page kind of a source_url: {url, shop} or null when the link may not be fetched at all.
@@ -295,7 +330,7 @@ async function run(ctx) {
   const fetchImpl = ctx.fetch || fetch;
   const sb = makeClient(ctx.supabaseUrl, ctx.serviceKey, fetchImpl);
   const started = Date.now();
-  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false, digests: 0, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null };
+  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false, extraPages: 0, extraFail: 0, extraDropped: 0, digests: 0, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null };
 
   // 0. wish-list imports (Ønskeskyen): before the price checks, so that the new products get their first price in this run.
   // Own step: it never fails the run, and it is skipped quietly when the imports table does not exist yet.
@@ -323,14 +358,159 @@ async function run(ctx) {
   const pageCache = new Map();
   let lastFetchAt = 0;
   stats.total = products.length;
+
+  // what a product needs this run: 'initial' (first fetch), 'track', or null. An error row waits out the 6-hour retry, except that an
+  // answer with extra shops that came after the last check (compare_at newer than last_checked) is tried at once.
+  const todoOf = (prod) => {
+    const st = prod.status || 'pending';
+    if (st === 'pending') return 'initial';
+    if (st === 'error') {
+      const last = prod.last_checked ? Date.parse(prod.last_checked) : NaN;
+      if (isFinite(last) && now.getTime() - last < ERROR_RETRY_MS) {
+        const t = X.links(prod).length ? classify(prod.source_url) : null;
+        return t && t.shop && prod.compare_state === 'done' && Date.parse(prod.compare_at) > last ? 'initial' : null;
+      }
+      return 'initial';
+    }
+    if (st === 'tracking') return Array.isArray(prod.tracked_variants) && prod.tracked_variants.length ? 'track' : 'initial';
+    if (st === 'choose') return Array.isArray(prod.tracked_variants) && prod.tracked_variants.length ? 'track' : null;
+    return null;
+  };
+
+  // Extra shops: at most X.MAX_FETCHES extra pages per run over all products, the link that has gone longest without an attempt first
+  // (extra_state.at), so every product gets its turn. A link that has failed 10 times in a row is left out unless a day has passed.
+  const extraOK = new Set();
+  {
+    const cands = [];
+    products.forEach((prod) => {
+      const ls = X.links(prod);
+      if (!ls.length || !todoOf(prod)) return;
+      const t = classify(prod.source_url);
+      if (!t || !t.shop) return;
+      ls.forEach((u) => {
+        const stt = X.stateOf(prod)[u] || {};
+        if (X.slow(stt, now)) return;
+        const at = Date.parse(stt.at);
+        cands.push({ key: prod.id + '|' + u, at: isFinite(at) ? at : 0, n: cands.length });
+      });
+    });
+    X.pick(cands).forEach((k) => extraOK.add(k));
+  }
+
+  // One page, once per run (a link several products share is read once), with the pause between two requests.
+  const fetchCached = async (url) => {
+    let pr = pageCache.get(url);
+    if (!pr) {
+      const wait = lastFetchAt ? PAUSE_MS - (Date.now() - lastFetchAt) : 0;
+      if (wait > 0) await sleep(wait);
+      lastFetchAt = Date.now();
+      stats.pages++;
+      pr = getPage(url).then((page) => ({ page }), (error) => ({ error }));
+      pageCache.set(url, pr);
+    }
+    return pr;
+  };
+  const noteBlocked = (error, hostKey) => {
+    if (error instanceof PJ.PageError && error.kind === 'blocked') { stats.blocked = true; if (stats.blockedHosts.indexOf(hostKey) === -1) stats.blockedHosts.push(hostKey); }
+  };
+
+  // A single-shop product with extra shops: the main page as always plus each extra page; the result is ONE tracking check in the same
+  // shape as a Prisjagt product (the rows of all shops, one variant "shop"). The main shop failing is not an error while an extra shop
+  // answers. Extra offers whose price is far from the other shops' are another product and are dropped. Pushes to results (or not at
+  // all when the time is up, like the plain path).
+  const runWithExtras = async (prod, todo, target, ls) => {
+    const profile = profiles[prod.user_id] || null, iso = isoNow(now);
+    const mainKey = SHOP.registrableDomain(new URL(target.url).hostname);
+    const prev = X.stateOf(prod), next = {};
+    let main = null, mainErr = null;
+    if (stats.blockedHosts.indexOf(mainKey) !== -1) mainErr = Object.assign(new PJ.PageError('blocked', 'afvist tidligere i kørslen'), { shop: true });
+    else {
+      if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; return; }
+      const got = await fetchCached(target.url);
+      if (got.error) { stats.pageFail++; noteBlocked(got.error, mainKey); mainErr = got.error; } else main = got.page;
+    }
+    const vid = main && main.variants && main.variants[0] ? main.variants[0].id : SHOP.SHOP_ID;
+    const fresh = [], carried = [];
+    const carry = (url) => {        // not fetched this run (capped, or out of time): the offer of the last check stays as it was
+      const o = (Array.isArray(prod.offers) ? prod.offers : []).find((x) => x && x.url === url && typeof x.price === 'number');
+      if (o) carried.push({ key: url, variant: vid, store: o.store, price: o.price, url, inStock: o.inStock !== false, stock: o.inStock === false ? 'OutOfStock' : 'InStock', note: o.note || null, name: o.store, saleKnown: false, sale: false, carried: true });
+      if (prev[url]) next[url] = prev[url];
+    };
+    for (const url of ls) {
+      const stt = prev[url] || {}, hostKey = SHOP.registrableDomain(new URL(url).hostname);
+      if (!extraOK.has(prod.id + '|' + url)) { carry(url); continue; }
+      if (stats.blockedHosts.indexOf(hostKey) !== -1) { if (prev[url]) next[url] = prev[url]; continue; }     // refused earlier in this run: left alone
+      if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; carry(url); continue; }
+      stats.extraPages++;
+      const got = await fetchCached(url);
+      const fail = (why) => { stats.extraFail++; log('  ' + (prod.name || prod.id) + ' (' + hostKey + '): ' + why); next[url] = { seen: !!stt.seen, fails: (Number(stt.fails) || 0) + 1, at: iso }; };
+      if (got.error) { noteBlocked(got.error, hostKey); fail(errorNote(got.error)); continue; }
+      const row = got.page && Array.isArray(got.page.rows) ? got.page.rows[0] : null;
+      if (!row || typeof row.price !== 'number') { fail('ingen pris'); continue; }
+      fresh.push({ url, hostKey, stt, page: got.page, row: Object.assign({}, row, { variant: vid, url, key: url, extraNew: X.isNew(prod, stt) }) });
+    }
+    // another product: far from the median of the other shops' prices of this run (the main shop and the carried offers count as others)
+    const all = (main ? main.rows : []).concat(carried, fresh.map((f) => f.row));
+    const kept = fresh.filter((f) => {
+      if (!X.isOutlier(f.row.price, all.filter((r) => r !== f.row).map((r) => r.price))) return true;
+      stats.extraDropped++;
+      log('  ' + (prod.name || prod.id) + ' (' + f.hostKey + '): prisen ' + f.row.price + ' kr. ligner en anden vare og bruges ikke.');
+      next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso };
+      return false;
+    });
+    // one offer per shop name: a second shop with the same name is called by its address instead
+    const names = new Set((main ? main.rows : []).map((r) => String(r.store || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')));
+    const extraRows = [];
+    kept.concat(carried.map((c) => ({ carriedRow: c, url: c.url, row: c }))).forEach((f) => {
+      const row = f.row;
+      let k = String(row.store || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+      if (names.has(k)) { row.store = X.hostOf(f.url); k = row.store.replace(/[^\p{L}\p{N}]/gu, ''); }
+      if (names.has(k)) return;
+      names.add(k); extraRows.push(row);
+    });
+    const extraPatch = (tp) => {     // the job's own bookkeeping, written along with the check
+      if (!Object.prototype.hasOwnProperty.call(prod, 'extra_state')) return {};
+      const recorded = !!tp && Object.prototype.hasOwnProperty.call(tp.patch, 'offers');
+      kept.forEach((f) => { if (extraRows.indexOf(f.row) !== -1) next[f.url] = { seen: !!f.stt.seen || recorded, fails: 0, at: iso }; else next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso }; });
+      const out = {};
+      ls.forEach((u) => { if (next[u]) out[u] = next[u]; });
+      const val = Object.keys(out).length ? out : null;
+      return JSON.stringify(val) === JSON.stringify(prod.extra_state === undefined ? null : prod.extra_state) ? {} : { extra_state: val };
+    };
+    if (!main && !kept.length) {      // nothing to go on: as a plain failure of the main page (the failing extras are counted in the state)
+      const err = mainErr || new PJ.PageError('layout', 'ingen butikker kunne læses');
+      const note = errorNote(err);
+      log('  ' + (prod.name || prod.id) + ': ' + note);
+      const want = wantsCompare(prod, target, err) || wantsCompareAgain(prod, target, err, now) ? wantedPatch(prod, now) : {};
+      const ep = extraPatch(null);
+      if (todo === 'initial') results.push({ prod, patch: Object.assign({ status: 'error', check_note: note, last_checked: iso }, want, ep), hit: null });
+      else results.push({ prod, patch: Object.assign({ check_note: note }, want, ep), hit: null });
+      return;
+    }
+    const rows = (main ? main.rows : []).concat(extraRows);
+    const inStock = rows.filter((r) => r.inStock).map((r) => r.price);
+    const first = kept[0] ? kept[0].page : null;
+    const variant = main
+      ? Object.assign({}, main.variants[0], { lowest: inStock.length ? Math.min.apply(null, inStock) : null, offers: rows.length })
+      : { id: vid, label: extraRows[0].store, lowest: inStock.length ? Math.min.apply(null, inStock) : null, offers: rows.length, sample: first && first.variants && first.variants[0] ? first.variants[0].sample : null };
+    const parsed = main ? Object.assign({}, main, { rows, variants: [variant] })
+      : { title: first ? first.title : null, rows, variants: [variant], history: [], note: null, shop: true, source: first ? first.source : null, image: null };
+    if (todo === 'initial') {
+      const ip = initialPatch(prod, parsed, now);
+      if (ip.track) {
+        const nb = Object.assign({}, prod, ip.patch);
+        const tp = trackingPatch(nb, profile, parsed, now);
+        results.push({ prod, patch: Object.assign({}, ip.patch, tp.patch, extraPatch(tp)), hit: tp.hit, base: nb, parsed, profile, shop: true });
+      } else results.push({ prod, patch: Object.assign({}, ip.patch, extraPatch(null)), hit: null });
+    } else {
+      const tp = trackingPatch(prod, profile, parsed, now);
+      results.push({ prod, patch: Object.assign({}, tp.patch, extraPatch(tp)), hit: tp.hit, base: prod, parsed, profile, shop: true });
+    }
+  };
   for (const prod of products) {
     const st = prod.status || 'pending';
     stats[st] = (stats[st] || 0) + 1;
-    let todo = null;
-    if (st === 'pending') todo = 'initial';
-    else if (st === 'error') todo = prod.last_checked && now.getTime() - Date.parse(prod.last_checked) < ERROR_RETRY_MS ? null : 'initial';
-    else if (st === 'tracking') todo = Array.isArray(prod.tracked_variants) && prod.tracked_variants.length ? 'track' : 'initial';
-    else if (st === 'choose') todo = Array.isArray(prod.tracked_variants) && prod.tracked_variants.length ? 'track' : null;
+    const todo = todoOf(prod);
     if (!todo) {
       // an old error row still waiting out the 6-hour retry: mark it (no fetch) if its stored note says the shop refuses us
       if (st === 'error') {
@@ -346,6 +526,12 @@ async function run(ctx) {
       const note = SHOP.isPrisjagtHost(host) ? 'Linket er ikke et gyldigt produktlink fra prisjagt.dk.' : 'Linket kan ikke bruges. Brug en https-adresse til en produktside hos en butik eller på prisjagt.dk.';
       results.push({ prod, patch: { status: 'error', check_note: note, last_checked: isoNow(now) }, hit: null }); continue;
     }
+    const extraLinks = target.shop ? X.links(prod) : [];
+    if (extraLinks.length) {
+      try { await runWithExtras(prod, todo, target, extraLinks); }
+      catch (e) { stats.pageFail++; log('  ' + (prod.name || prod.id) + ': uventet fejl: ' + (e && e.stack || e)); }
+      continue;
+    }
     const url = target.url, hostKey = SHOP.registrableDomain(new URL(url).hostname);
     if (stats.blockedHosts.indexOf(hostKey) !== -1) {                // refused earlier in this run: leave the rest of that host alone
       const blockedErr = Object.assign(new PJ.PageError('blocked', 'afvist tidligere i kørslen'), { shop: true });
@@ -355,19 +541,10 @@ async function run(ctx) {
     if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; continue; }
 
     try {
-      let pr = pageCache.get(url);
-      if (!pr) {
-        const wait = lastFetchAt ? PAUSE_MS - (Date.now() - lastFetchAt) : 0;
-        if (wait > 0) await sleep(wait);
-        lastFetchAt = Date.now();
-        stats.pages++;
-        pr = getPage(url).then((page) => ({ page }), (error) => ({ error }));
-        pageCache.set(url, pr);
-      }
-      const got = await pr;
+      const got = await fetchCached(url);
       if (got.error) {
         stats.pageFail++;
-        if (got.error instanceof PJ.PageError && got.error.kind === 'blocked') { stats.blocked = true; if (stats.blockedHosts.indexOf(hostKey) === -1) stats.blockedHosts.push(hostKey); }
+        noteBlocked(got.error, hostKey);
         const note = errorNote(got.error);
         log('  ' + (prod.name || prod.id) + ': ' + note);
         const want = wantsCompare(prod, target, got.error) || wantsCompareAgain(prod, target, got.error, now) ? wantedPatch(prod, now) : {};
@@ -392,6 +569,27 @@ async function run(ctx) {
       stats.pageFail++;
       log('  ' + (prod.name || prod.id) + ': uventet fejl: ' + (e && e.stack || e));
     }
+  }
+
+  // 3b. automatic compare markings (rules 3 and 4 above), at most AUTO_COMPARE_MAX new ones per run. A product that already got a marking in
+  // this run (rules 1 and 2) is not marked twice; its marking counts against the budget. The second chances go first (a hasty 'none'
+  // is more likely wrong than a never-asked product is a problem), then the never-asked, each in the order of the list (oldest check first).
+  {
+    const resultOf0 = new Map(results.map((r) => [r.prod.id, r]));
+    let budget = AUTO_COMPARE_MAX;
+    results.forEach((r) => { if (r.patch.compare_state === 'wanted') budget--; });
+    const due = { second: [], first: [] };
+    products.forEach((prod) => {
+      const r = resultOf0.get(prod.id);
+      if (r && r.patch.compare_state !== undefined) return;
+      const kind = autoCompare(prod, classify(prod.source_url), now);
+      if (kind) due[kind].push(prod);
+    });
+    due.second.concat(due.first).slice(0, Math.max(0, budget)).forEach((prod) => {
+      const r = resultOf0.get(prod.id), patch = wantedPatch(prod, now);
+      if (r) Object.assign(r.patch, patch); else results.push({ prod, patch, hit: null });
+      stats.autoCompare = (stats.autoCompare || 0) + 1;
+    });
   }
 
   // 4. older prices from the Internet Archive: single-shop products in tracking whose attempt has not been made yet.
@@ -519,7 +717,7 @@ async function run(ctx) {
   // 6. summary (5 lines)
   const summary = [
     'Produkter: ' + stats.total + ' aktive (nye: ' + stats.pending + ', følges: ' + stats.tracking + ', venter på valg: ' + stats.choose + ', fejl: ' + stats.error + ').',
-    'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.blockedHosts.length ? ' (afvist af ' + stats.blockedHosts.join(', ') + ': resten derfra sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
+    'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.extraPages ? ' (ekstra butikker: ' + stats.extraPages + ', uden pris: ' + stats.extraFail + ', forkastet som anden vare: ' + stats.extraDropped + ')' : '') + (stats.blockedHosts.length ? ' (afvist af ' + stats.blockedHosts.join(', ') + ': resten derfra sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
     'Nye hits: ' + stats.hits + '.' + (stats.backfilled ? ' Ældre priser fra Internet Archive: ' + stats.backfillPoints + ' for ' + stats.backfilled + ' produkt(er).' : ''),
     'E-mails sendt: ' + stats.sent + (stats.digests ? ' (heraf morgenmails: ' + stats.digests + ')' : '') + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte.',
     'Skrevet til databasen: ' + stats.written + ', skrivefejl: ' + stats.writeFail + '. Tid: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s.',
@@ -528,7 +726,7 @@ async function run(ctx) {
   return { stats, summary, results };
 }
 
-module.exports = { run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, wantsCompareAgain, oldErrorWantsCompare, MAX_BACKFILL };
+module.exports = { autoCompare, AUTO_COMPARE_MAX, run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, wantsCompareAgain, oldErrorWantsCompare, MAX_BACKFILL };
 
 if (require.main === module) {
   const e = process.env;

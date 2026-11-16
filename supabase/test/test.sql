@@ -921,13 +921,13 @@ reset role;
 -- a donor row that differs from a-gave in every column but the bought ones, used to try every column
 insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
   status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id,
-  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries)
+  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state)
 values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
   'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01',
-  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2);
+  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}');
 update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
   variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04',
-  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg'
+  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg', extra_urls = '["https://tredje.example.dk/gave"]', extra_state = '{"x":{"fails":3}}'
  where name = 'a-gave';
 create table t.donor as select * from public.products where name = 'donor';
 create table t.snap as select id, to_jsonb(p) as j from public.products p where name = 'a-gave';
@@ -1787,7 +1787,7 @@ reset role; set role authenticated; select t.asA(); select t.tok('fel');
 select t.chk('compare: a signed-in user without the token: refused', t.ccount() = 'resolver: invalid or missing token' and t.rc('cmp-w1', null) = 'error:resolver: invalid or missing token');
 reset role;
 select t.chk('compare: grants as the other resolver functions (anon and authenticated may execute, public may not)',
-  has_function_privilege('anon', 'public.resolver_compare(uuid, text)', 'execute') and has_function_privilege('authenticated', 'public.resolver_compare(uuid, text)', 'execute')
+  has_function_privilege('anon', 'public.resolver_compare(uuid, text, jsonb)', 'execute') and has_function_privilege('authenticated', 'public.resolver_compare(uuid, text, jsonb)', 'execute')
   and has_function_privilege('anon', 'public.resolver_list()', 'execute') and has_function_privilege('authenticated', 'public.resolver_list()', 'execute')
   and not exists (select 1 from information_schema.routine_privileges where routine_name in ('resolver_list', 'resolver_compare', 'resolver_set', 'resolver_fail') and grantee = 'PUBLIC')
   and (select count(*) = 1 from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace));
@@ -1918,6 +1918,236 @@ select t.chk('image: a new link starts the product over without the old picture'
   and t.q($$select (image_url is null and status = 'pending')::text from public.products where id = '00000000-0000-0000-0000-0000000000e1'$$) = 'true');
 reset role;
 delete from public.products where name ~ '^img-';
+
+-- 11g. extra shops: extra_urls / extra_state, the guard (remove one entry only), resolver_compare with p_shops
+delete from public.products;
+delete from public.lists where name = 'Ext';
+insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000aa0e', '00000000-0000-0000-0000-0000000000a1', 'Ext');
+insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa0e', '00000000-0000-0000-0000-0000000000b2') on conflict do nothing;
+update public.resolver_secret set token = repeat('a', 64);
+select t.tok(null);
+-- a tracked single-shop product with job-written state (st = compare_state, ex = extra_urls)
+create function t.exmk(n text, u text, st text, ex jsonb, lst uuid default null) returns void language sql security definer as $$
+  insert into public.products (user_id, name, source_url, target_type, target_value, status, title, variants, offers, history, normal_price, verdict, warning, check_note,
+    last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, tracked_variants, list_id, compare_state, compare_at, extra_urls, extra_state, image_url)
+  values ('00000000-0000-0000-0000-0000000000a1', n, u, 'pct', 15, 'tracking', 'Titel ' || n, '[{"id":"shop"}]', '[{"store":"Shop","price":450,"inStock":true}]',
+    '[{"d":"2026-11-01","p":500,"s":"Shop","src":"check"}]', 600, '{"level":"poor"}', 'w', 'n', '2026-11-02', 450, '2026-11-03', '{"result":"done"}', 440, '2026-11-04', array['shop'],
+    lst, st, case when st is null then null else now() - interval '2 days' end, ex, case when ex is null then null else '{"x":{"seen":true}}'::jsonb end, 'https://img.example.dk/i.jpg') $$;
+grant execute on function t.exmk(text, text, text, jsonb, uuid) to public;
+create function t.rs3(n text, u text, s jsonb) returns text language plpgsql as $$
+declare r boolean; begin r := public.resolver_compare(t.pid(n), u, s); return coalesce(r::text, 'null'); exception when others then return 'error:' || sqlerrm; end $$;
+grant execute on function t.rs3(text, text, jsonb) to public;
+create function t.ex(n text) returns text language sql security definer as $$ select coalesce(extra_urls::text, 'null') from public.products where name = n $$;
+grant execute on function t.ex(text) to public;
+create function t.snapstate(n text) returns jsonb language sql security definer as $$
+  select to_jsonb(p) - 'extra_urls' - 'extra_state' - 'compare_state' - 'compare_at' from public.products p where name = n $$;
+grant execute on function t.snapstate(text) to public;
+
+select t.chk('extra: the columns and checks exist (one check each), extra_urls_error exists',
+  (select count(*) = 2 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name in ('extra_urls', 'extra_state') and is_nullable = 'YES')
+  and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_extra_urls_check')
+  and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_extra_state_check')
+  and (select count(*) = 1 from pg_proc where proname = 'extra_urls_error' and pronamespace = 'public'::regnamespace));
+
+select t.exmk('ex-base', 'https://www.shop.example.dk/vare/1', null, null);
+select t.exmk('ex-pj', 'https://prisjagt.dk/product.php?p=5', null, null);
+select t.chk('extra: the check accepts 1 and 5 links (one per shop), the null, and a link with a query or path',
+  t.err($$update public.products set extra_urls = '["https://a.example.dk/vare?id=1"]' where name = 'ex-base'$$) = 'ok1'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://b.example.dk/2","https://c.example.dk/3","https://d.example.dk/4","https://e.example.dk/5"]' where name = 'ex-base'$$) = 'ok1'
+  and t.err($$update public.products set extra_urls = null where name = 'ex-base'$$) = 'ok1');
+select t.chk('extra: the check rejects none, six, a non-array, a non-text entry, and a null entry',
+  t.err($$update public.products set extra_urls = '[]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://b.example.dk/2","https://c.example.dk/3","https://d.example.dk/4","https://e.example.dk/5","https://f.example.dk/6"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '{"a":"https://a.example.dk/1"}' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '"https://a.example.dk/1"' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '[5]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '[null]' where name = 'ex-base'$$) like '%products_extra_urls_check%');
+select t.chk('extra: the check rejects http, a port, user:password@, spaces, no dot, an entry over 500 characters',
+  t.err($$update public.products set extra_urls = '["http://a.example.dk/1"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk:8443/1"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://u:p@a.example.dk/1"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk/a b"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://localhost/1"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = to_jsonb(array['https://a.example.dk/' || repeat('a', 485)]) where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = to_jsonb(array['https://a.example.dk/' || repeat('a', 470)]) where name = 'ex-base'$$) = 'ok1');
+update public.products set extra_urls = null where name = 'ex-base';
+select t.chk('extra: the check rejects prisjagt.dk (also www and upper case), the product''s own shop (also www, case, another path), a second link to one shop, shops on a prisjagt product',
+  t.err($$update public.products set extra_urls = '["https://prisjagt.dk/product.php?p=1"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://www.PRISJAGT.dk/product.php?p=1"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://shop.example.dk/vare/2"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://WWW.Shop.Example.dk/andet"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://www.a.example.dk/2"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://b.example.dk/1","https://A.example.dk/3"]' where name = 'ex-base'$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk/1"]' where name = 'ex-pj'$$) like '%products_extra_urls_check%');
+select t.chk('extra: a name-only product (no link) cannot have extra shops; extra_state must be an object',
+  t.err($$insert into public.products (user_id, name, target_type, extra_urls) values ('00000000-0000-0000-0000-0000000000a1', 'ex-navn', 'auto', '["https://a.example.dk/1"]')$$) like '%products_extra_urls_check%'
+  and t.err($$update public.products set extra_state = '[1]' where name = 'ex-base'$$) like '%products_extra_state_check%'
+  and t.err($$update public.products set extra_state = '{"a":{"fails":1}}' where name = 'ex-base'$$) = 'ok1'
+  and t.err($$update public.products set extra_state = null where name = 'ex-base'$$) = 'ok1');
+select t.chk('extra: a link change (by the job, postgres) to a host that is among the extras is refused by the check',
+  t.err($$update public.products set extra_urls = '["https://a.example.dk/1"]' where name = 'ex-base'$$) = 'ok1'
+  and t.err($$update public.products set source_url = 'https://a.example.dk/andet' where name = 'ex-base'$$) like '%products_extra_urls_check%');
+delete from public.products;
+
+-- ---- the person (browser): never adds or changes, may remove one entry of their own product
+select t.exmk('ex-own', 'https://shop.example.dk/vare', 'done', '["https://a.example.dk/1","https://b.example.dk/2","https://c.example.dk/3"]', '00000000-0000-0000-0000-00000000aa0e');
+select t.exmk('ex-one', 'https://shop.example.dk/en', 'done', '["https://a.example.dk/1"]');
+select t.exmk('ex-null', 'https://shop.example.dk/ingen', 'none', null);
+set role authenticated;
+select t.asA();
+select t.chk('extra: a browser insert cannot preset extra_urls or extra_state',
+  t.err($$insert into public.products (name, source_url, target_type, extra_urls, extra_state) values ('ex-ny', 'https://shop.example.dk/ny', 'auto', '["https://a.example.dk/1"]', '{"a":{"seen":true}}')$$) = 'ok1'
+  and t.q($$select (extra_urls is null and extra_state is null)::text from public.products where name = 'ex-ny'$$) = 'true');
+select t.chk('extra: the owner cannot add (null to a list): ignored, the rest of the update goes through',
+  t.err($$update public.products set extra_urls = '["https://z.example.dk/9"]', name = 'ex-null2' where name = 'ex-null'$$) = 'ok1'
+  and t.ex('ex-null2') = 'null');
+select t.chk('extra: the owner cannot change an entry, add one, reorder, duplicate, empty, null, replace, or shrink to something that is not the old list minus one entry',
+  t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://b.example.dk/CHANGED","https://c.example.dk/3"]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://b.example.dk/2","https://c.example.dk/3","https://d.example.dk/4"]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]'
+  and t.err($$update public.products set extra_urls = '["https://c.example.dk/3","https://b.example.dk/2","https://a.example.dk/1"]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://b.example.dk/2","https://c.example.dk/3","https://c.example.dk/3"]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]'
+  and t.err($$update public.products set extra_urls = '[]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]'
+  and t.err($$update public.products set extra_urls = null where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]'
+  and t.err($$update public.products set extra_urls = '"x"' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://x.example.dk/9"]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]'
+  and t.err($$update public.products set extra_urls = '["https://b.example.dk/2"]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]'
+  and t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://c.example.dk/CHANGED"]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]');
+select t.chk('extra: the owner cannot write extra_state, and compare_state stays',
+  t.err($$update public.products set extra_state = '{"https://a.example.dk/1":{"fails":99}}' where name = 'ex-own'$$) = 'ok1'
+  and t.q($$select (extra_state = '{"x":{"seen":true}}'::jsonb and compare_state = 'done')::text from public.products where name = 'ex-own'$$) = 'true');
+reset role;
+create table t.exsnap as select t.snapstate('ex-own') as j;
+grant select on t.exsnap to public;
+set role authenticated; select t.asA();
+select t.chk('extra: the owner removes the middle entry: the same array minus one, order kept; the job state is dropped (the job rebuilds it), nothing else changes',
+  t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://c.example.dk/3"]' where name = 'ex-own'$$) = 'ok1'
+  and t.ex('ex-own') = '["https://a.example.dk/1", "https://c.example.dk/3"]'
+  and t.q($$select (extra_state is null and compare_state = 'done')::text from public.products where name = 'ex-own'$$) = 'true'
+  and t.snapstate('ex-own') = (select j from t.exsnap));
+select t.chk('extra: ... then the first, leaving one', t.err($$update public.products set extra_urls = '["https://c.example.dk/3"]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://c.example.dk/3"]');
+select t.chk('extra: removing the last entry gives null and compare_state none (compare_at now): the product counts as not found elsewhere',
+  t.err($$update public.products set extra_urls = null where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = 'null'
+  and t.q($$select (compare_state = 'none' and compare_at > now() - interval '1 minute')::text from public.products where name = 'ex-own'$$) = 'true');
+select t.chk('extra: with one entry, an empty array or another link changes nothing; only null removes it',
+  t.err($$update public.products set extra_urls = '[]' where name = 'ex-one'$$) = 'ok1' and t.ex('ex-one') = '["https://a.example.dk/1"]'
+  and t.err($$update public.products set extra_urls = '["https://z.example.dk/1"]' where name = 'ex-one'$$) = 'ok1' and t.ex('ex-one') = '["https://a.example.dk/1"]'
+  and t.err($$update public.products set extra_urls = null where name = 'ex-one'$$) = 'ok1' and t.ex('ex-one') = 'null');
+reset role;
+update public.products set extra_urls = '["https://a.example.dk/1","https://b.example.dk/2"]', extra_state = '{"x":{"seen":true}}', compare_state = 'done' where name = 'ex-own';
+set role authenticated; select t.asA();
+select t.chk('extra: a link change by the person resets extra_urls and extra_state (and the comparison starts over)',
+  t.err($$update public.products set source_url = 'https://anden.example.dk/vare' where name = 'ex-own'$$) = 'ok1'
+  and t.q($$select (extra_urls is null and extra_state is null and compare_state is null and status = 'pending')::text from public.products where name = 'ex-own'$$) = 'true');
+reset role;
+update public.products set extra_urls = '["https://a.example.dk/1","https://b.example.dk/2"]', compare_state = 'done', source_url = 'https://shop.example.dk/vare' where name = 'ex-own';
+set role authenticated; select t.asB();
+select t.chk('extra: a list member (B) cannot change extra_urls on A''s product: not even to remove one',
+  t.err($$update public.products set extra_urls = '["https://a.example.dk/1"]' where name = 'ex-own'$$) like 'Kun den, der har tilføjet%'
+  and t.err($$update public.products set extra_urls = null where name = 'ex-own'$$) like 'Kun den, der har tilføjet%'
+  and t.err($$update public.products set extra_state = '{}' where name = 'ex-own'$$) like 'Kun den, der har tilføjet%'
+  and t.ex('ex-own') = '["https://a.example.dk/1", "https://b.example.dk/2"]');
+reset role;
+insert into public.products (user_id, name, source_url, target_type, compare_state, extra_urls) values ('00000000-0000-0000-0000-0000000000b2', 'ex-b', 'https://b.example.dk/x', 'auto', 'done', '["https://k.example.dk/1","https://l.example.dk/2"]');
+set role authenticated; select t.asA();
+select t.chk('extra: A cannot see or change B''s own product', (select count(*) = 0 from public.products where name = 'ex-b') and t.err($$update public.products set extra_urls = '["https://k.example.dk/1"]' where name = 'ex-b'$$) = 'ok0');
+select t.asB();
+select t.chk('extra: B removes one entry of their own product', t.err($$update public.products set extra_urls = '["https://l.example.dk/2"]' where name = 'ex-b'$$) = 'ok1' and t.ex('ex-b') = '["https://l.example.dk/2"]');
+reset role;
+delete from public.products;
+
+-- ---- resolver_compare: the token
+select t.exmk('sh-w1', 'https://www.shop.example.dk/vare/1', 'wanted', null);
+select t.exmk('sh-w2', 'https://proshop.example.dk/y', 'wanted', null);
+select t.exmk('sh-w3', 'https://shop3.example.dk/y', 'wanted', null);
+select t.exmk('sh-w4', 'https://shop4.example.dk/y', 'wanted', null);
+select t.exmk('sh-none', 'https://shop5.example.dk/y', 'none', null);
+select t.exmk('sh-pjw', 'https://prisjagt.dk/product.php?p=3', 'wanted', null);
+select t.chk('extra shops: the token is needed for the new form too (none, empty, wrong, a prefix); nothing changes',
+  (select bool_and(r) from (
+    select t.rs3('sh-w1', null, '["https://a.example.dk/1"]') = 'error:resolver: invalid or missing token' as r from (select t.tok(null)) x union all
+    select t.rs3('sh-w1', null, '["https://a.example.dk/1"]') = 'error:resolver: invalid or missing token' from (select t.tok('')) x union all
+    select t.rs3('sh-w1', null, '["https://a.example.dk/1"]') = 'error:resolver: invalid or missing token' from (select t.tok('fel')) x union all
+    select t.rs3('sh-w1', null, '["https://a.example.dk/1"]') = 'error:resolver: invalid or missing token' from (select t.tok(repeat('a', 63))) x) y)
+  and t.ex('sh-w1') = 'null' and t.q($$select (compare_state = 'wanted')::text from public.products where name = 'sh-w1'$$) = 'true');
+set role anon; select t.tok(null);
+select t.chk('extra shops: anon without a token: refused', t.rs3('sh-w1', null, '["https://a.example.dk/1"]') = 'error:resolver: invalid or missing token');
+reset role; set role authenticated; select t.asA(); select t.tok('fel');
+select t.chk('extra shops: a signed-in user without the token: refused', t.rs3('sh-w1', null, '["https://a.example.dk/1"]') = 'error:resolver: invalid or missing token');
+reset role;
+select t.chk('extra shops: grants as the other resolver functions, exactly one resolver_compare (three arguments, one default)',
+  has_function_privilege('anon', 'public.resolver_compare(uuid, text, jsonb)', 'execute') and has_function_privilege('authenticated', 'public.resolver_compare(uuid, text, jsonb)', 'execute')
+  and not exists (select 1 from information_schema.routine_privileges where routine_name in ('resolver_list', 'resolver_compare', 'resolver_set', 'resolver_fail') and grantee = 'PUBLIC')
+  and (select count(*) = 1 from pg_proc where proname = 'resolver_compare' and pronamespace = 'public'::regnamespace)
+  and (select pronargs = 3 and pronargdefaults = 1 from pg_proc where proname = 'resolver_compare' and pronamespace = 'public'::regnamespace));
+
+-- ---- resolver_compare: the answers
+select t.tok(repeat('a', 64));
+set role anon;
+select t.chk('extra shops: p_url and p_shops together: refused (22023), nothing changes',
+  t.rs3('sh-w1', 'https://prisjagt.dk/product.php?p=1', '["https://a.example.dk/1"]') = 'error:resolver: give either a prisjagt.dk link or other shops, not both'
+  and t.q($$select (compare_state = 'wanted' and extra_urls is null and source_url = 'https://www.shop.example.dk/vare/1')::text from public.products where name = 'sh-w1'$$) = 'true');
+select t.chk('extra shops: a bad call names the bad entry and changes nothing (not an array, empty, six, not text, http, prisjagt, own shop, same shop twice, not a link, a port)',
+  t.rs3('sh-w1', null, '"https://a.example.dk/1"') like 'error:resolver: shops must be an array%'
+  and t.rs3('sh-w1', null, '{"a":1}') like 'error:resolver: shops must be an array%'
+  and t.rs3('sh-w1', null, '[]') like 'error:resolver: shops must hold 1 to 5 links, not 0%'
+  and t.rs3('sh-w1', null, '["https://a.example.dk/1","https://b.example.dk/1","https://c.example.dk/1","https://d.example.dk/1","https://e.example.dk/1","https://f.example.dk/1"]') like 'error:resolver: shops must hold 1 to 5 links, not 6%'
+  and t.rs3('sh-w1', null, '["https://a.example.dk/1", 7]') like 'error:resolver: shops entry 2 is not a link%'
+  and t.rs3('sh-w1', null, '["https://a.example.dk/1", null]') like 'error:resolver: shops entry 2 is not a link%'
+  and t.rs3('sh-w1', null, '["https://a.example.dk/1", "http://b.example.dk/2"]') = 'error:resolver: shops entry 2 is not an https product link: http://b.example.dk/2'
+  and t.rs3('sh-w1', null, '["ikke et link"]') = 'error:resolver: shops entry 1 is not an https product link: ikke et link'
+  and t.rs3('sh-w1', null, '["https://a.example.dk/1", "https://www.prisjagt.dk/product.php?p=4"]') = 'error:resolver: shops entry 2 is a prisjagt.dk link: https://www.prisjagt.dk/product.php?p=4'
+  and t.rs3('sh-w1', null, '["https://a.example.dk/1", "https://shop.example.dk/vare/2"]') = 'error:resolver: shops entry 2 is the shop of the product itself: https://shop.example.dk/vare/2'
+  and t.rs3('sh-w1', null, '["https://a.example.dk/1", "https://WWW.A.example.dk/2"]') = 'error:resolver: shops entry 2 is a second link to the same shop: https://WWW.A.example.dk/2'
+  and t.rs3('sh-w1', null, '["https://a.example.dk:81/1"]') like 'error:resolver: shops entry 1 is not an https product link%'
+  and t.ex('sh-w1') = 'null' and t.q($$select (compare_state = 'wanted')::text from public.products where name = 'sh-w1'$$) = 'true');
+select t.chk('extra shops: a bad call is an error also for a product that is not waiting; a good one for it is false',
+  t.rs3('sh-none', null, '["http://a.example.dk/1"]') like 'error:resolver: shops entry 1 is not an https%'
+  and t.rs3('sh-none', null, '["https://a.example.dk/1"]') = 'false' and t.ex('sh-none') = 'null');
+reset role;
+create table t.exsnap2 as select t.snapstate('sh-w1') as j;
+grant select on t.exsnap2 to public;
+set role anon;
+select t.chk('extra shops: a good answer (links trimmed) returns true: the product keeps its link, extra_urls is set, compare_state done, compare_at now',
+  t.rs3('sh-w1', null, '[" https://a.example.dk/vare?id=1 ", "https://www.b.example.dk/2"]') = 'true'
+  and t.ex('sh-w1') = '["https://a.example.dk/vare?id=1", "https://www.b.example.dk/2"]'
+  and t.q($$select (compare_state = 'done' and compare_at > now() - interval '1 minute' and source_url = 'https://www.shop.example.dk/vare/1' and shop_url is null and extra_state is null)::text from public.products where name = 'sh-w1'$$) = 'true');
+select t.chk('extra shops: ... the job-written state is NOT reset: every other column is exactly as it was (price, history, offers, title, check, notification, picture ...)',
+  t.snapstate('sh-w1') = (select j from t.exsnap2));
+select t.chk('extra shops: ... a second answer for the same product (no longer waiting) returns false and changes nothing',
+  t.rs3('sh-w1', null, '["https://z.example.dk/9"]') = 'false' and t.rs3('sh-w1', null, null) = 'false'
+  and t.ex('sh-w1') = '["https://a.example.dk/vare?id=1", "https://www.b.example.dk/2"]');
+select t.chk('extra shops: five links are fine; the entries keep their order',
+  t.rs3('sh-w2', null, '["https://e.example.dk/5","https://d.example.dk/4","https://c.example.dk/3","https://b.example.dk/2","https://a.example.dk/1"]') = 'true'
+  and t.ex('sh-w2') = '["https://e.example.dk/5", "https://d.example.dk/4", "https://c.example.dk/3", "https://b.example.dk/2", "https://a.example.dk/1"]');
+select t.chk('extra shops: not waiting (none) returns false and changes nothing; a waiting prisjagt product cannot get shops (error); an unknown id returns false',
+  t.rs3('sh-none', null, '["https://a.example.dk/1"]') = 'false' and t.ex('sh-none') = 'null'
+  and t.rs3('sh-pjw', null, '["https://a.example.dk/1"]') = 'error:resolver: only a product that follows one shop can have extra shops'
+  and public.resolver_compare('00000000-0000-0000-0000-00000000ffff', null, '["https://a.example.dk/1"]') = false);
+reset role;
+update public.products set active = false where name = 'sh-w3';
+set role anon;
+select t.chk('extra shops: an inactive product returns false', t.rs3('sh-w3', null, '["https://a.example.dk/1"]') = 'false' and t.ex('sh-w3') = 'null');
+select t.chk('extra shops: a json null in place of the array means "not found": compare_state none, nothing else changes',
+  t.rs3('sh-w4', null, 'null'::jsonb) = 'true'
+  and t.q($$select (compare_state = 'none' and extra_urls is null and status = 'tracking' and history is not null)::text from public.products where name = 'sh-w4'$$) = 'true');
+reset role;
+update public.products set compare_state = 'wanted' where name = 'sh-w4';
+set role anon;
+select t.chk('extra shops: the old two-argument call form still works (id, null) = none',
+  public.resolver_compare(t.pid('sh-w4'), null) = true
+  and t.q($$select (compare_state = 'none')::text from public.products where name = 'sh-w4'$$) = 'true');
+reset role;
+update public.products set compare_state = 'wanted', extra_urls = '["https://a.example.dk/1"]', extra_state = '{"https://a.example.dk/1":{"seen":true}}' where name = 'sh-w4';
+set role anon;
+select t.chk('extra shops: ... and (id, prisjagt link) = the switch, which also clears extra_urls and extra_state and still resets the job state',
+  public.resolver_compare(t.pid('sh-w4'), 'https://www.prisjagt.dk/product.php?p=77') = true
+  and t.q($$select (source_url = 'https://prisjagt.dk/product.php?p=77' and extra_urls is null and extra_state is null and status = 'pending' and shop_url = 'https://shop4.example.dk/y' and compare_state = 'done' and offers is null)::text from public.products where name = 'sh-w4'$$) = 'true');
+select t.chk('extra shops: resolver_list does not list a product that has been answered with shops', not exists (select 1 from public.resolver_list() where name in ('sh-w1', 'sh-w2')));
+reset role;
+select t.tok(null);
+delete from public.products;
+delete from public.lists where name = 'Ext';
+select set_config('request.jwt.claims', '', false);
 
 -- 12. final whole-file run on the populated database
 \o /dev/null

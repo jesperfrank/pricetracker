@@ -2199,9 +2199,10 @@ test("compare: a shop that refuses, or has no price we can read, asks for a comp
   assert.strictEqual(w('C1'), 'wanted', 'refused (403)'); assert.strictEqual(by('C1').check_note, 'Butikken afviser automatiske opslag.'); assert.strictEqual(by('C1').status, 'error');
   assert.strictEqual(w('C2'), 'wanted', 'same host, skipped after the refusal in this run: asked for as well'); assert.strictEqual(by('C2').status, 'pending', 'but otherwise not touched'); assert(!ctx.fetched.includes(A2));
   assert.strictEqual(w('C3'), 'wanted', 'no price in the structured data'); assert.strictEqual(w('C4'), 'wanted', 'not in kroner');
-  assert.strictEqual(w('C5'), null, 'page gone (404)'); assert.strictEqual(w('C6'), null, 'timeout'); assert.strictEqual(w('C7'), null, 'network error / 5xx');
-  assert.strictEqual(w('C8'), null, 'a shop that works'); assert.strictEqual(w('C9'), null, 'a prisjagt link');
-  assert.strictEqual(w('D1'), 'none', 'looked for and not found: never again'); assert.strictEqual(by('D1').compare_at, '2026-11-01T00:00:00Z');
+  // rule A (compare everything): every other single-shop product with no state is marked too, whatever happened at the fetch (budget 10)
+  ['C5', 'C6', 'C7', 'C8'].forEach((id) => { assert.strictEqual(w(id), 'wanted', id + ' marked by the compare-everything rule'); assert.strictEqual(by(id).compare_tries, 1, id); });
+  assert.strictEqual(by('C5').status, 'error', 'a marking changes nothing else'); assert.strictEqual(w('C9'), null, 'a prisjagt link is never asked');
+  assert.strictEqual(w('D1'), 'wanted', 'a hasty none (tries 0, over an hour old) gets its one second chance'); assert.strictEqual(by('D1').compare_tries, 1);
   assert.strictEqual(w('D2'), 'done'); assert.strictEqual(by('D2').shop_url, 'https://old.dk/x'); assert.strictEqual(w('D3'), 'wanted'); assert.strictEqual(by('D3').compare_at, '2026-11-02T00:00:00Z', 'a request is not stamped again');
   assert.strictEqual(by('C1').compare_at, '2026-11-16T10:00:00Z', 'the time of the request is stored'); assert.strictEqual(by('C2').compare_at, '2026-11-16T10:00:00Z');
   assert(db.sent.length === 0);
@@ -2238,8 +2239,9 @@ test('compare: an old error row (already waiting out the 6-hour retry) is marked
   const by = (id) => db.products.find((p) => p.id === id);
   assert.deepStrictEqual(ctx.fetched, [], 'nothing is fetched'); assert.strictEqual(res.summary.length, 5);
   ['E1', 'E2', 'E3'].forEach((id) => { assert.strictEqual(by(id).compare_state, 'wanted', id); assert.strictEqual(by(id).compare_at, '2026-11-16T10:00:00Z', id); assert.strictEqual(by(id).status, 'error'); assert.strictEqual(by(id).last_checked, recent, id + ' keeps its check time'); });
-  ['F1', 'F2', 'F3', 'H1'].forEach((id) => assert.strictEqual(by(id).compare_state, null, id));
-  assert.strictEqual(by('G1').compare_state, 'none'); assert.strictEqual(by('G1').compare_at, '2026-11-16T00:00:00Z', 'a none under 24 hours old is left alone');
+  ['F1', 'F2', 'F3'].forEach((id) => { assert.strictEqual(by(id).compare_state, 'wanted', id + ' (rule A: every single-shop product)'); assert.strictEqual(by(id).status, 'error'); assert.strictEqual(by(id).last_checked, recent); });
+  assert.strictEqual(by('H1').compare_state, null);
+  assert.strictEqual(by('G1').compare_state, 'wanted', 'rule B: a none with tries 0 gets a second chance (here no 24 hour wait)'); assert.strictEqual(by('G1').compare_tries, 1);
   assert.strictEqual(by('G2').compare_state, 'done'); assert.strictEqual(by('G2').shop_url, 'https://old.dk/x');
   assert.strictEqual(by('G3').compare_state, 'wanted'); assert.strictEqual(by('G3').compare_at, '2026-11-02T00:00:00Z');
   assert.strictEqual(db.sent.length, 0);
@@ -2257,11 +2259,11 @@ test("compare: an error product with a 'none' older than 24 hours is marked 'wan
   const db = newDb();
   db.products.push(
     err('R1', 'https://www.a1.dk/x', { compare_at: '2026-11-15T09:00:00Z' }),                       // 25 hours: due
-    err('R2', 'https://www.a2.dk/x', { compare_at: '2026-11-15T11:00:00Z' }),                       // 23 hours: not yet
+    err('R2', 'https://www.a2.dk/x', { compare_at: '2026-11-15T11:00:00Z', compare_tries: 2 }),     // 23 hours: not yet
     err('R3', 'https://www.a3.dk/x', { compare_at: '2026-11-10T00:00:00Z', compare_tries: 3 }),     // used up
     err('R4', 'https://www.a4.dk/x', { compare_at: '2026-11-10T00:00:00Z', compare_tries: 2 }),     // the last one
-    err('R5', 'https://www.a5.dk/x', { compare_at: '2026-11-10T00:00:00Z', check_note: 'Siden findes ikke (HTTP 404). Tjek linket.' }),
-    err('R6', 'https://www.a6.dk/x', { compare_at: '2026-11-10T00:00:00Z', status: 'tracking' }),
+    err('R5', 'https://www.a5.dk/x', { compare_at: '2026-11-10T00:00:00Z', compare_tries: 2, check_note: 'Siden findes ikke (HTTP 404). Tjek linket.' }),
+    err('R6', 'https://www.a6.dk/x', { compare_at: '2026-11-10T00:00:00Z', compare_tries: 2, status: 'tracking' }),
     err('R7', 'https://prisjagt.dk/product.php?p=5745115', { compare_at: '2026-11-10T00:00:00Z' }),
     err('R8', 'https://www.a8.dk/x', { compare_at: '2026-11-10T00:00:00Z', compare_state: 'done', shop_url: 'https://old.dk/x' }),
     err('R9', 'https://www.a9.dk/x', { compare_at: '2026-11-10T00:00:00Z', check_note: 'Kunne ikke finde en pris på siden.' }));
@@ -2269,7 +2271,7 @@ test("compare: an error product with a 'none' older than 24 hours is marked 'wan
   await R.run(ctx);
   const by = (id) => db.products.find((p) => p.id === id);
   assert.strictEqual(by('R1').compare_state, 'wanted'); assert.strictEqual(by('R1').compare_at, '2026-11-16T10:00:00Z'); assert.strictEqual(by('R1').compare_tries, 2); assert.strictEqual(by('R1').status, 'error');
-  assert.strictEqual(by('R2').compare_state, 'none'); assert.strictEqual(by('R2').compare_tries, 1);
+  assert.strictEqual(by('R2').compare_state, 'none'); assert.strictEqual(by('R2').compare_tries, 2);
   assert.strictEqual(by('R3').compare_state, 'none'); assert.strictEqual(by('R3').compare_tries, 3, 'stops after 3');
   assert.strictEqual(by('R4').compare_state, 'wanted'); assert.strictEqual(by('R4').compare_tries, 3);
   ['R5', 'R6', 'R7'].forEach((id) => assert.strictEqual(by(id).compare_state, 'none', id));
@@ -2403,6 +2405,334 @@ test('compare: a price goal and a switch: the first check is silent whether or n
   db4.profiles.push({ user_id: 'u1', notify_email: true, mail_digest: true, digest_sent_at: null, shops_always: [], shops_exclude: [], shops_only: false });
   db4.products.push(switchLikeSql(shopProduct('M1', 'u1', 'https://www.proshop.dk/m', { target_type: 'auto', target_value: null, compare_state: 'wanted', digest_price: null }), PJ_URL));
   await R.run(ctxFor(db4, { [PJ_URL]: dyson })); assert.strictEqual(db4.sent.length, 0); assert.strictEqual(db4.products[0].digest_price, null);
+});
+
+// ---------------------------------------------------------------- extra shops (products.extra_urls)
+
+const EX_MAIN = 'https://www.hovedbutik.dk/vare/1', EX_A = 'https://www.butik-a.dk/p/1', EX_B = 'https://www.butik-b.dk/p/2', EX_C = 'https://www.butik-c.dk/p/3';
+// a shop page: site name, price, stock, picture
+function xHtml(site, price, stock, img) {
+  return shopHtml('shop-jsonld-single').replace('content="Bedre Nætter"', 'content="' + site + '"').replace('"579.00"', '"' + price + '"')
+    .replace('https://schema.org/InStock', stock === false ? 'https://schema.org/OutOfStock' : 'https://schema.org/InStock')
+    .replace('<meta property="og:type"', '<meta property="og:image" content="' + (img || 'https://cdn.example.dk/default.jpg') + '">\n<meta property="og:type"');
+}
+// a tracked single-shop product with extra shops; the answer (compare_state done) came before the last check unless said otherwise
+function exProduct(id, extras, extra) {
+  return shopProduct(id, 'u1', EX_MAIN, Object.assign({
+    status: 'tracking', tracked_variants: ['shop'], target_type: 'price', target_value: 1, title: 'Vare', variants: [{ id: 'shop', label: 'Hovedbutik', lowest: 500, offers: 1, sample: 'Vare' }],
+    offers: [{ store: 'Hovedbutik', price: 500, url: EX_MAIN, inStock: true, note: null, variant: 'shop' }], history: [{ d: '2026-11-10', p: 500, s: 'Hovedbutik', src: 'check' }],
+    last_checked: '2026-11-16T09:00:00Z', compare_state: 'done', compare_at: '2026-11-15T09:00:00Z', extra_urls: extras, extra_state: null, image_url: null,
+  }, extra || {}));
+}
+const exMap = (o) => Object.assign({ [EX_MAIN]: xHtml('Hovedbutik', 500, true, 'https://cdn.example.dk/main.jpg'), [EX_A]: xHtml('Butik A', 450, true, 'https://cdn.example.dk/a.jpg'), [EX_B]: xHtml('Butik B', 480, true, 'https://cdn.example.dk/b.jpg') }, o || {});
+
+test('extras: the links the job will fetch (guard, https, own shop, duplicates, at most 5, missing column)', () => {
+  const X = require('./lib/extras');
+  const row = (u, over) => Object.assign({ source_url: EX_MAIN, extra_urls: u }, over || {});
+  assert.deepStrictEqual(X.links(row([EX_A, EX_B])), [EX_A, EX_B]);
+  assert.deepStrictEqual(X.links(row([' ' + EX_A + ' ', 'http://www.butik-b.dk/x', 'https://localhost/x', 'https://10.0.0.1/x', 'https://www.prisjagt.dk/product.php?p=1', 5, null, 'https://u:p@butik-c.dk/x', 'https://butik-c.dk:8443/x'])), [EX_A]);
+  assert.deepStrictEqual(X.links(row([EX_A, 'https://butik-a.dk/andet', 'https://www.hovedbutik.dk/anden', 'https://hovedbutik.dk/x'])), [EX_A], 'one link per shop, never the main shop');
+  assert.strictEqual(X.links(row(['https://a1.dk/x', 'https://a2.dk/x', 'https://a3.dk/x', 'https://a4.dk/x', 'https://a5.dk/x', 'https://a6.dk/x'])).length, 5);
+  assert.deepStrictEqual(X.links({ source_url: EX_MAIN }), [], 'a database without the column');
+  assert.deepStrictEqual(X.links(row(null)), []); assert.deepStrictEqual(X.links(row('x')), []); assert.deepStrictEqual(X.links(row({ a: 1 })), []);
+  assert.deepStrictEqual(X.links(row([EX_A], { source_url: 'https://prisjagt.dk/product.php?p=1' })), [], 'never for a prisjagt product');
+});
+
+test('extras: the outlier rule (below 40 % or above 250 % of the median of the other shops, at least two others) and the rotation order', () => {
+  const X = require('./lib/extras');
+  assert.strictEqual(X.median([3, 1, 2]), 2); assert.strictEqual(X.median([1, 2, 3, 10]), 2.5);
+  assert.strictEqual(X.isOutlier(195, [500, 480]), true); assert.strictEqual(X.isOutlier(196, [500, 480]), false, 'median 490: 40 % is 196');
+  assert.strictEqual(X.isOutlier(1225, [500, 480]), false); assert.strictEqual(X.isOutlier(1226, [500, 480]), true, '250 % of 490 is 1225');
+  assert.strictEqual(X.isOutlier(10, [500]), false, 'one other shop: nothing to compare with'); assert.strictEqual(X.isOutlier(10, []), false);
+  assert.strictEqual(X.isOutlier(10, [500, null, 'x']), false, 'only real prices count as others');
+  assert.strictEqual(X.isOutlier(100, [100, 100, 5000]), false, 'the median ignores one wild shop'); assert.strictEqual(X.isOutlier(100, [500, 600, 700, 800]), true);
+  assert.deepStrictEqual(X.pick([{ key: 'a', at: 50, n: 0 }, { key: 'b', at: 0, n: 1 }, { key: 'c', at: 20, n: 2 }, { key: 'd', at: 0, n: 3 }], 3), ['b', 'd', 'c']);
+  const st = (f, at) => ({ fails: f, at });
+  assert.strictEqual(X.slow(st(10, '2026-11-16T08:00:00Z'), NOW), true); assert.strictEqual(X.slow(st(9, '2026-11-16T08:00:00Z'), NOW), false);
+  assert.strictEqual(X.slow(st(25, '2026-11-15T09:59:59Z'), NOW), false, 'a day has passed'); assert.strictEqual(X.slow(st(25, '2026-11-15T10:00:01Z'), NOW), true); assert.strictEqual(X.slow({}, NOW), false);
+});
+
+test('extras: a single-shop product with extra shops is one tracking check over all shops, in the Prisjagt offers shape', async () => {
+  const db = newDb();
+  db.products.push(exProduct('E1', [EX_A, EX_B], { target_value: 1 }));
+  const ctx = shopCtx(db, exMap()); const res = await R.run(ctx);
+  const P1 = db.products[0];
+  assert.deepStrictEqual(ctx.fetched, [EX_MAIN, EX_A, EX_B], 'the main page, then each extra page, once each');
+  assert.strictEqual(P1.status, 'tracking'); assert.strictEqual(P1.check_note, null);
+  assert.deepStrictEqual(P1.offers, [
+    { store: 'Butik A', price: 450, url: EX_A, inStock: true, note: null, variant: 'shop' }, { store: 'Butik B', price: 480, url: EX_B, inStock: true, note: null, variant: 'shop' },
+    { store: 'Hovedbutik', price: 500, url: EX_MAIN, inStock: true, note: null, variant: 'shop' }]);
+  assert.deepStrictEqual(P1.history.slice(-1), [{ d: '2026-11-16', p: 450, s: 'Butik A', src: 'check' }], 'the lowest in-stock price of all shops is the price of the day');
+  assert.deepStrictEqual(P1.variants, [{ id: 'shop', label: 'Hovedbutik', lowest: 450, offers: 3, sample: 'Mayan kuvertlagen 180x200 hvid' }]);
+  assert.strictEqual(P1.title, 'Vare', 'the title the person has is kept'); assert.strictEqual(P1.image_url, 'https://cdn.example.dk/main.jpg', 'the picture is the main page\'s');
+  assert.deepStrictEqual(Object.keys(P1.extra_state).sort(), [EX_A, EX_B]);
+  assert(P1.extra_state[EX_A].seen === true && P1.extra_state[EX_A].fails === 0 && P1.extra_state[EX_A].at === '2026-11-16T10:00:00Z');
+  assert.strictEqual(res.summary.length, 5); assert(/ekstra butikker: 2/.test(res.summary[1]), res.summary[1]);
+  // a sold-out extra shop is listed but never the price; no stock anywhere but the main shop: the main shop's price
+  const db2 = newDb(); db2.products.push(exProduct('E2', [EX_A, EX_B]));
+  await R.run(shopCtx(db2, exMap({ [EX_A]: xHtml('Butik A', 300, false), [EX_B]: xHtml('Butik B', 470, true) })));
+  assert.strictEqual(db2.products[0].offers.length, 3); assert.strictEqual(db2.products[0].offers.find((o) => o.store === 'Butik A').inStock, false);
+  assert.strictEqual(db2.products[0].history.slice(-1)[0].p, 470); assert.strictEqual(db2.products[0].variants[0].lowest, 470);
+  // the person's shop choices apply to the extra shops as well
+  const db3 = newDb(); db3.products.push(exProduct('E3', [EX_A, EX_B], { shops_exclude: ['Butik A'] }));
+  await R.run(shopCtx(db3, exMap())); assert.deepStrictEqual(db3.products[0].offers.map((o) => o.store), ['Butik B', 'Hovedbutik']); assert.strictEqual(db3.products[0].history.slice(-1)[0].p, 480);
+  // a link other than https or the same shop as the main page is never fetched
+  const db4 = newDb(); db4.products.push(exProduct('E4', ['http://www.butik-a.dk/p/1', 'https://hovedbutik.dk/anden', 'https://www.prisjagt.dk/product.php?p=1']));
+  const c4 = shopCtx(db4, exMap()); await R.run(c4); assert.deepStrictEqual(c4.fetched, [EX_MAIN]); assert.strictEqual(db4.products[0].offers.length, 1);
+});
+
+test('extras: a product without extras, or a database without the column, is fetched as before', async () => {
+  const db = newDb();
+  db.products.push(exProduct('E1', null), exProduct('E2', [EX_A]));
+  delete db.products[1].extra_urls; delete db.products[1].extra_state;
+  const ctx = shopCtx(db, exMap()); await R.run(ctx);
+  assert.deepStrictEqual(ctx.fetched, [EX_MAIN], 'the main page is read once for both, nothing else');
+  assert(db.products.every((p) => p.status === 'tracking' && p.offers.length === 1 && !('extra_state' in p && p.extra_state)));
+  assert(!('extra_urls' in db.products[1]) && !('extra_state' in db.products[1]), 'the missing columns are never written');
+  // extra_urls without extra_state (should not happen): the check still works and writes nothing to the missing column
+  const db2 = newDb(); db2.products.push(exProduct('E3', [EX_A])); delete db2.products[0].extra_state;
+  await R.run(shopCtx(db2, exMap())); assert.strictEqual(db2.products[0].offers.length, 2); assert(!('extra_state' in db2.products[0]));
+});
+
+test('extras: the main shop failing is no error while an extra shop answers; the failing shop is absent; all failing is a plain failure', async () => {
+  const db = newDb();
+  db.products.push(exProduct('E1', [EX_A, EX_B]));
+  const map = exMap({ [EX_MAIN]: () => resp(503, 'x'), [EX_B]: () => resp(404, '') });
+  await R.run(shopCtx(db, map));
+  let P1 = db.products[0];
+  assert.strictEqual(P1.status, 'tracking'); assert.strictEqual(P1.check_note, null); assert.deepStrictEqual(P1.offers.map((o) => o.store), ['Butik A']);
+  assert.strictEqual(P1.history.slice(-1)[0].p, 450); assert.strictEqual(P1.last_checked, '2026-11-16T10:00:00Z');
+  assert.deepStrictEqual(P1.extra_state[EX_A].fails, 0); assert.deepStrictEqual([P1.extra_state[EX_B].fails, P1.extra_state[EX_B].seen], [1, false]);
+  // the main shop refuses us: the same, and the refusal is remembered for the rest of the run only
+  const db2 = newDb(); db2.products.push(exProduct('E2', [EX_A]), shopProduct('E9', 'u1', 'https://hovedbutik.dk/anden', { name: 'Anden' }));
+  const c2 = shopCtx(db2, exMap({ [EX_MAIN]: () => resp(403, 'Forbidden') })); const r2 = await R.run(c2);
+  assert.strictEqual(db2.products[0].status, 'tracking'); assert.deepStrictEqual(db2.products[0].offers.map((o) => o.store), ['Butik A']);
+  assert.deepStrictEqual(r2.stats.blockedHosts, ['hovedbutik.dk']); assert(!c2.fetched.includes('https://hovedbutik.dk/anden'), 'the rest of that host is skipped');
+  // everything fails: a tracked product keeps its data and gets the note of the main page, a new one is an error
+  const db3 = newDb(); db3.products.push(exProduct('E3', [EX_A, EX_B]), exProduct('E4', [EX_A, EX_B], { status: 'pending', tracked_variants: null, offers: null, history: null, title: null, variants: null, last_checked: null, compare_at: null, compare_state: null }));
+  db3.products[1].source_url = 'https://www.hovedbutik2.dk/vare/2';
+  const dead = { [EX_MAIN]: () => resp(404, ''), 'https://www.hovedbutik2.dk/vare/2': () => resp(404, ''), [EX_A]: () => resp(502, ''), [EX_B]: () => { const e = new Error('t'); e.name = 'AbortError'; throw e; } };
+  await R.run(shopCtx(db3, dead));
+  assert.strictEqual(db3.products[0].status, 'tracking'); assert(/Siden findes ikke/.test(db3.products[0].check_note)); assert.strictEqual(db3.products[0].history.length, 1);
+  assert.strictEqual(db3.products[0].extra_state[EX_A].fails, 1); assert.strictEqual(db3.products[0].extra_state[EX_B].fails, 1);
+  assert.strictEqual(db3.products[1].status, 'error'); assert(/Siden findes ikke/.test(db3.products[1].check_note));
+});
+
+test('extras: a product in error whose answer with extra shops came after the last check is tried at once and becomes tracking', async () => {
+  const db = newDb();
+  const e = (id, over) => exProduct(id, [EX_A, EX_B], Object.assign({ status: 'error', check_note: 'Butikken afviser automatiske opslag.', tracked_variants: null, title: null, variants: null, offers: null, history: null,
+    last_checked: '2026-11-16T08:00:00Z', compare_state: 'done', compare_at: '2026-11-16T09:00:00Z', backfill_state: null }, over || {}));
+  db.products.push(e('E1'), e('E2', { compare_at: '2026-11-16T07:00:00Z' }), e('E3', { compare_state: 'none' }));
+  const c = shopCtx(db, exMap({ [EX_MAIN]: () => resp(403, 'Forbidden') }));
+  const wb = []; c.waybackFetch = archiveFake({}, wb, '[]'); c.waybackSleep = async () => {};
+  const res = await R.run(c);
+  const E1 = db.products[0];
+  assert.strictEqual(E1.status, 'tracking'); assert.deepStrictEqual(E1.tracked_variants, ['shop']); assert.strictEqual(E1.check_note, null); assert.strictEqual(E1.title, 'Mayan kuvertlagen 180x200 hvid');
+  assert.deepStrictEqual(E1.offers.map((o) => o.store), ['Butik A', 'Butik B']); assert.strictEqual(E1.history.length, 1); assert.strictEqual(E1.image_url, null, 'no picture from an extra page');
+  assert.strictEqual(db.products[1].status, 'error', 'an answer older than the last check waits out the 6 hours as before'); assert.strictEqual(db.products[2].status, 'error');
+  assert.strictEqual(res.stats.pages, 3, 'one main page (refused, shared) and two extra pages');
+  // Internet Archive: the main link only (also when the main page cannot be read)
+  assert(wb.length > 0 && wb.every((x) => new URL(x.u).hostname === 'web.archive.org' && decodeURIComponent(x.u).indexOf(EX_MAIN.replace(/^https:\/\//, '')) !== -1 && !/butik-[ab]/.test(x.u)), wb.map((x) => x.u).join(' '));
+  assert.strictEqual(E1.backfill_state && E1.backfill_state.result, 'done');
+});
+
+test('extras: an extra page that is clearly another product is dropped and records nothing; not in kroner is dropped as always', async () => {
+  const db = newDb();
+  db.products.push(exProduct('E1', [EX_A, EX_B, EX_C]));
+  const map = exMap({ [EX_A]: xHtml('Butik A', 120, true), [EX_B]: xHtml('Butik B', 480, true), [EX_C]: shopHtml('shop-eur') });
+  const res = await R.run(shopCtx(db, map));
+  let P1 = db.products[0];
+  assert.deepStrictEqual(P1.offers.map((o) => o.store), ['Butik B', 'Hovedbutik'], '120 kr. is 24 % of the others\' median (490)');
+  assert.strictEqual(P1.history.slice(-1)[0].p, 480, 'no history point for the dropped price'); assert.strictEqual(res.stats.extraDropped, 1);
+  assert.strictEqual(P1.extra_state[EX_A].fails, 1); assert.strictEqual(P1.extra_state[EX_A].seen, false); assert.strictEqual(P1.extra_state[EX_C].fails, 1);
+  assert.strictEqual(P1.extra_state[EX_B].fails, 0); assert.strictEqual(P1.notified_price, null);
+  // too expensive (more than 250 %) as well
+  const db2 = newDb(); db2.products.push(exProduct('E2', [EX_A, EX_B]));
+  await R.run(shopCtx(db2, exMap({ [EX_A]: xHtml('Butik A', 1300, true) }))); assert.deepStrictEqual(db2.products[0].offers.map((o) => o.store), ['Butik B', 'Hovedbutik']);
+  // inside the limits it stays (45 % and 240 % of the median 490)
+  const db3 = newDb(); db3.products.push(exProduct('E3', [EX_A, EX_B]), exProduct('E3b', [EX_A, EX_B]));
+  db3.products[1].source_url = 'https://www.hovedbutik2.dk/vare/2';
+  await R.run(shopCtx(db3, exMap({ [EX_A]: xHtml('Butik A', 220, true), 'https://www.hovedbutik2.dk/vare/2': xHtml('Hoved 2', 500, true) }))); assert.strictEqual(db3.products[0].offers.length, 3);
+  const db3b = newDb(); db3b.products.push(exProduct('E3c', [EX_A, EX_B]));
+  await R.run(shopCtx(db3b, exMap({ [EX_A]: xHtml('Butik A', 1176, true) }))); assert.strictEqual(db3b.products[0].offers.length, 3);
+  // only one other shop (the main page failed): nothing to judge against, both stay (210 is 44 % of 480)
+  const db4 = newDb(); db4.products.push(exProduct('E4', [EX_A, EX_B]));
+  await R.run(shopCtx(db4, exMap({ [EX_MAIN]: () => resp(404, ''), [EX_A]: xHtml('Butik A', 210, true) }))); assert.deepStrictEqual(db4.products[0].offers.map((o) => o.store), ['Butik A', 'Butik B']);
+  // the dropped link was not dropped for good: the next run with a sane price takes it
+  await R.run(shopCtx(db, exMap())); P1 = db.products[0]; assert.strictEqual(P1.offers.length, 3); assert.strictEqual(P1.extra_state[EX_A].fails, 0); assert.strictEqual(P1.extra_state[EX_A].seen, true);
+});
+
+test('extras: the first check after shops were added is silent when the cheapest price comes from a new shop; a later real drop mails; the main shop is not silenced', async () => {
+  const db = newDb();
+  // the person wants 460 or less; the main shop had 500; the new shop A has 450, B 480
+  db.products.push(exProduct('E1', [EX_A, EX_B], { target_value: 460 }));
+  let res = await R.run(shopCtx(db, exMap()));
+  const P1 = () => db.products[0];
+  assert.strictEqual(P1().history.slice(-1)[0].p, 450); assert.strictEqual(res.stats.hits, 0); assert.strictEqual(db.sent.length, 0, 'a new shop being cheaper is no price drop');
+  assert.strictEqual(P1().notified_price, 450, 'remembered as already announced'); assert.strictEqual(P1().notified_at, null);
+  assert(P1().extra_state[EX_A].seen && P1().extra_state[EX_B].seen);
+  await R.run(shopCtx(db, exMap())); assert.strictEqual(db.sent.length, 0); assert.strictEqual(P1().notified_price, 450);
+  await R.run(shopCtx(db, exMap({ [EX_A]: xHtml('Butik A', 400, true) }))); assert.strictEqual(db.sent.length, 1, 'a real drop at a shop we know mails'); assert.strictEqual(P1().notified_price, 400);
+  // contrast: the same product when the shops are not new (state says seen): the hit mails at once
+  const db2 = newDb(); const seen = { [EX_A]: { seen: true, fails: 0, at: '2026-11-15T10:00:00Z' }, [EX_B]: { seen: true, fails: 0, at: '2026-11-15T10:00:00Z' } };
+  db2.products.push(exProduct('E2', [EX_A, EX_B], { target_value: 460, extra_state: seen }));
+  await R.run(shopCtx(db2, exMap())); assert.strictEqual(db2.sent.length, 1); assert.strictEqual(db2.products[0].notified_price, 450);
+  // the main shop is the cheapest while the new shops are dearer: a normal hit, not silent
+  const db3 = newDb(); db3.products.push(exProduct('E3', [EX_A, EX_B], { target_value: 460 }));
+  await R.run(shopCtx(db3, exMap({ [EX_MAIN]: xHtml('Hovedbutik', 440, true), [EX_A]: xHtml('Butik A', 450, true) }))); assert.strictEqual(db3.sent.length, 1); assert.strictEqual(db3.products[0].notified_price, 440);
+  // a shop that is added later: only its own cheap price is silent, once (shop A is known, C is new and cheapest)
+  const db4 = newDb(); db4.products.push(exProduct('E4', [EX_A, EX_C], { target_value: 460, extra_state: { [EX_A]: { seen: true, fails: 0, at: '2026-11-15T10:00:00Z' } }, offers: [{ store: 'Butik A', price: 470, url: EX_A, inStock: true, note: null, variant: 'shop' }] }));
+  await R.run(shopCtx(db4, exMap({ [EX_A]: xHtml('Butik A', 470, true), [EX_C]: xHtml('Butik C', 430, true) }))); assert.strictEqual(db4.sent.length, 0); assert.strictEqual(db4.products[0].notified_price, 430);
+  // a shop that fails on its first tries is still new when it finally answers
+  const db5 = newDb(); db5.products.push(exProduct('E5', [EX_A, EX_B], { target_value: 460 }));
+  await R.run(shopCtx(db5, exMap({ [EX_A]: () => resp(404, '') }))); assert.strictEqual(db5.sent.length, 0, 'B 480 is no hit anyway'); assert.strictEqual(db5.products[0].extra_state[EX_A].seen, false);
+  await R.run(shopCtx(db5, exMap())); assert.strictEqual(db5.sent.length, 0, 'A is cheap now, but new: silent'); assert.strictEqual(db5.products[0].notified_price, 450);
+  // a bought product never mails; goal 'auto' goes the same way; without the state column the answer time decides
+  const db6 = newDb(); db6.products.push(exProduct('E6', [EX_A, EX_B], { target_value: 460, bought_at: '2026-11-01T00:00:00Z', bought_price: 600 }));
+  await R.run(shopCtx(db6, exMap())); assert.strictEqual(db6.sent.length, 0);
+  const db7 = newDb(); db7.products.push(exProduct('E7', [EX_A, EX_B], { target_value: 460, compare_at: '2026-11-16T09:30:00Z' })); delete db7.products[0].extra_state;
+  await R.run(shopCtx(db7, exMap())); assert.strictEqual(db7.sent.length, 0, 'no state column: the answer (09:30) is newer than the last check (09:00): silent'); assert.strictEqual(db7.products[0].notified_price, 450);
+  const db8 = newDb(); db8.products.push(exProduct('E8', [EX_A, EX_B], { target_value: 460 })); delete db8.products[0].extra_state;
+  await R.run(shopCtx(db8, exMap())); assert.strictEqual(db8.sent.length, 1, 'no state column and the answer is older than the last check: not new');
+});
+
+test('extras: a link that failed 10 times in a row is tried once a day only; the count restarts after a success', async () => {
+  const mk = (fails, at) => ({ [EX_A]: { seen: false, fails, at }, [EX_B]: { seen: true, fails: 0, at: '2026-11-15T10:00:00Z' } });
+  const db = newDb();
+  db.products.push(exProduct('E1', [EX_A, EX_B], { extra_state: mk(10, '2026-11-16T08:00:00Z') }), exProduct('E2', [EX_A, EX_B], { extra_state: mk(10, '2026-11-15T09:00:00Z') }), exProduct('E3', [EX_A, EX_B], { extra_state: mk(9, '2026-11-16T08:00:00Z') }));
+  db.products[1].source_url = 'https://www.hovedbutik2.dk/vare/2'; db.products[2].source_url = 'https://www.hovedbutik3.dk/vare/3';
+  const map = exMap({ 'https://www.hovedbutik2.dk/vare/2': xHtml('Hoved 2', 500, true), 'https://www.hovedbutik3.dk/vare/3': xHtml('Hoved 3', 500, true), [EX_A]: () => resp(404, '') });
+  const c = shopCtx(db, map); await R.run(c);
+  const aCalls = c.calls.filter((x) => x.u === EX_A).length;
+  assert.strictEqual(aCalls, 1, 'fetched once for the products where it is due (a shared page is read once per run): E2 (a day ago) and E3 (9 fails)');
+  assert.strictEqual(db.products[0].extra_state[EX_A].fails, 10, 'not tried: the state is as it was'); assert.strictEqual(db.products[0].extra_state[EX_A].at, '2026-11-16T08:00:00Z');
+  assert.strictEqual(db.products[1].extra_state[EX_A].fails, 11); assert.strictEqual(db.products[1].extra_state[EX_A].at, '2026-11-16T10:00:00Z');
+  assert.strictEqual(db.products[2].extra_state[EX_A].fails, 10, '9 and one more failure');
+  assert.strictEqual(db.products[0].offers.length, 2, 'the product itself is checked as always (main and B)');
+  // the next run (still the same minute): E3 is now a slow one too; a success clears the count
+  const c2 = shopCtx(db, exMap({ 'https://www.hovedbutik2.dk/vare/2': xHtml('Hoved 2', 500, true), 'https://www.hovedbutik3.dk/vare/3': xHtml('Hoved 3', 500, true) })); await R.run(c2);
+  assert.strictEqual(c2.calls.filter((x) => x.u === EX_A).length, 0, 'every product has it as slow now'); 
+  db.products[1].extra_state[EX_A].at = '2026-11-14T10:00:00Z';
+  const c3 = shopCtx(db, exMap({ 'https://www.hovedbutik2.dk/vare/2': xHtml('Hoved 2', 500, true), 'https://www.hovedbutik3.dk/vare/3': xHtml('Hoved 3', 500, true) })); await R.run(c3);
+  assert.strictEqual(c3.calls.filter((x) => x.u === EX_A).length, 1); assert.deepStrictEqual([db.products[1].extra_state[EX_A].fails, db.products[1].extra_state[EX_A].seen], [0, true]);
+  assert(db.products[1].offers.some((o) => o.store === 'Butik A'));
+});
+
+test('extras: a host that refuses is left alone for the rest of the run, whichever product it comes up in; the other shops are still read', async () => {
+  const db = newDb();
+  const M2 = 'https://www.hovedbutik2.dk/vare/2', A2 = 'https://shop.butik-a.dk/andet';
+  db.products.push(exProduct('E1', [EX_A, EX_B]), exProduct('E2', [A2, EX_B]), shopProduct('E3', 'u1', 'https://www.butik-a.dk/main', { name: 'Hos A' }));
+  db.products[1].source_url = M2;
+  const map = exMap({ [EX_A]: () => resp(429, 'Too many'), [M2]: xHtml('Hoved 2', 500, true), [A2]: xHtml('Butik A', 450, true), 'https://www.butik-a.dk/main': xHtml('Butik A', 450, true) });
+  const c = shopCtx(db, map); const res = await R.run(c);
+  assert.deepStrictEqual(res.stats.blockedHosts, ['butik-a.dk']);
+  assert.deepStrictEqual(c.fetched, [EX_MAIN, EX_A, EX_B, M2], 'EX_A refused once; A2 (same registrable domain) and the main shop of E3 are not asked; B is read once for both products');
+  assert.deepStrictEqual(db.products[1].offers.map((o) => o.store), ['Butik B', 'Hoved 2']);
+  assert.strictEqual(db.products[0].status, 'tracking'); assert.strictEqual(db.products[0].extra_state[EX_A].fails, 1);
+  assert.strictEqual(db.products[1].extra_state[A2], undefined, 'a skipped link has no state yet: nothing was tried');
+  assert.strictEqual(db.products[2].status, 'pending');
+});
+
+test('extras: at most 30 extra pages per run, the longest-untried first; the others keep their last offer and get their turn in the next run', async () => {
+  const db = newDb(), map = {};
+  for (let i = 0; i < 40; i++) {
+    const main = 'https://www.main' + i + '.dk/v', ex = 'https://www.extra' + i + '.dk/v';
+    map[main] = xHtml('Main ' + i, 500, true); map[ex] = xHtml('Extra ' + i, 450, true);
+    db.products.push(exProduct('P' + i, [ex], { name: 'Vare ' + i, source_url: main, offers: [{ store: 'Main ' + i, price: 500, url: main, inStock: true, note: null, variant: 'shop' }, { store: 'Extra ' + i, price: 440, url: ex, inStock: true, note: null, variant: 'shop' }] }));
+  }
+  let c = shopCtx(db, map); let res = await R.run(c);
+  const extraFetched = (c2) => c2.fetched.filter((u) => /extra\d+\.dk/.test(u));
+  assert.strictEqual(extraFetched(c).length, 30); assert.strictEqual(res.stats.extraPages, 30); assert.strictEqual(c.fetched.filter((u) => /main\d+\.dk/.test(u)).length, 40, 'every main page as always');
+  const first = new Set(extraFetched(c));
+  const skipped = db.products.filter((p) => !first.has(p.extra_urls[0]));
+  assert.strictEqual(skipped.length, 10);
+  skipped.forEach((p) => { const o = p.offers.find((x) => x.store.indexOf('Extra') === 0); assert(o && o.price === 440, 'the last offer of an unread shop is kept'); assert.strictEqual(p.status, 'tracking'); });
+  db.products.filter((p) => first.has(p.extra_urls[0])).forEach((p) => assert.strictEqual(p.offers.find((x) => x.store.indexOf('Extra') === 0).price, 450));
+  c = shopCtx(db, map); res = await R.run(c);
+  const second = extraFetched(c);
+  assert.strictEqual(second.length, 30); skipped.forEach((p) => assert(second.includes(p.extra_urls[0]), 'the ones that waited go first: ' + p.name));
+  skipped.forEach((p) => assert.strictEqual(p.offers.find((x) => x.store.indexOf('Extra') === 0).price, 450));
+});
+
+test('extras: the Internet Archive is asked about the main link only; a product with extras otherwise backfills as before', async () => {
+  const db = newDb();
+  db.products.push(exProduct('E1', [EX_A, EX_B], { backfill_state: null, history: [{ d: '2026-11-15', p: 500, s: 'Hovedbutik', src: 'check' }] }));
+  const calls = [];
+  const map = exMap({ [EX_MAIN]: shopHtml('shop-jsonld-single') });
+  const ctx = shopCtx(db, map, { waybackFetch: archiveFake(archiveCaptures(), calls), waybackSleep: async () => {} });
+  const res = await R.run(ctx);
+  assert.strictEqual(res.stats.backfilled, 1); assert(calls.length > 0);
+  assert(calls.every((x) => new URL(x.u).hostname === 'web.archive.org' && !/butik-[ab]/.test(x.u)), 'no extra link goes to the archive');
+  assert.strictEqual(db.products[0].backfill_state.result, 'done'); assert(db.products[0].history.some((h) => h.src === 'backfill'));
+  assert.deepStrictEqual(db.products[0].offers.map((o) => o.store).sort(), ['Bedre Nætter', 'Butik A', 'Butik B'], 'the shops are still all there after the backfill recomputation');
+});
+
+// ---------------------------------------------------------------- compare everything, and one second chance (rules 3 and 4 in job/run.js)
+
+test("compare everything: every active single-shop product without a state is marked 'wanted' (any status), at most 10 per run, never bought / prisjagt / without the column", async () => {
+  const db = newDb(), OK = shopHtml('shop-jsonld-single');
+  const map = {};
+  for (let i = 1; i <= 12; i++) { const u = 'https://www.s' + i + '.dk/v'; map[u] = i % 2 ? OK : () => resp(404, ''); db.products.push(shopProduct('A' + i, 'u1', u)); }
+  db.products.push(shopProduct('B1', 'u1', 'https://www.kobt.dk/v', { bought_at: '2026-11-01T00:00:00Z', bought_price: 5 }), product('P1', 'u1', 'dyson'),
+    shopProduct('Z1', 'u1', 'https://www.z1.dk/v', { compare_state: 'wanted', compare_at: '2026-11-02T00:00:00Z' }), shopProduct('Z2', 'u1', 'https://www.z2.dk/v', { compare_state: 'done', shop_url: 'https://o.dk/x' }));
+  map['https://www.kobt.dk/v'] = OK; map['https://www.z1.dk/v'] = OK; map['https://www.z2.dk/v'] = OK;
+  const ctx = shopCtx(db, map, {}); const dyson = pageFor('dyson'), inner = ctx.getPage;
+  ctx.getPage = async (url) => (url.indexOf('prisjagt.dk') !== -1 ? dyson : inner(url));
+  await R.run(ctx);
+  const by = (id) => db.products.find((p) => p.id === id), marked = () => db.products.filter((p) => /^A\d+$/.test(p.id) && p.compare_state === 'wanted');
+  assert.strictEqual(marked().length, 10, 'at most 10 new markings per run');
+  marked().forEach((p) => { assert.strictEqual(p.compare_tries, 1, p.id); assert.strictEqual(p.compare_at, '2026-11-16T10:00:00Z', p.id); });
+  assert(db.products.filter((p) => /^A\d+$/.test(p.id)).some((p) => p.status === 'error') && db.products.some((p) => /^A\d+$/.test(p.id) && p.status !== 'error'), 'tracking and error products alike');
+  ['B1', 'P1'].forEach((id) => assert.strictEqual(by(id).compare_state, null, id)); assert.strictEqual(by('Z1').compare_at, '2026-11-02T00:00:00Z'); assert.strictEqual(by('Z2').compare_state, 'done');
+  await R.run(ctx);   // the next run takes the other two
+  assert.strictEqual(marked().length, 12); assert(db.products.filter((p) => p.compare_state === 'wanted' && /^A\d+$/.test(p.id)).every((p) => p.compare_tries === 1), 'marked once, not twice');
+  // a database without the column: nothing is written
+  const db2 = newDb(); db2.products.push(shopProduct('N1', 'u1', 'https://www.s1.dk/v')); delete db2.products[0].compare_state; delete db2.products[0].compare_at; delete db2.products[0].shop_url; delete db2.products[0].compare_tries;
+  await R.run(shopCtx(db2, map)); assert(!('compare_state' in db2.products[0]) && !('compare_tries' in db2.products[0]));
+  assert.strictEqual(R.autoCompare({ compare_state: null, active: true }, { shop: false }, new Date()), null);
+});
+
+test("second chance: a single-shop 'none' with tries below 2, no extras and at least an hour old is asked once more, in any status; nothing else", async () => {
+  const OK = shopHtml('shop-jsonld-single'), H = (h) => '2026-11-16T' + h + ':00Z';       // now is 10:00
+  const mk = (id, ex) => shopProduct(id, 'u1', 'https://www.' + id.toLowerCase() + '.dk/v', Object.assign({ compare_state: 'none', compare_at: H('08:00'), compare_tries: 1 }, ex || {}));
+  const db = newDb(), map = {};
+  const rows = [mk('S1'), mk('S2', { compare_tries: 0 }), mk('S3', { compare_at: H('09:30') }), mk('S4', { compare_tries: 2 }), mk('S5', { extra_urls: ['https://www.andre.dk/v'] }), mk('S6', { status: 'tracking', tracked_variants: ['shop'], last_checked: H('09:50') }),
+    mk('S7', { status: 'error', check_note: 'Butikken afviser automatiske opslag.', last_checked: H('09:00') }), mk('S8', { compare_state: 'done', shop_url: 'https://o.dk/x' }), mk('S9', { bought_at: '2026-11-01T00:00:00Z' }), mk('S10', { compare_at: null })];
+  rows.forEach((r) => { map[r.source_url] = OK; }); map['https://www.andre.dk/v'] = OK;
+  db.products.push.apply(db.products, rows);
+  await R.run(shopCtx(db, map));
+  const by = (id) => db.products.find((p) => p.id === id);
+  ['S1', 'S2', 'S6', 'S7', 'S10'].forEach((id) => { assert.strictEqual(by(id).compare_state, 'wanted', id); assert.strictEqual(by(id).compare_at, H('10:00'), id); });
+  assert.strictEqual(by('S1').compare_tries, 2); assert.strictEqual(by('S2').compare_tries, 1, 'rows from before compare_tries have 0');
+  ['S3', 'S4', 'S5', 'S9'].forEach((id) => assert.strictEqual(by(id).compare_state, 'none', id)); assert.strictEqual(by('S8').compare_state, 'done');
+  assert.strictEqual(by('S6').status, 'tracking'); assert.strictEqual(by('S7').status, 'error', 'a marking changes nothing else');
+  // a database without compare_tries never asks again
+  const db2 = newDb(); db2.products.push(mk('Q1')); delete db2.products[0].compare_tries;
+  await R.run(shopCtx(db2, map)); assert.strictEqual(db2.products[0].compare_state, 'none');
+  // the shared budget: 10 per run, second chances first
+  const db3 = newDb(), map3 = {};
+  for (let i = 1; i <= 8; i++) { const a = mk('X' + i); db3.products.push(a); map3[a.source_url] = OK; }
+  for (let i = 1; i <= 8; i++) { const a = shopProduct('Y' + i, 'u1', 'https://www.y' + i + '.dk/v'); db3.products.push(a); map3[a.source_url] = OK; }
+  await R.run(shopCtx(db3, map3));
+  assert.strictEqual(db3.products.filter((p) => p.compare_state === 'wanted').length, 10); assert(db3.products.slice(0, 8).every((p) => p.compare_state === 'wanted'), 'the second chances first');
+});
+
+test('compare markings can never loop: at most 3 automatic markings per product and link, whatever the shop does', async () => {
+  const OK = shopHtml('shop-jsonld-single'), REFUSE = () => resp(403, 'Forbidden');
+  const cases = [['https://www.virker.dk/v', OK, {}, 2, 'a working shop: first + second chance'], ['https://www.afviser.dk/v', REFUSE, {}, 3, 'a refusing shop: first + second chance + the 24 hour error rule'],
+    ['https://www.gammel.dk/v', REFUSE, { compare_state: 'none', compare_at: '2026-01-01T00:00:00Z' }, 3, 'a none from before compare_tries (tries 0): second chance twice, then the error rule'],
+    ['https://www.gammel2.dk/v', OK, { compare_state: 'none', compare_at: '2026-01-01T00:00:00Z' }, 2, 'tries 0 and a working shop: two second chances']];
+  for (const [url, handler, extra, expected, why] of cases) {
+    const db = newDb(); db.products.push(shopProduct('L1', 'u1', url, extra));
+    let markings = 0, days = 0;
+    for (let i = 0; i < 12; i++) {
+      const ctx = shopCtx(db, { [url]: handler }); ctx.now = () => new Date(Date.parse('2026-11-16T10:00:00Z') + (days++) * 3 * 24 * 3600 * 1000);
+      await R.run(ctx);
+      const p = db.products[0];
+      if (p.compare_state === 'wanted') { markings++; Object.assign(p, { compare_state: 'none', compare_at: '2026-01-01T00:00:00Z' }); }   // the agent answers none, hastily, each time
+    }
+    assert.strictEqual(markings, expected, why); assert(db.products[0].compare_tries <= 3, why);
+  }
 });
 
 async function live() {

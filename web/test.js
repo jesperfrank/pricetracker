@@ -93,6 +93,15 @@ const FAKE = `
                          && (r.compare_state == null || (r.compare_state === "none" && Date.now() - Date.parse(r.compare_at) > 7 * 864e5))) { r.compare_state = "wanted"; r.compare_at = new Date().toISOString(); }
               delete q.payload.compare_state;
             }
+            if (table === "products" && "extra_urls" in q.payload) {   // products_guard: only the removal of ONE entry is accepted (the last one with null); the rest is ignored
+              var oldX = r.extra_urls, newX = q.payload.extra_urls, okX = false;
+              if (Array.isArray(oldX)) {
+                if (newX === null) okX = oldX.length === 1;
+                else if (Array.isArray(newX) && oldX.length >= 2 && newX.length === oldX.length - 1) okX = oldX.some(function (_, i) { return JSON.stringify(oldX.filter(function (__, j) { return j !== i; })) === JSON.stringify(newX); });
+              }
+              if (okX) { r.extra_urls = newX; if (newX === null) { r.compare_state = "none"; r.compare_at = new Date().toISOString(); } }
+              delete q.payload.extra_urls;
+            }
             if ("bought_price" in q.payload && q.payload.bought_price !== null && !(q.payload.bought_price > 0 && q.payload.bought_price <= 10000000)) return;   // check constraint (see below)
             Object.keys(q.payload).forEach(function (k) { if (JOB.indexOf(k) < 0) r[k] = clone(q.payload[k]); });
             if (q.payload.bought_at) r.bought_at = "2026-11-16T12:00:00Z";   // products_guard: the server stamps the time
@@ -567,8 +576,16 @@ let base;
   {
     const dy = row("test-dyson-v15", { id: "dy", target_type: "auto", target_value: null });
     const so = row("test-sony-xm5", { id: "x5" });
-    const p = await open({ products: [dy, so], label: "auto-edit" });
+    const au = row("test-sony-xm5", { id: "x6", name: "Sony auto", target_type: "auto", target_value: null });
+    const p = await open({ products: [dy, so, au], label: "auto-edit" });
     await p.waitForSelector(".item");
+    {
+      // an auto goal that is not a hit shows no goal label under the price (nothing to read as a verdict); a price goal keeps "mål ..."
+      const aHead = p.locator('.head[data-id="x6"]'), sHead = p.locator('.head[data-id="x5"]');
+      const aTxt = await aHead.textContent();
+      check("auto goal, no hit: no label under the price (no 'godt tilbud', no 'mål'), only the price", (await aHead.locator(".price b").count()) === 1 && (await aHead.locator(".price span").count()) === 0 && !/godt tilbud|mål/i.test(aTxt) && (await p.locator('.item:has(.head[data-id="x6"])').getAttribute("class")).indexOf("hit") < 0, aTxt);
+      check("price goal: the 'mål ...' label stays", /^mål [\d.]+ kr\.$/.test((await sHead.locator(".price span").first().textContent()).trim()), await sHead.locator(".price").textContent());
+    }
     const it = p.locator('.item:has(.head[data-id="dy"])');
     const head = await it.locator(".head").textContent();
     check("auto goal: head says 'Godt tilbud', shows the saving instead of a goal, and the deal is shown as a hit", /Godt tilbud/.test(head) && /\u221213 %/.test(head) && !/mål \d/.test(head) && (await it.getAttribute("class")).indexOf("hit") >= 0, head);
@@ -1869,6 +1886,81 @@ let base;
       await p.click('[data-act="cmp-undo"][data-id="f2"]');
       await p.waitForFunction(() => (document.body.innerText.match(/Kunne ikke gemme/g) || []).length >= 2);
       check("compare: a failing 'Fortryd' says so and stays", /Kunne ikke gemme lige nu/.test(await body(p, "f2").innerText()) && /Skiftet til Prisjagt/.test(await body(p, "f2").innerText()));
+      await p.context().close();
+    }
+  }
+
+  // 10g. extra shops: a single-shop product followed in several shops (extra_urls); the person may only drop a shop
+  {
+    const DAY = 864e5, ago = d => new Date(Date.now() - d * DAY).toISOString();
+    const MAIN = "https://www.hovedbutik.dk/vare/1", XA = "https://www.butik-a.dk/p/1?id=7", XB = "https://butik-b.dk/p/2", XC = "https://shop.butik-c.dk/p/3", XD = "https://butik-d.dk/p/4";
+    const off = (store, price, url, inStock) => ({ store, price, url, inStock: inStock !== false, note: null, variant: "shop" });
+    const xp = (id, extra, over) => row("test-dyson-v15", Object.assign({ id, name: "Kit " + id, source_url: MAIN, title: "Kit", tracked_variants: ["shop"], check_note: null,
+      variants: [{ id: "shop", label: "Hovedbutik", lowest: 450, offers: 3, sample: "Kit" }],
+      offers: [off("Hovedbutik", 500, MAIN), off("Butik A", 450, XA), off("Butik B", 480, XB), off("Butik C", 520, XC), off("Butik D", 470, XD, false)],
+      compare_state: "done", compare_at: ago(1), shop_url: null, extra_urls: extra }, over || {}));
+    const body = (p, id) => p.locator('.item:has([data-id="' + id + '"]) .body');
+    const norm = t => t.replace(/\s+/g, " ").trim();
+    {
+      const noCol = xp("x0", [XA, XB]); delete noCol.extra_urls;
+      const p = await open({ products: [xp("x1", [XA, XB, XC, XD]), noCol, xp("x2", null, { compare_state: "none", compare_at: ago(30 / 1440) }), xp("x3", [XA, XB], { user_id: "o9", list_id: "lx" }),
+        xp("x4", [XA, "http://butik-b.dk/p/2", "https://www.prisjagt.dk/product.php?p=1", "javascript:alert(1)", 7, "https://u:p@evil.dk/x"])], lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], label: "extra-list" });
+      await p.waitForSelector(".item");
+      for (const id of ["x1", "x0", "x2", "x3", "x4"]) await p.click('.head[data-id="' + id + '"]');
+      const t1 = norm(await body(p, "x1").innerText());
+      check("extras: the normal shop list ('Butikker', the three cheapest in stock) with the shops of all links", /Butikker/.test(t1) && (await body(p, "x1").locator(".shops > .tablewrap tr").count()) === 3
+        && /Butik A.*450 kr\./.test(norm(await body(p, "x1").locator(".shops > .tablewrap").innerText())) && !/Butik C/.test(norm(await body(p, "x1").locator(".shops > .tablewrap").innerText())), t1.slice(0, 400));
+      check("extras: 'Vis alle butikker' holds the rest (the dearer one and the sold-out one)", /Butik C/.test(await body(p, "x1").locator(".allshops").innerText()) && /Ikke på lager/.test(await body(p, "x1").locator(".allshops").innerText()) && /Vis alle butikker/.test(t1));
+      check("extras: the single-shop note is gone", !/Kun denne butik/.test(t1) && !/Kun denne butik/.test(norm(await body(p, "x3").innerText())));
+      check("extras: the quiet line says how many shops: 1 + extras", (await body(p, "x1").locator(".cmp").innerText()).trim() === "Følger 5 butikker." && (await body(p, "x3").locator(".cmp").innerText()).trim() === "Følger 3 butikker.");
+      check("extras: without extras (none) the old note and the 'none' line stay", /Kun denne butik/.test(await body(p, "x2").innerText()) && /Fandt ikke varen hos andre butikker/.test(await body(p, "x2").innerText()) && !/Butikker, vi følger/.test(await body(p, "x2").innerText()));
+      check("extras: a database without the column shows nothing about it (old note, no list, no line)", /Kun denne butik/.test(await body(p, "x0").innerText()) && !/Butikker, vi følger|Følger \d/.test(await body(p, "x0").innerText()));
+     
+      const m1 = body(p, "x1").locator(".xshops");
+      check("extras: 'Indstil vare' lists each extra shop by host (no www) with 'Fjern'", /Butikker, vi følger/.test(await m1.innerText()) && (await m1.locator(".foot").count()) === 4
+        && JSON.stringify(await m1.locator(".foot > span a").allInnerTexts()) === JSON.stringify(["butik-a.dk", "butik-b.dk", "shop.butik-c.dk", "butik-d.dk"]) && (await m1.locator('[data-act="x-rm"]').count()) === 4
+        && (await m1.locator('[data-act="x-rm"]').first().innerText()) === "Fjern", JSON.stringify([/Butikker, vi følger/.test(await m1.innerText()), await m1.locator(".foot").count(), await m1.locator(".foot > span a").allInnerTexts(), await m1.locator('[data-act="x-rm"]').count(), await m1.locator('[data-act="x-rm"]').first().innerText()]));
+      const hrefs = await m1.locator("a").evaluateAll(as => as.map(a => [a.getAttribute("href"), a.getAttribute("rel"), a.getAttribute("target")]));
+      check("extras: the links are https, open in a new tab and carry rel noopener noreferrer", hrefs.length === 4 && hrefs.every(h => /^https:\/\//.test(h[0]) && h[1] === "noopener noreferrer" && h[2] === "_blank") && hrefs[0][0] === XA);
+     
+      const m4 = body(p, "x4").locator(".xshops");
+      check("extras: a link that is not https, a prisjagt link, a script link, a number and a link with a password are never shown; the rest is",
+        JSON.stringify(await m4.locator(".foot > span a").allInnerTexts()) === JSON.stringify(["butik-a.dk"]) && !/javascript|prisjagt\.dk|evil/.test(await m4.innerHTML())
+        && (await body(p, "x4").locator(".cmp").innerText()).trim() === "Følger 2 butikker.", await body(p, "x4").innerHTML());
+     
+      const m3 = body(p, "x3").locator(".xshops");
+      check("extras: someone else's product in a shared list shows the shops but no 'Fjern'", (await m3.locator(".foot").count()) === 2 && (await m3.locator('[data-act="x-rm"]').count()) === 0);
+      check("extras: no em-dash and no exclamation mark in the new texts", !/[—!]/.test(await m1.innerText()) && !/[—!]/.test((await body(p, "x1").locator(".cmp").innerText())));
+      // remove the second shop
+      await m1.locator('[data-act="x-rm"]').nth(1).click();
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      const o = (await ops(p))[0];
+      check("extras: 'Fjern' sends the same array minus that one entry, in the same order, and nothing else", o.table === "products" && o.op === "update" && o.filters[0][1] === "x1" && JSON.stringify(o.payload) === JSON.stringify({ extra_urls: [XA, XC, XD] }), JSON.stringify(o));
+      await p.waitForFunction(() => /Følger 4 butikker/.test(document.body.innerText));
+      check("extras: the list and the line follow at once (and after the list is read again)", (await body(p, "x1").locator(".xshops .foot").count()) === 3 && !/butik-b\.dk/.test(await body(p, "x1").locator(".xshops").innerText()));
+      await p.waitForTimeout(150);
+      check("extras: ... still after the read", (await body(p, "x1").locator(".xshops .foot").count()) === 3 && (await body(p, "x1").locator(".manage").evaluate(d => d.open)));
+      // down to the last one: null, then the product is "not found elsewhere" again
+      await body(p, "x1").locator('[data-act="x-rm"]').first().click();
+      await p.waitForFunction(() => window.__db.writes().length === 2);
+      await body(p, "x1").locator('[data-act="x-rm"]').first().click();
+      await p.waitForFunction(() => window.__db.writes().length === 3);
+      await body(p, "x1").locator('[data-act="x-rm"]').first().click();
+      await p.waitForFunction(() => window.__db.writes().length === 4);
+      const os = await ops(p);
+      check("extras: the entries go one at a time; the last one is removed with null", JSON.stringify(os.map(x => x.payload.extra_urls)) === JSON.stringify([[XA, XC, XD], [XC, XD], [XD], null]), JSON.stringify(os.map(x => x.payload)));
+      await p.waitForFunction(() => /Fandt ikke varen hos andre butikker/.test(document.body.innerText));
+      check("extras: with none left the list and the line are gone and the single-shop note is back", !/Butikker, vi følger|Følger \d/.test(await body(p, "x1").innerText()) && /Kun denne butik/.test(await body(p, "x1").innerText()));
+      check("extras: nothing else was written", (await p.evaluate(() => window.__db.writes().length)) === 4 && (await p.evaluate(() => window.__db.products.filter(x => x.id === "x1")[0].extra_urls)) === null);
+      await p.context().close();
+    }
+    {   // a failing save
+      const p = await open({ products: [xp("f1", [XA, XB])], label: "extra-fail" });
+      await p.waitForSelector(".item"); await p.click('.head[data-id="f1"]');
+      await p.evaluate(() => { window.__db.netFail = true; });
+      await p.click('[data-act="x-rm"][data-id="f1"] >> nth=0');
+      await p.waitForFunction(() => /Kunne ikke gemme/.test(document.body.innerText));
+      check("extras: a failing save says so; the shop stays and can be tried again", /Kunne ikke gemme lige nu/.test(await body(p, "f1").innerText()) && (await body(p, "f1").locator('.xshops [data-act="x-rm"]').count()) === 2 && !(await body(p, "f1").locator('[data-act="x-rm"]').first().isDisabled()));
       await p.context().close();
     }
   }

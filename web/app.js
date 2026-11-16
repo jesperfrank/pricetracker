@@ -191,7 +191,10 @@
       altOk: "alt_requested_at" in r, altReq: r.alt_requested_at || null, altDone: r.alt_done_at || null,
       alts: Array.isArray(r.alternatives) ? r.alternatives : null, altNote: typeof r.alt_note === "string" ? r.alt_note : "",
       // compare ("find the cheapest shop"): cmpOk = the database has the columns. cmp: 'wanted' | 'done' | 'none' | null; shopUrl = the original shop link after a switch
-      cmpOk: "compare_state" in r, cmp: r.compare_state || null, cmpAt: r.compare_at || null, shopUrl: r.shop_url || null
+      cmpOk: "compare_state" in r, cmp: r.compare_state || null, cmpAt: r.compare_at || null, shopUrl: r.shop_url || null,
+      // extra shops: extraOk = the database has the column (an older one does not send it, and the feature stays hidden); extraRaw = the
+      // stored array as it is (a removal sends it back minus one entry), shown through xList (checked again)
+      extraOk: "extra_urls" in r, extraRaw: Array.isArray(r.extra_urls) ? r.extra_urls.filter(function (u) { return typeof u === "string"; }) : []
     };
   }
   function offersOf(p) {
@@ -244,7 +247,7 @@
     var b = bestOf(p), t = targetKr(p); return p.status === "tracking" && !!(b && t != null && b.inStock !== false && b.price <= t);
   }
   function targetText(p) {
-    if (p.targetType === "auto") return "godt tilbud";
+    if (p.targetType === "auto") return null;         // an "auto" goal has no label of its own: the row shows the saving when it is a hit, and nothing otherwise
     var t = targetKr(p);
     if (p.targetType === "pct") return "mål " + nf.format(p.targetValue) + " %" + (t != null ? " · " + kr(t) : "");
     return "mål " + kr(t);
@@ -356,7 +359,7 @@
     var showPrice = p.status === "tracking" && b, sub = "";
     if (!p.boughtAt && showPrice) {
       var off = typeof p.normalPrice === "number" && p.normalPrice > 0 ? Math.round((1 - b.price / p.normalPrice) * 100) : 0;
-      sub = isHit(p) && p.targetType === "auto" && off >= 1 ? '<span class="off">−' + off + ' %</span>' : '<span>' + esc(targetText(p)) + '</span>';
+      sub = isHit(p) && p.targetType === "auto" && off >= 1 ? '<span class="off">−' + off + ' %</span>' : (targetText(p) ? '<span>' + esc(targetText(p)) + '</span>' : "");
     }
     return thumbHtml(p) + '<div class="info"><h2>' + esc(p.name) + '</h2><div class="meta">' + st + '</div></div>' + (p.status === "tracking" ? sparkHtml(p) : "") +
       (showPrice ? '<div class="price n"><b>' + esc(kr(b.price)) + '</b>' + sub + '</div>' : "");
@@ -498,6 +501,8 @@
     }
     if (v) parts.push(v);
     if (mayEdit(p)) parts.push(shopPrefsHtml(p));
+    var xs = xHtml(p);
+    if (xs) parts.push(xs);
     var bo = boughtHtml(p);
     if (bo) parts.push(bo);
     var lk = linkHtml(p), rm = removeHtml(p);
@@ -585,7 +590,7 @@
       html += '<div class="shops"><div class="sec-h"><h3>Butikker</h3></div>' + shopTable(top, b) +
         (more.length ? '<details class="allshops" data-allshops="' + esc(id) + '"' + (state.allShops[id] ? " open" : "") + '><summary>Vis alle butikker</summary>' + shopTable(more, b) + '</details>' : '') + '</div>';
     }
-    if (single) html += '<p class="note">Kun denne butik. Et link fra prisjagt.dk sammenligner flere.</p>';
+    if (single && !xList(p).length) html += '<p class="note">Kun denne butik. Et link fra prisjagt.dk sammenligner flere.</p>';
     html += cmpHtml(p);
     html += altHtml(p);
     return html + manageHtml(p, h, b, low30, lowAll, single);
@@ -674,6 +679,29 @@
     if (p.cmpOk && p.cmp === "wanted" && cmpSingle(p) && p.checkNote === CMP_REFUSED) return "Butikken afviser opslag. Leder efter andre butikker.";
     return p.checkNote;
   }
+  // ---- extra shops: other shops that sell the same product (found by the AI agent); the person may only drop one ----
+  // The links come from the database and are checked again: https, one shop each (not prisjagt.dk). Only the host is shown.
+  function xList(p) {
+    if (!p.extraOk) return [];
+    var out = [];
+    p.extraRaw.forEach(function (raw, i) {
+      var u = parseLink(raw);
+      if (!u || !isShopUrl(u) || out.length >= 5) return;
+      var h = "";
+      try { h = new URL(u).hostname.toLowerCase().replace(/^www\./, ""); } catch (e) { return; }
+      out.push({ i: i, url: u, host: h });
+    });
+    return out;
+  }
+  function xHtml(p) {
+    var l = xList(p);
+    if (!l.length) return "";
+    var id = p._id, ed = mayEdit(p);
+    return '<div class="xshops"><div class="meta">Butikker, vi følger</div>' + l.map(function (x) {
+      return '<div class="foot"><span><a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer">' + esc(x.host) + '</a></span>' +
+        (ed ? '<button type="button" class="link warn" data-act="x-rm" data-id="' + esc(id) + '" data-i="' + x.i + '">Fjern</button>' : '') + '</div>';
+    }).join("") + '<span class="meta" data-rowmsg="x-' + esc(id) + '">' + esc(state.rowMsg["x-" + id] || "") + '</span></div>';
+  }
   function cmpHtml(p) {
     if (!p.cmpOk) return "";
     var id = p._id, msg = '<span class="meta" data-rowmsg="cmp-' + esc(id) + '">' + esc(state.rowMsg["cmp-" + id] || "") + '</span>';
@@ -684,6 +712,7 @@
         (mayEdit(p) ? ' <button type="button" class="link" data-act="cmp-undo" data-id="' + esc(id) + '">Fortryd</button> ' + msg : '') + '</p>';
     }
     if (!cmpSingle(p)) return "";
+    if (p.cmp === "done" && xList(p).length) return '<p class="note cmp">Følger ' + (1 + xList(p).length) + ' butikker.</p>';
     if (p.cmp === "wanted") return p.checkNote === CMP_REFUSED ? "" : '<p class="note cmp">Leder efter flere butikker.</p>';
     if (cmpMayAsk(p)) return '<p class="note cmp"><button type="button" class="link" data-act="cmp-find" data-id="' + esc(id) + '">Find flere butikker</button> ' + msg + '</p>';
     if (p.cmp === "none") return '<p class="note cmp">Fandt ikke varen hos andre butikker.</p>';
@@ -1283,6 +1312,19 @@
         p.url = back; p.status = "pending"; p.checkNote = ""; p.cmp = "none"; p.cmpAt = new Date().toISOString(); p.shopUrl = null; state.rowMsg["cmp-" + id] = "";
         render(); fetchProducts();
       }, function () { b.disabled = false; setRowMsg("cmp-" + id, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+    }
+    else if (act === "x-rm" && sb && p && mayEdit(p) && p.extraOk) {
+      // the same array minus this one entry (the database accepts nothing else from the browser); the last one is removed with null
+      var xi = +b.dataset.i, raw = p.extraRaw.slice();
+      if (!(xi >= 0 && xi < raw.length)) return;
+      raw.splice(xi, 1);
+      b.disabled = true; setRowMsg("x-" + id, "");
+      sb.from("products").update({ extra_urls: raw.length ? raw : null }).eq("id", id).then(function (r) {
+        if (r && r.error) { b.disabled = false; setRowMsg("x-" + id, "Kunne ikke gemme lige nu. Prøv igen om lidt."); onWriteError(r.error); return; }
+        p.extraRaw = raw; state.rowMsg["x-" + id] = "";
+        if (!raw.length && p.cmp === "done") { p.cmp = "none"; p.cmpAt = new Date().toISOString(); }
+        render(); fetchProducts();
+      }, function () { b.disabled = false; setRowMsg("x-" + id, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
     }
     else if (act === "alt-follow" && sb && p) {
       var alt = altShown(p)[+b.dataset.i], au = alt && typeof alt.url === "string" ? parseLink(alt.url) : null;

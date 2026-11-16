@@ -54,7 +54,7 @@ select t.chk('migrated twice: the three columns, the two checks, exactly one res
   and (select count(*) = 1 from pg_proc where proname = 'resolver_compare' and pronamespace = 'public'::regnamespace));
 select t.chk('migrated twice: grants are as they were (anon and authenticated may execute, public may not), the secret token is kept',
   has_function_privilege('anon', 'public.resolver_list()', 'execute') and has_function_privilege('authenticated', 'public.resolver_list()', 'execute')
-  and has_function_privilege('anon', 'public.resolver_compare(uuid, text)', 'execute') and has_function_privilege('anon', 'public.resolver_set(uuid, text)', 'execute')
+  and has_function_privilege('anon', 'public.resolver_compare(uuid, text, jsonb)', 'execute') and has_function_privilege('anon', 'public.resolver_set(uuid, text)', 'execute')
   and not exists (select 1 from information_schema.routine_privileges where routine_name in ('resolver_list', 'resolver_compare', 'resolver_set', 'resolver_fail') and grantee = 'PUBLIC')
   and (select count(*) = 1 and bool_and(token = repeat('a', 64)) from public.resolver_secret));
 select t.chk('migrated twice: the rows are intact and have no comparison state',
