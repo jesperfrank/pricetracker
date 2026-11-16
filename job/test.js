@@ -2220,6 +2220,37 @@ test("compare: a shop that refuses, or has no price we can read, asks for a comp
   assert(!R.wantsCompare({ compare_state: null }, { shop: true }, new Error('x')));
 });
 
+test('compare: an old error row (already waiting out the 6-hour retry) is marked from its stored note, without a fetch', async () => {
+  const recent = '2026-11-16T08:00:00Z';
+  const err = (id, url, note, extra) => shopProduct(id, 'u1', url, Object.assign({ status: 'error', check_note: note, last_checked: recent }, extra || {}));
+  const db = newDb();
+  db.products.push(
+    err('E1', 'https://www.a1.dk/x', 'Butikken afviser automatiske opslag.'), err('E2', 'https://www.a2.dk/x', 'Kunne ikke finde en pris på siden.'),
+    err('E3', 'https://www.a3.dk/x', 'Prisen på siden er ikke i kroner (valuta EUR), så den kan ikke følges.'),
+    err('F1', 'https://www.b1.dk/x', 'Siden findes ikke (HTTP 404). Tjek linket.'), err('F2', 'https://www.b2.dk/x', 'Butikken svarede ikke i tide.'), err('F3', 'https://www.b3.dk/x', 'Siden kunne ikke hentes (HTTP 502).'),
+    err('G1', 'https://www.c1.dk/x', 'Butikken afviser automatiske opslag.', { compare_state: 'none', compare_at: '2026-11-01T00:00:00Z' }),
+    err('G2', 'https://www.c2.dk/x', 'Butikken afviser automatiske opslag.', { compare_state: 'done', shop_url: 'https://old.dk/x' }),
+    err('G3', 'https://www.c3.dk/x', 'Butikken afviser automatiske opslag.', { compare_state: 'wanted', compare_at: '2026-11-02T00:00:00Z' }),
+    err('H1', 'https://prisjagt.dk/product.php?p=5745115', 'Butikken afviser automatiske opslag.'));
+  const ctx = shopCtx(db, {});
+  ctx.getPage = async (url) => { ctx.fetched.push(url); throw new Error('no fetch expected: ' + url); };
+  const res = await R.run(ctx);
+  const by = (id) => db.products.find((p) => p.id === id);
+  assert.deepStrictEqual(ctx.fetched, [], 'nothing is fetched'); assert.strictEqual(res.summary.length, 5);
+  ['E1', 'E2', 'E3'].forEach((id) => { assert.strictEqual(by(id).compare_state, 'wanted', id); assert.strictEqual(by(id).compare_at, '2026-11-16T10:00:00Z', id); assert.strictEqual(by(id).status, 'error'); assert.strictEqual(by(id).last_checked, recent, id + ' keeps its check time'); });
+  ['F1', 'F2', 'F3', 'H1'].forEach((id) => assert.strictEqual(by(id).compare_state, null, id));
+  assert.strictEqual(by('G1').compare_state, 'none'); assert.strictEqual(by('G1').compare_at, '2026-11-01T00:00:00Z');
+  assert.strictEqual(by('G2').compare_state, 'done'); assert.strictEqual(by('G2').shop_url, 'https://old.dk/x');
+  assert.strictEqual(by('G3').compare_state, 'wanted'); assert.strictEqual(by('G3').compare_at, '2026-11-02T00:00:00Z');
+  assert.strictEqual(db.sent.length, 0);
+  // a database without the column: nothing is written
+  const db2 = newDb();
+  db2.products.push(err('N1', 'https://www.a1.dk/x', 'Butikken afviser automatiske opslag.')); delete db2.products[0].compare_state; delete db2.products[0].compare_at; delete db2.products[0].shop_url;
+  const ctx2 = shopCtx(db2, {}); ctx2.getPage = async (url) => { ctx2.fetched.push(url); throw new Error('no fetch'); };
+  await R.run(ctx2);
+  assert(!('compare_state' in db2.products[0]) && !('compare_at' in db2.products[0]));
+});
+
 test('compare: Onskeskyen wishes with one shop link ask for a comparison; a prisjagt link or no link does not; a missing column does not stop the import', async () => {
   const web = onskeWeb(), db = importsDb(web); impRow(db, SHARE);
   await runImp(db);

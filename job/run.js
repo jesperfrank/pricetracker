@@ -33,10 +33,12 @@ const isoNow = (d) => d.toISOString().replace(/\.\d+Z$/, 'Z');
 
 // ---------------------------------------------------------------- per-product logic (pure given a parsed page)
 
+const NOTE_CURRENCY_PREFIX = 'Prisen på siden er ikke i kroner (';
+
 function shopErrorNote(e) {
   if (e.kind === 'blocked') return 'Butikken afviser automatiske opslag.';
   if (e.kind === 'noprice') return 'Kunne ikke finde en pris på siden.';
-  if (e.kind === 'currency') return 'Prisen på siden er ikke i kroner (' + e.message.slice(0, 40) + '), så den kan ikke følges.';
+  if (e.kind === 'currency') return NOTE_CURRENCY_PREFIX + e.message.slice(0, 40) + '), så den kan ikke følges.';
   if (e.kind === 'notfound') return 'Siden findes ikke (' + e.message + '). Tjek linket.';
   if (e.kind === 'timeout') return 'Butikken svarede ikke i tide.';
   return 'Siden kunne ikke hentes (' + e.message.slice(0, 80) + ').';
@@ -148,6 +150,17 @@ function trackingPatch(prod, profile, parsed, now) {
 function wantsCompare(prod, target, error) {
   if (!target || !target.shop || !Object.prototype.hasOwnProperty.call(prod, 'compare_state') || prod.compare_state !== null) return false;
   return error instanceof PJ.PageError && !!error.shop && ['blocked', 'noprice', 'currency'].indexOf(error.kind) !== -1;
+}
+
+// The failure kind is not stored on the row, only the Danish check_note that shopErrorNote wrote. An error row from before the compare
+// feature existed is recognised by that note, built from the same function so it cannot drift: the same kinds as wantsCompare
+// (blocked, noprice, currency), never notfound / timeout / network. Used to mark such rows without fetching the page again.
+function oldErrorWantsCompare(prod, target) {
+  if (!target || !target.shop || prod.status !== 'error' || !Object.prototype.hasOwnProperty.call(prod, 'compare_state') || prod.compare_state !== null) return false;
+  const note = prod.check_note;
+  if (typeof note !== 'string' || !note) return false;
+  const mk = (kind) => Object.assign(new PJ.PageError(kind, ''), { shop: true });
+  return note === shopErrorNote(mk('blocked')) || note === shopErrorNote(mk('noprice')) || note.indexOf(NOTE_CURRENCY_PREFIX) === 0;
 }
 
 // The page kind of a source_url: {url, shop} or null when the link may not be fetched at all.
@@ -293,7 +306,14 @@ async function run(ctx) {
     else if (st === 'error') todo = prod.last_checked && now.getTime() - Date.parse(prod.last_checked) < ERROR_RETRY_MS ? null : 'initial';
     else if (st === 'tracking') todo = Array.isArray(prod.tracked_variants) && prod.tracked_variants.length ? 'track' : 'initial';
     else if (st === 'choose') todo = Array.isArray(prod.tracked_variants) && prod.tracked_variants.length ? 'track' : null;
-    if (!todo) continue;
+    if (!todo) {
+      // an old error row still waiting out the 6-hour retry: mark it (no fetch) if its stored note says the shop refuses us
+      if (st === 'error') {
+        const t = classify(prod.source_url);
+        if (oldErrorWantsCompare(prod, t)) results.push({ prod, patch: { compare_state: 'wanted', compare_at: isoNow(now) }, hit: null });
+      }
+      continue;
+    }
 
     const target = classify(prod.source_url);
     if (!target) {
@@ -482,7 +502,7 @@ async function run(ctx) {
   return { stats, summary, results };
 }
 
-module.exports = { run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, MAX_BACKFILL };
+module.exports = { run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, oldErrorWantsCompare, MAX_BACKFILL };
 
 if (require.main === module) {
   const e = process.env;
