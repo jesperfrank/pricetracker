@@ -29,7 +29,7 @@ const API_URL = 'https://api.gowish.com/graphql';
 
 // Our own small query (title, access level and the fields we use); the server accepts it as well as the page's own query.
 const QUERY = 'query getWishlistWishes($id: ID!, $input: PaginationInput) { wishlist(id: $id) { id title accessLevel ' +
-  'wishes(input: $input) { data { id title price currency url photos } totalCount nextCursor } } }';
+  'wishes(input: $input) { data { id title description price currency url photos } totalCount nextCursor } } }';
 
 const NOTE = {
   private: 'Ønskelisten er ikke offentlig eller findes ikke. Bed ejeren om at dele den offentligt.',
@@ -168,7 +168,7 @@ function firstPhoto(photos) {
   return null;
 }
 
-// {title, wishes: [{id, title, url, image}], total, truncated}. Up to MAX_WISHES wishes, PAGE_SIZE per request.
+// {title, wishes: [{id, title, url, image, description}], total, truncated}. Up to MAX_WISHES wishes, PAGE_SIZE per request.
 async function fetchWishList(id, http) {
   const state = { endpoint: API_URL };
   let cursor = 0, title = null, total = null;
@@ -185,7 +185,7 @@ async function fetchWishList(id, http) {
     if (!w || !Array.isArray(w.data)) throw new ImportError('unavailable', 'unexpected answer');
     if (title === null && typeof wl.title === 'string') title = wl.title;
     if (typeof w.totalCount === 'number') total = w.totalCount;
-    w.data.forEach((x) => { if (x && typeof x === 'object') wishes.push({ id: wishId(x.id), title: x.title, url: x.url, image: firstPhoto(x.photos) }); });
+    w.data.forEach((x) => { if (x && typeof x === 'object') wishes.push({ id: wishId(x.id), title: x.title, url: x.url, image: firstPhoto(x.photos), description: x.description }); });
     const next = w.nextCursor;
     if (typeof next !== 'number' || next <= cursor || !w.data.length) break;
     cursor = next;
@@ -257,6 +257,15 @@ async function pickList(sb, imp, title, log) {
   return { listId: null, name: null, note: '' };
 }
 
+// A wish's own note ("XL", "hvid, str. 43") becomes the product's requirements (products.requirements): the text with control characters and
+// angle brackets removed, white space collapsed and trimmed, kept only when it is 1 to 120 characters long (the database rule). Else null.
+const REQ_MAX = 120;
+function cleanRequirements(t) {
+  if (typeof t !== 'string') return null;
+  const s = t.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029<>]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return s.length >= 1 && s.length <= REQ_MAX ? s : null;
+}
+
 const uniqueTail = (ids, max) => {
   const seen = new Set(), out = [];
   ids.forEach((i) => { if (!seen.has(i)) { seen.add(i); out.push(i); } });
@@ -273,7 +282,7 @@ function pickCandidates(wishList, have) {
     if (!name) { noTitle++; return; }
     const url = cleanWishUrl(w.url), key = url ? urlKey(url) : null;
     if (key) { if (have.has(key)) { dup++; return; } have.add(key); }
-    cands.push({ id: w.id, name, source_url: url, image: w.image || null });
+    cands.push({ id: w.id, name, source_url: url, image: w.image || null, requirements: cleanRequirements(w.description) });
   });
   return { cands, dup, noTitle };
 }
@@ -285,13 +294,15 @@ async function addProducts(sb, imp, take, title, log) {
   // 'wanted'). A prisjagt.dk link is already the comparison; a wish without a link is found by name first.
   // image_url: the wish's first photo (the address only), from the answer the job already has
   let rows = take.map((c) => ({ user_id: imp.user_id, name: c.name, source_url: c.source_url, target_type: 'auto', target_value: null, list_id: pl.listId, active: true, status: 'pending', compare_state: wantsCompare(c.source_url) ? 'wanted' : null, image_url: c.image || null }));
+  // requirements: only at insert and only when the wish has a usable note (never written again, so the person's own words are never overwritten)
+  rows = rows.map((r, i) => (take[i].requirements ? Object.assign(r, { requirements: take[i].requirements }) : r));
   // the database has not been given the newer columns yet (the script is applied on push): add the products without them
-  for (let tries = 0; tries < 3; tries++) {
+  for (let tries = 0; tries < 4; tries++) {
     try { await sb.insert('products', rows, false); return pl; }
     catch (e) {
       const msg = String(e && (e.body || e.message) || '');
-      const col = /image_url/i.test(msg) ? 'image_url' : /compare_state/i.test(msg) ? 'compare_state' : null;
-      if (!col || tries === 2) throw e;
+      const col = /image_url/i.test(msg) ? 'image_url' : /compare_state/i.test(msg) ? 'compare_state' : /requirements/i.test(msg) ? 'requirements' : null;
+      if (!col || tries === 3) throw e;
       rows = rows.map((r) => { const o = Object.assign({}, r); delete o[col]; return o; });
     }
   }
@@ -494,6 +505,6 @@ async function runSyncs(ctx, deps, stats, nowIso) {
 }
 
 module.exports = {
-  runImports, runSyncs, importOne, syncOne, parseListUrl, resolveListId, fetchWishList, makeHttp, cleanWishUrl, urlKey, cleanName, isMissingTable,
+  runImports, runSyncs, importOne, syncOne, parseListUrl, resolveListId, fetchWishList, makeHttp, cleanWishUrl, urlKey, cleanName, cleanRequirements, isMissingTable,
   ImportError, QUERY, API_URL, NOTE, MAX_PER_RUN, MAX_SYNCS_PER_RUN, MAX_SYNC_FAILS, SYNC_EVERY_MS, MAX_WISHES, PAGE_SIZE, PRODUCT_CAP, LIST_CAP, NAME_MAX,
 };

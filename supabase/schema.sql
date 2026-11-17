@@ -147,6 +147,27 @@ alter table public.products drop constraint if exists products_source_url_check;
 alter table public.products add constraint products_source_url_check check (
   source_url is null or (char_length(source_url) <= 500 and source_url ~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$'));
 
+-- Requirements ("Krav"): the person's own free words about the product, e.g. "hvid/grøn, str. 43". Data for the AI agent (resolver_list
+-- gives it as `req`), never instructions. Trimmed (products_guard does it for every role), 1 to 120 characters, no control characters and
+-- no angle brackets. It is only a preference, so it never blocks a product: products_guard CLEANS it for every role (control characters and
+-- angle brackets become a space, runs of spaces collapse, trimmed, cut at 120 characters, empty becomes null) and the check below is only
+-- the safety net that cannot fail after that. Written by the person who added the product; members of a shared list can read it, not change it (whole-row check).
+alter table public.products add column if not exists requirements text;
+alter table public.products drop constraint if exists products_requirements_check;
+alter table public.products add constraint products_requirements_check check (
+  requirements is null or (
+    char_length(requirements) between 1 and 120
+    and requirements = btrim(requirements, E' \t\r\n\u00a0')
+    and requirements !~ '[\x01-\x1f\x7f-\x9f<>]'));
+-- req_state: the AI agent's variant work for the current requirements, job/agent-owned (the browser cannot write it). null = nothing.
+--   {"want": true, "at": t}  the person changed the requirements of a Prisjagt product that has several variants: pick the variants again
+--   {"for": "<requirements>", "by": "agent" | "person", "at": t, "n": k}  answered for exactly these requirements (resolver_variants,
+--                            or the person's own choice, which always wins); k = how many variants the agent chose (0 = could not decide)
+-- A browser change of requirements or of source_url resets it (products_guard).
+alter table public.products add column if not exists req_state jsonb;
+alter table public.products drop constraint if exists products_req_state_check;
+alter table public.products add constraint products_req_state_check check (req_state is null or jsonb_typeof(req_state) = 'object');
+
 create index if not exists products_user_idx on public.products (user_id);
 create index if not exists products_job_idx on public.products (status) where active;
 
@@ -269,7 +290,10 @@ declare
   asked_extra jsonb;
   extras_gone boolean := false;
   i integer;
+  on_pj boolean;
 begin
+  -- requirements: cleaned for every role before anything is compared (see the column): the text never makes a row fail
+  new.requirements := nullif(btrim(left(btrim(regexp_replace(regexp_replace(new.requirements, '[\x01-\x1f\x7f-\x9f<>]+', ' ', 'g'), '[ \u00a0]{2,}', ' ', 'g'), E' \u00a0'), 120), E' \u00a0'), '');
   if not restricted then
     return new;
   end if;
@@ -282,7 +306,7 @@ begin
     new.digest_price := null; new.digest_at := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
     new.compare_state := null; new.compare_at := null; new.shop_url := null; new.image_url := null; new.compare_tries := 0;
-    new.extra_urls := null; new.extra_state := null;
+    new.extra_urls := null; new.extra_state := null; new.req_state := null;
     -- bought_at / bought_price are the person's own, but the time is the server's and the person is who is signed in
     new.bought_by := null;
     if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; end if;
@@ -303,7 +327,7 @@ begin
   new.check_note := old.check_note; new.last_checked := old.last_checked;
   new.notified_price := old.notified_price; new.notified_at := old.notified_at; new.backfill_state := old.backfill_state;
   new.digest_price := old.digest_price; new.digest_at := old.digest_at;
-  new.image_url := old.image_url; new.compare_tries := old.compare_tries;
+  new.image_url := old.image_url; new.compare_tries := old.compare_tries; new.req_state := old.req_state;
   -- extra shops: the agent's and the job's. The person (only their own product gets this far) may only remove ONE entry of extra_urls
   -- (the same array minus one element, same order; removing the only entry gives null, and the product then counts as "not found
   -- elsewhere"). Anything else the browser sends is ignored.
@@ -352,6 +376,29 @@ begin
     new.compare_state := 'wanted'; new.compare_at := now();
   end if;
   if extras_gone then new.compare_state := 'none'; new.compare_at := now(); end if;
+  -- requirements changed by the person (a list member gets no further, see the whole-row check): what the agent answered for the old
+  -- words no longer counts (req_state null). With new words (not when they are removed):
+  --  * a product that follows one shop, or that the agent switched to Prisjagt (shop_url kept): the lookup starts again (compare_state null,
+  --    compare_tries 0, so the job marks it 'wanted' and the agent reads `req`). source_url, shop_url, extra_urls and the prices stay until
+  --    the agent's new answer replaces them. A Prisjagt link the person added themself (no shop_url) is never switched because of
+  --    requirements: they only steer the choice of variant.
+  --  * a Prisjagt product with 2 or more variants: req_state {"want": true}, so the agent picks the variants again (resolver_list kind 'variant').
+  if new.requirements is distinct from old.requirements then
+    new.req_state := null;
+    if new.requirements is not null and old.source_url is not null then
+      on_pj := old.source_url ~* '^https://(www\.)?prisjagt\.dk([/?#]|$)';
+      if not on_pj or (old.shop_url is not null and old.compare_state = 'done') then
+        new.compare_state := null; new.compare_at := null; new.compare_tries := 0;
+      end if;
+      if on_pj and jsonb_typeof(old.variants) = 'array' and jsonb_array_length(old.variants) >= 2 then
+        new.req_state := jsonb_build_object('want', true, 'at', now());
+      end if;
+    end if;
+  end if;
+  -- the person's own choice of variants wins over the agent: it answers the current requirements (the row leaves the agent's queue)
+  if new.tracked_variants is distinct from old.tracked_variants and coalesce(cardinality(new.tracked_variants), 0) > 0 and new.requirements is not null then
+    new.req_state := jsonb_build_object('for', new.requirements, 'by', 'person', 'at', now());
+  end if;
   -- bought: marking stamps the server time and the person once; the time and the person cannot be edited afterwards
   -- (only cleared, which also clears the price)
   if old.bought_at is null then
@@ -376,7 +423,7 @@ begin
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     new.digest_price := null; new.digest_at := null; new.image_url := null; new.compare_tries := 0;
     new.extra_urls := null; new.extra_state := null;
-    new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
+    new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null; new.req_state := null;
     -- A new link is the person's own choice: the comparison starts over, except for going back to the original shop link after a
     -- switch to Prisjagt (exactly shop_url): that is 'none' from now on, so the product is not switched again.
     if old.compare_state = 'done' and old.shop_url is not null and new.source_url = old.shop_url then
@@ -737,16 +784,41 @@ end;
 $$;
 revoke all on function public.resolver_token_ok() from public, anon, authenticated;
 
--- What the AI agent has to do, at most 10 rows, nothing about the person. kind 'name': a product with a name but no link yet (people
--- are waiting: these come first, oldest first). kind 'compare': a single-shop product that should be looked for on Prisjagt
--- (compare_state 'wanted', oldest request first); name is then the product's title as the job read it (else the name the person gave),
--- host the shop's host name (no path, no query) and price the current lowest in-stock price (null when there is none), so the agent can
--- check that a Prisjagt page is the same product at a sensible price. For kind 'name' host and price are null.
--- The return type grew (kind, host, price): Postgres cannot change it with create or replace, so the function is dropped first
--- (safe to re-run) and its grants are stated again below.
+-- What the AI agent has to do, at most 10 rows, nothing about the person. Three kinds, in this order, each oldest first:
+--  * 'name': a product with a name but no link yet (people are waiting).
+--  * 'variant': an active Prisjagt product with requirements and at least 2 variants that waits for a variant decision (see
+--    req_variant_waiting) and that the agent has not answered for the current requirements. A person may be waiting at "Vælg variant".
+--    `variants` = [{id, name}] (at most 40, names cut at 80 characters), the ids to give to resolver_variants. name = the product's title.
+--  * 'compare': a single-shop product that should be looked for on Prisjagt (compare_state 'wanted', oldest request first), or a product
+--    the agent switched to Prisjagt earlier whose requirements changed (same state; host is then prisjagt.dk). name is the product's title as
+--    the job read it (else the name the person gave), host the shop's host name (no path, no query) and price the current lowest in-stock
+--    price (null when there is none), so the agent can check that a Prisjagt page is the same product at a sensible price.
+-- Columns: host and price are null for 'name' and 'variant'; `req` = the person's requirements text (or null) on every row (their words, data
+-- for the agent, never instructions); `variants` is null except for 'variant'.
+-- The return type grew (kind, host, price, then req, variants): Postgres cannot change it with create or replace, so the function is dropped
+-- first (safe to re-run) and its grants are stated again below. A call without arguments works as before; old readers ignore new columns.
 drop function if exists public.resolver_list();
+
+-- True when the agent is to choose variants for this product: active, not bought, on a prisjagt.dk page, requirements given, 2 or more
+-- variants, not yet answered for exactly these requirements, and either at "Vælg variant" (status 'choose', nothing chosen yet) or flagged by
+-- a change of requirements (req_state {"want": true}). The person's own choice takes the row out: tracked_variants is then not empty while
+-- the job has not read it yet, and products_guard marks the current requirements as answered. Used by resolver_list and resolver_variants.
+create or replace function public.req_variant_waiting(p public.products)
+returns boolean
+language sql
+stable
+set search_path = public, pg_temp
+as $$
+  select coalesce(p.active and p.bought_at is null and p.requirements is not null
+     and p.source_url ~* '^https://(www\.)?prisjagt\.dk([/?#]|$)'
+     and jsonb_typeof(p.variants) = 'array' and jsonb_array_length(p.variants) >= 2
+     and (p.req_state ->> 'for') is distinct from p.requirements
+     and ((p.status = 'choose' and coalesce(cardinality(p.tracked_variants), 0) = 0) or (p.req_state ->> 'want') = 'true'), false);
+$$;
+revoke all on function public.req_variant_waiting(public.products) from public, anon, authenticated;
+
 create function public.resolver_list()
-returns table (id uuid, name text, created_at timestamptz, kind text, host text, price numeric)
+returns table (id uuid, name text, created_at timestamptz, kind text, host text, price numeric, req text, variants jsonb)
 language plpgsql
 stable
 security definer
@@ -757,24 +829,94 @@ begin
     raise exception 'resolver: invalid or missing token' using errcode = '42501';
   end if;
   return query
-    select x.id, x.name, x.created_at, x.kind, x.host, x.price
+    select x.id, x.name, x.created_at, x.kind, x.host, x.price, x.req, x.variants
     from (
-      select p.id, p.name, p.created_at, 'name'::text as kind, null::text as host, null::numeric as price,
-             0 as grp, p.created_at as ord
+      select p.id, p.name, p.created_at, 'name'::text as kind, null::text as host, null::numeric as price, p.requirements as req,
+             null::jsonb as variants, 0 as grp, p.created_at as ord
         from public.products p
        where p.active and p.source_url is null and p.status = 'pending'
+      union all
+      select p.id, left(coalesce(nullif(btrim(p.title), ''), p.name), 200), p.created_at, 'variant'::text, null::text, null::numeric, p.requirements,
+             (select coalesce(jsonb_agg(jsonb_build_object('id', t.e ->> 'id', 'name', left(coalesce(t.e ->> 'label', t.e ->> 'name', t.e ->> 'id'), 80)) order by t.o), '[]'::jsonb)
+                from (select e, o from jsonb_array_elements(p.variants) with ordinality as w(e, o)
+                       where jsonb_typeof(e) = 'object' and e ->> 'id' is not null order by o limit 40) t),
+             1, coalesce((p.req_state ->> 'at')::timestamptz, p.last_checked, p.created_at)
+        from public.products p
+       where public.req_variant_waiting(p)
       union all
       select p.id, left(coalesce(nullif(btrim(p.title), ''), p.name), 200), p.created_at, 'compare'::text,
              nullif(regexp_replace(substring(p.source_url from '^https://([^/?#]+)'), '^www\.', ''), ''),
              (select min((o ->> 'price')::numeric)
                 from jsonb_array_elements(case when jsonb_typeof(p.offers) = 'array' then p.offers else '[]'::jsonb end) o
                where jsonb_typeof(o) = 'object' and o -> 'inStock' = 'true'::jsonb and jsonb_typeof(o -> 'price') = 'number'),
-             1, coalesce(p.compare_at, p.created_at)
+             p.requirements, null::jsonb,
+             2, coalesce(p.compare_at, p.created_at)
         from public.products p
        where p.active and p.compare_state = 'wanted' and p.source_url is not null
     ) x
     order by x.grp, x.ord, x.id
     limit 10;
+end;
+$$;
+
+-- The answer to a 'variant' row: p_ids = a json array of 1 to 20 variant ids (strings, as in the row's `variants`), every one of which
+-- must exist in the product's own variants (else 22023 naming the first bad id), or null = "cannot decide, leave it to the person".
+--  * with ids: tracked_variants is set exactly as the browser's own choice sets it (status is left alone: the job tracks those variants at
+--    its next run, whether the product is at "Vælg variant" or already tracking), and req_state records the answer for these requirements.
+--  * with null: only req_state is written (n 0). The product stays at "Vælg variant" for the person; a tracking product is not touched.
+-- Either way the row leaves the queue until the requirements change again. Returns true when the product was waiting (see
+-- req_variant_waiting), false when it is not (any more): a bad shape of p_ids is an error in either case, a bad id only for a waiting product.
+create or replace function public.resolver_variants(p_id uuid, p_ids jsonb)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  n integer;
+  e jsonb;
+  ids text[] := '{}';
+  v text;
+  have text[];
+  pr public.products;
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  if p_ids is not null and jsonb_typeof(p_ids) = 'null' then p_ids := null; end if;
+  if p_ids is not null then
+    if jsonb_typeof(p_ids) <> 'array' then
+      raise exception 'resolver: ids must be an array of 1 to 20 variant ids, or null' using errcode = '22023';
+    end if;
+    if jsonb_array_length(p_ids) < 1 or jsonb_array_length(p_ids) > 20 then
+      raise exception 'resolver: ids must hold 1 to 20 variant ids, not %', jsonb_array_length(p_ids) using errcode = '22023';
+    end if;
+    for e in select x from jsonb_array_elements(p_ids) x loop
+      if jsonb_typeof(e) <> 'string' then
+        raise exception 'resolver: a variant id must be text: %', left(e::text, 80) using errcode = '22023';
+      end if;
+      v := e #>> '{}';
+      if not (v = any (ids)) then ids := ids || v; end if;
+    end loop;
+  end if;
+  select * into pr from public.products where id = p_id for update;
+  if not found or not public.req_variant_waiting(pr) then
+    return false;
+  end if;
+  if p_ids is not null then
+    select coalesce(array_agg(w.e ->> 'id'), '{}') into have from jsonb_array_elements(pr.variants) w(e) where jsonb_typeof(w.e) = 'object';
+    foreach v in array ids loop
+      if not (v = any (have)) then
+        raise exception 'resolver: variant id not found in the product: %', left(v, 80) using errcode = '22023';
+      end if;
+    end loop;
+  end if;
+  update public.products
+     set tracked_variants = case when p_ids is null then tracked_variants else ids end,
+         req_state = jsonb_build_object('for', pr.requirements, 'by', 'agent', 'at', now(), 'n', case when p_ids is null then 0 else cardinality(ids) end)
+   where id = p_id;
+  get diagnostics n = row_count;
+  return n = 1;
 end;
 $$;
 
@@ -882,8 +1024,10 @@ begin
     return n = 1;
   end if;
   if p_url is null then
+    -- not found elsewhere. A product the agent switched to Prisjagt earlier (source on prisjagt.dk, shop_url kept) stays switched: 'done'.
     update public.products
-       set compare_state = 'none', compare_at = now()
+       set compare_state = case when source_url ~* '^https://(www\.)?prisjagt\.dk([/?#]|$)' and shop_url is not null then 'done' else 'none' end,
+           compare_at = now()
      where id = p_id and active and compare_state = 'wanted';
     get diagnostics n = row_count;
     return n = 1;
@@ -892,9 +1036,16 @@ begin
   if u !~ '^https://prisjagt\.dk/product\.php\?p=[0-9]{1,18}$' then
     raise exception 'resolver: not a prisjagt.dk product link' using errcode = '22023';
   end if;
+  -- the page the product is on already (a re-check after changed requirements found the same page right): nothing is reset
+  update public.products
+     set compare_state = 'done', compare_at = now()
+   where id = p_id and active and compare_state = 'wanted' and source_url = u;
+  get diagnostics n = row_count;
+  if n = 1 then return true; end if;
   -- the same reset as the source_url block of products_guard (without the alternatives, which stay)
   update public.products
-     set shop_url = source_url, source_url = u, compare_state = 'done', compare_at = now(),
+     set shop_url = case when source_url ~* '^https://(www\.)?prisjagt\.dk([/?#]|$)' then shop_url else source_url end,
+         source_url = u, compare_state = 'done', compare_at = now(), req_state = null,
          status = 'pending', tracked_variants = null,
          title = null, variants = null, offers = null, history = null,
          normal_price = null, verdict = null, warning = null, check_note = null,
@@ -910,7 +1061,9 @@ revoke all on function public.resolver_list() from public;
 revoke all on function public.resolver_set(uuid, text) from public;
 revoke all on function public.resolver_fail(uuid, text) from public;
 revoke all on function public.resolver_compare(uuid, text, jsonb) from public;
+revoke all on function public.resolver_variants(uuid, jsonb) from public;
 grant execute on function public.resolver_list() to anon, authenticated;
+grant execute on function public.resolver_variants(uuid, jsonb) to anon, authenticated;
 grant execute on function public.resolver_set(uuid, text) to anon, authenticated;
 grant execute on function public.resolver_fail(uuid, text) to anon, authenticated;
 grant execute on function public.resolver_compare(uuid, text, jsonb) to anon, authenticated;

@@ -194,7 +194,11 @@
       cmpOk: "compare_state" in r, cmp: r.compare_state || null, cmpAt: r.compare_at || null, shopUrl: r.shop_url || null,
       // extra shops: extraOk = the database has the column (an older one does not send it, and the feature stays hidden); extraRaw = the
       // stored array as it is (a removal sends it back minus one entry), shown through xList (checked again)
-      extraOk: "extra_urls" in r, extraRaw: Array.isArray(r.extra_urls) ? r.extra_urls.filter(function (u) { return typeof u === "string"; }) : []
+      extraOk: "extra_urls" in r, extraRaw: Array.isArray(r.extra_urls) ? r.extra_urls.filter(function (u) { return typeof u === "string"; }) : [],
+      // details ("Detaljer", products.requirements): the person's own free words. reqOk = the database has the column (else everything about it stays hidden);
+      // reqState = what the AI agent answered for them (only its "for" is read here)
+      reqOk: "requirements" in r, req: typeof r.requirements === "string" ? r.requirements.slice(0, 120) : "",
+      reqStateOk: "req_state" in r, reqState: r.req_state && typeof r.req_state === "object" ? r.req_state : null
     };
   }
   function offersOf(p) {
@@ -402,7 +406,7 @@
       '<span class="meta" data-rowmsg="b-' + esc(id) + '">' + esc(state.rowMsg["b-" + id] || "") + '</span></form>';
   }
   function footHtml(p, fixLink) {
-    var id = p._id, link = safeUrl(p.url), html = listPickHtml(p) + boughtHtml(p);
+    var id = p._id, link = safeUrl(p.url), html = reqEditHtml(p) + listPickHtml(p) + boughtHtml(p);
     html += '<div class="foot"><span>' + (link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">' + (isMine(p) ? "Dit link" : "Link") + '</a>' : '') + '</span>';
     if (mayEdit(p)) {
       if (state.confirmDel === id) {
@@ -491,6 +495,8 @@
     var id = p._id, parts = [];
     var sg = suggestHtml(p, b, h, low30, lowAll);
     if (mayEdit(p)) parts.push(sg + goalEditHtml(p));
+    var rq = reqEditHtml(p);
+    if (rq) parts.push(rq);
     var lp = listPickHtml(p);
     if (lp) parts.push(lp);
     var v = "";
@@ -528,7 +534,28 @@
     return '<details class="manage" data-manage="' + esc(p._id) + '"' + (state.manage[p._id] || state.confirmDel === p._id ? " open" : "") + '><summary>Indstil vare</summary><div class="manage-in"><div class="mrow">' + f + '</div></div></details>';
   }
 
-  function bodyHtml(p) {
+  // Details: the person's own words (escaped like every user string). One quiet line at the top; the input is in "Indstil vare" (own products only).
+  function cleanReq(t) {
+    return String(t == null ? "" : t).replace(/[\u0000-\u001f\u007f-\u009f<>]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120).trim();
+  }
+  function reqLineHtml(p) {
+    return p.reqOk && p.req ? '<p class="note req">Detaljer: ' + esc(p.req) + '</p>' : "";
+  }
+  // "Finder den rigtige variant": details given, at "Vælg variant", the agent has not answered for these words yet (the person can choose at any time)
+  function reqFindingHtml(p) {
+    if (!p.reqOk || !p.reqStateOk || !p.req || p.status !== "choose" || !isMine(p) || p.variants.length < 2 || awaitingFetch(p) || state.change[p._id]) return "";
+    if (p.reqState && p.reqState["for"] === p.req) return "";
+    return '<p class="note req-find">Finder den rigtige variant</p>';
+  }
+  function reqEditHtml(p) {
+    var id = p._id;
+    if (!p.reqOk || !mayEdit(p)) return "";
+    return '<form class="edit" data-req="' + esc(id) + '" novalidate><label for="rq-' + esc(id) + '">Detaljer</label>' +
+      '<input type="text" id="rq-' + esc(id) + '" maxlength="120" value="' + esc(p.req) + '" placeholder="Farve, størrelse m.m.">' +
+      '<button class="link" type="submit">Gem</button><span class="meta" data-rowmsg="rq-' + esc(id) + '">' + esc(state.rowMsg["rq-" + id] || "") + '</span></form>';
+  }
+  function bodyHtml(p) { return reqLineHtml(p) + reqFindingHtml(p) + bodyHtml0(p); }
+  function bodyHtml0(p) {
     var id = p._id;
     if (p.status === "pending" && !p.url) return findHtml(p) + looseManage(p);
     if (p.status === "pending") return cmpHtml(p) + looseManage(p);
@@ -1412,6 +1439,22 @@
       }, function () { setRowMsg("b-" + bid, "Kunne ikke gemme."); });
       return;
     }
+    var rqF = ev.target.closest("[data-req]");
+    if (rqF) {
+      ev.preventDefault();
+      var rid = rqF.dataset.req, rp = prod(rid);
+      if (!rp || !mayEdit(rp)) return;
+      var rv = cleanReq(rqF.querySelector("input").value);
+      if (rv === rp.req) { setRowMsg("rq-" + rid, ""); return; }
+      setRowMsg("rq-" + rid, "Gemmer …");
+      sb.from("products").update({ requirements: rv || null }).eq("id", rid).then(function (r) {
+        if (r && r.error) { setRowMsg("rq-" + rid, "Kunne ikke gemme lige nu. Prøv igen om lidt."); onWriteError(r.error); return; }
+        rp.req = rv; rp.reqState = null; state.rowMsg["rq-" + rid] = "";
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        render(); fetchProducts();
+      }, function () { setRowMsg("rq-" + rid, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+      return;
+    }
     var shF = ev.target.closest("[data-shops]");
     if (shF) {
       ev.preventDefault();
@@ -1627,9 +1670,11 @@
     var btn = $("fSubmit"); btn.disabled = true;
     var goal = auto ? { target_type: "auto", target_value: null } : { target_type: pct ? "pct" : "price", target_value: v };
     var row = url ? Object.assign({ name: PLACEHOLDER, source_url: url }, goal, { active: true }) : Object.assign({ name: name }, goal);
-    var into = curSel();
+    var into = curSel(), rq = cleanReq($("fReq").value);
     if (listKnown(into)) row.list_id = into;   // a selected list: the new product goes straight into it
-    sb.from("products").insert(row).then(function (r) {
+    if (rq) row.requirements = rq;             // optional details ("Detaljer"); an older database without the column gets the product without them
+    var insertRow = function (again) { sb.from("products").insert(row).then(function (r) {
+      if (r && r.error && !again && row.requirements && schemaOld(r.error, false)) { delete row.requirements; insertRow(true); return; }
       btn.disabled = false;
       if (r && r.error) {
         if (isDenied(r.error)) { onWriteError(r.error); return; }
@@ -1638,9 +1683,10 @@
         fail(r.error.code === "23514" ? (url ? "Databasen afviste linket eller målet. Tjek, at linket starter med https:// og er en produktside." : "Databasen afviste navnet eller målet. Tjek dem, og prøv igen.") : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
         return;
       }
-      $("fMain").value = ""; $("fVal").value = ""; syncAdd();
+      $("fMain").value = ""; $("fVal").value = ""; $("fReq").value = ""; syncAdd();
       fetchProducts();
-    }, function () { btn.disabled = false; fail("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+    }, function () { btn.disabled = false; fail("Kunne ikke gemme lige nu. Prøv igen om lidt."); }); };
+    insertRow(false);
   });
 
   function addImport(url, fail) {
@@ -1662,7 +1708,7 @@
         fail(r.error.code === "23514" ? (/højst/.test(String(r.error.message || "")) ? String(r.error.message) : "Databasen afviste linket. Brug det delte link til ønskelisten fra Ønskeskyen.") : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
         return;
       }
-      $("fMain").value = ""; $("fVal").value = ""; state.importMsg = ""; syncAdd();
+      $("fMain").value = ""; $("fVal").value = ""; $("fReq").value = ""; state.importMsg = ""; syncAdd();
       fetchImports();
     }, function () { btn.disabled = false; fail("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
   }

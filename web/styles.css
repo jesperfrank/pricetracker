@@ -66,6 +66,9 @@ h1 { font: 700 30px/1.1 var(--font); letter-spacing: -0.025em; margin: 0 }
 .inp { background: var(--sunk); border: 1px solid transparent; border-radius: 10px; padding: 0 14px; height: 46px; width: 100%; min-width: 0 }
 .inp::placeholder { color: var(--muted) }
 .inp:focus { outline: none; border-color: var(--ink); background: var(--bg) }
+.addmore .req { flex: 1 1 100%; min-width: 0 }
+.addmore .req .inp { height: 44px; width: 100% }
+.note.req { margin: 0 0 6px }
 .amount { position: relative; min-width: 0; flex: 0 1 150px }
 .amount .inp { height: 44px }
 .goal { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto }

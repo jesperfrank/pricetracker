@@ -921,13 +921,13 @@ reset role;
 -- a donor row that differs from a-gave in every column but the bought ones, used to try every column
 insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
   status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id,
-  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state)
+  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state, requirements, req_state)
 values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
   'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01',
-  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}');
+  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}', 'donor krav', '{"want":true}');
 update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
   variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04',
-  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg', extra_urls = '["https://tredje.example.dk/gave"]', extra_state = '{"x":{"fails":3}}'
+  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg', extra_urls = '["https://tredje.example.dk/gave"]', extra_state = '{"x":{"fails":3}}', requirements = 'gave krav', req_state = '{"for":"gave krav","by":"agent"}'
  where name = 'a-gave';
 create table t.donor as select * from public.products where name = 'donor';
 create table t.snap as select id, to_jsonb(p) as j from public.products p where name = 'a-gave';
@@ -1743,8 +1743,8 @@ select t.chk('compare: ... host without www and path, price = lowest in-stock of
   and (select host = 'proshop.dk' and price is null from public.resolver_list() where kind = 'compare' and host = 'proshop.dk')
   and (select bool_and(host is null and price is null) from public.resolver_list() where kind = 'name')
   and (select count(*) = 3 from public.resolver_list() where kind = 'name'));
-select t.chk('compare: ... the columns are id, name, created_at, kind, host, price',
-  (select proargnames = array['id', 'name', 'created_at', 'kind', 'host', 'price'] from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace));
+select t.chk('compare: ... the columns are id, name, created_at, kind, host, price, req, variants',
+  (select proargnames = array['id', 'name', 'created_at', 'kind', 'host', 'price', 'req', 'variants'] from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace));
 select t.chk('compare: ... a compare row shows the stored title, else the name, and the product''s own created_at',
   (select id = t.pid('cmp-w1') and created_at = t.q($$select created_at::text from public.products where name = 'cmp-w1'$$)::timestamptz from public.resolver_list() where name = 'Adidas Samba OG')
   and exists (select 1 from public.resolver_list() where kind = 'compare' and name = 'cmp-w2'));
@@ -2147,6 +2147,321 @@ reset role;
 select t.tok(null);
 delete from public.products;
 delete from public.lists where name = 'Ext';
+select set_config('request.jwt.claims', '', false);
+
+-- ---- requirements and the variant work of the AI agent
+select t.tok(null);
+create function t.vs(n integer) returns jsonb language sql as $$
+  select jsonb_agg(jsonb_build_object('id', 'v' || g, 'label', 'Variant ' || g, 'lowest', 100 + g, 'offers', 2, 'sample', 'x') order by g) from generate_series(1, n) g $$;
+grant execute on function t.vs(integer) to public;
+-- a product of A: n, link, status, number of variants, tracked variants, requirements, list
+create function t.rmk(n text, u text, st text, nv integer, tr text[], rq text, lst uuid default null) returns void language sql security definer as $$
+  insert into public.products (user_id, name, source_url, target_type, status, title, variants, tracked_variants, requirements, list_id, offers, last_checked)
+  values ('00000000-0000-0000-0000-0000000000a1', n, u, 'auto', st, 'Titel ' || n, case when nv = 0 then null else t.vs(nv) end, tr, rq, lst,
+    '[{"store":"Shop","price":450,"inStock":true}]', now()) $$;
+grant execute on function t.rmk(text, text, text, integer, text[], text, uuid) to public;
+create function t.st(n text) returns text language sql security definer as $$ select coalesce(req_state::text, 'null') from public.products where name = n $$;
+create function t.cs(n text) returns text language sql security definer as $$ select coalesce(compare_state, 'null') || '/' || compare_tries || '/' || coalesce(compare_at::text, 'null') from public.products where name = n $$;
+create function t.rq(n text) returns text language sql security definer as $$ select coalesce(requirements, 'null') from public.products where name = n $$;
+grant execute on function t.st(text), t.cs(text), t.rq(text) to public;
+create function t.rv(n text, ids jsonb) returns text language plpgsql as $$
+declare r boolean; begin r := public.resolver_variants(t.pid(n), ids); return coalesce(r::text, 'null'); exception when others then return 'error:' || sqlerrm; end $$;
+grant execute on function t.rv(text, jsonb) to public;
+create function t.tv(n text) returns text language sql security definer as $$ select coalesce(array_to_string(tracked_variants, ','), 'null') from public.products where name = n $$;
+grant execute on function t.tv(text) to public;
+
+select t.chk('requirements: two nullable columns, the check (one each), the helper and resolver_variants exist once',
+  (select count(*) = 2 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name in ('requirements', 'req_state') and is_nullable = 'YES')
+  and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_requirements_check')
+  and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_req_state_check')
+  and (select count(*) = 1 from pg_proc where proname = 'req_variant_waiting' and pronamespace = 'public'::regnamespace)
+  and (select count(*) = 1 from pg_proc where proname = 'resolver_variants' and pronamespace = 'public'::regnamespace));
+
+-- the person's words are only a preference: cleaned, never a reason to refuse a product
+create function t.ireq(n text, r text) returns text language plpgsql as $$
+begin
+  execute format('insert into public.products (name, target_type, requirements) values (%L, ''auto'', %L)', n, r); return 'ok';
+exception when others then return 'fail ' || sqlerrm; end $$;
+grant execute on function t.ireq(text, text) to public;
+set role authenticated; select t.asA();
+select t.chk('requirements: insert trims, empty and blank become null, a tab or newline around is trimmed',
+  t.ireq('q1', '  hvid/grøn, str. 43  ') = 'ok' and t.ireq('q2', '') = 'ok' and t.ireq('q3', '   ') = 'ok' and t.ireq('q4', E'\t sort \n') = 'ok'
+  and t.rq('q1') = 'hvid/grøn, str. 43' and t.rq('q2') = 'null' and t.rq('q3') = 'null' and t.rq('q4') = 'sort');
+select t.chk('requirements: 120 characters are kept (also multibyte); longer text is cut at 120 and the product is still saved',
+  t.ireq('q5', repeat('æ', 120)) = 'ok' and t.ireq('q6', repeat('x', 300)) = 'ok' and t.ireq('q7', repeat('x', 119) || '   yy') = 'ok'
+  and t.rq('q5') = repeat('æ', 120) and t.rq('q6') = repeat('x', 120) and t.rq('q7') = repeat('x', 119));
+select t.chk('requirements: control characters and angle brackets are replaced by a space (never an error), spaces collapse; quotes and & stay',
+  t.ireq('q8', E'hvid\nstr. 43') = 'ok' and t.ireq('q9', E'hvid\tstr') = 'ok' and t.ireq('q10', E'a\u0085b') = 'ok' and t.ireq('q11', E'a\u007fb') = 'ok'
+  and t.ireq('q12', 'a<b') = 'ok' and t.ireq('q13', '<<<>>>') = 'ok' and t.ireq('q14', '<script>alert(1)</script>') = 'ok' and t.ireq('q15', 'str. 43 & "hvid" ''grøn''') = 'ok'
+  and t.rq('q8') = 'hvid str. 43' and t.rq('q9') = 'hvid str' and t.rq('q10') = 'a b' and t.rq('q11') = 'a b' and t.rq('q12') = 'a b' and t.rq('q13') = 'null'
+  and t.rq('q14') = 'script alert(1) /script' and t.rq('q15') = 'str. 43 & "hvid" ''grøn''');
+select t.chk('requirements: a browser insert cannot forge req_state',
+  t.try($$insert into public.products (name, target_type, requirements, req_state) values ('q16', 'auto', 'rød', '{"for":"rød","by":"agent"}')$$) = 'ok' and t.st('q16') = 'null');
+select t.chk('requirements: an update is cleaned the same way',
+  t.try($$update public.products set requirements = E'  <b>sort</b>\n ' where name = 'q16'$$) = 'ok' and t.rq('q16') = 'b sort /b');
+reset role;
+delete from public.products where name ~ '^q[0-9]+$';
+
+-- a shared list: A owns it, B is a member
+insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000aa77', '00000000-0000-0000-0000-0000000000a1', 'Krav');
+insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa77', '00000000-0000-0000-0000-0000000000b2');
+select t.rmk('r-sh', 'https://www.adidas.dk/sko/stan', 'tracking', 1, array['shop'], 'hvid/grøn', '00000000-0000-0000-0000-00000000aa77');
+set role authenticated; select t.asB();
+select t.chk('requirements: a member can read them, but not set, change or clear them on the owner''s product',
+  (select requirements = 'hvid/grøn' from public.products where name = 'r-sh')
+  and t.try($$update public.products set requirements = 'sort' where name = 'r-sh'$$) = 'check'
+  and t.try($$update public.products set requirements = null where name = 'r-sh'$$) = 'check'
+  and t.try($$update public.products set req_state = '{"for":"hvid/grøn","by":"agent"}' where name = 'r-sh'$$) = 'check'
+  and t.rq('r-sh') = 'hvid/grøn' and t.st('r-sh') = 'null');
+select t.chk('requirements: a member''s own product in the list has its own requirements, which the owner cannot change',
+  t.try($$insert into public.products (name, target_type, requirements, list_id) values ('r-b', 'auto', 'str. 40', '00000000-0000-0000-0000-00000000aa77')$$) = 'ok');
+select t.chk('requirements: ... they are stored', (select requirements = 'str. 40' from public.products where name = 'r-b'));
+select t.asA();
+select t.chk('requirements: ... A cannot change B''s', t.try($$update public.products set requirements = 'str. 41' where name = 'r-b'$$) = 'check' and t.rq('r-b') = 'str. 40');
+reset role;
+
+-- reset rules: single-shop product with compare state done and extra shops
+select t.exmk('r-single', 'https://www.adidas.dk/sko/stan', 'done', '["https://a.example.dk/stan"]');
+update public.products set compare_tries = 2 where name = 'r-single';
+create table t.rsnap as select t.snapstate('r-single') as j, (select extra_urls from public.products where name = 'r-single') as x;
+grant select on t.rsnap to public;
+set role authenticated; select t.asA();
+update public.products set requirements = '  hvid/grøn, str. 43 ' where name = 'r-single';
+select t.chk('requirements: new words on a single-shop product restart the lookup (compare_state null, compare_at null, tries 0) and change nothing else',
+  t.cs('r-single') = 'null/0/null' and t.rq('r-single') = 'hvid/grøn, str. 43'
+  and (select t.snapstate('r-single') - 'requirements' - 'compare_tries' = s.j - 'requirements' - 'compare_tries' from t.rsnap s)
+  and (select x = (select extra_urls from public.products where name = 'r-single') from t.rsnap s) and t.st('r-single') = 'null');
+reset role;
+update public.products set compare_state = 'done', compare_at = now(), compare_tries = 1 where name = 'r-single';
+set role authenticated; select t.asA();
+update public.products set requirements = 'hvid/grøn, str. 43', name = 'r-single' where name = 'r-single';
+select t.chk('requirements: the same words again (or an update of something else) restart nothing', t.cs('r-single') like 'done/1/%');
+update public.products set requirements = null where name = 'r-single';
+select t.chk('requirements: removing them restarts nothing either, and the field is null', t.cs('r-single') like 'done/1/%' and t.rq('r-single') = 'null');
+reset role;
+update public.products set compare_state = 'none', compare_at = now() where name = 'r-single';
+set role authenticated; select t.asA();
+update public.products set requirements = 'sort' where name = 'r-single';
+select t.chk('requirements: a single-shop product that was not found (none) is looked for again', t.cs('r-single') = 'null/0/null');
+reset role;
+update public.products set compare_state = 'wanted', compare_at = now() where name = 'r-single';
+set role authenticated; select t.asA();
+update public.products set requirements = 'rød' where name = 'r-single';
+select t.chk('requirements: ... also while it is waiting (the agent then reads the new words)', t.cs('r-single') = 'null/0/null');
+reset role;
+update public.products set req_state = '{"for":"rød","by":"agent","n":1}' where name = 'r-single';
+set role authenticated; select t.asA();
+update public.products set source_url = 'https://www.andenbutik.dk/stan' where name = 'r-single';
+select t.chk('requirements: a new link starts over (req_state null) and keeps the requirements', t.st('r-single') = 'null' and t.rq('r-single') = 'rød');
+select t.chk('requirements: the browser cannot write req_state or the compare columns when it changes requirements',
+  t.try($$update public.products set requirements = 'blå', req_state = '{"for":"blå","by":"agent"}', compare_state = 'done', compare_tries = 9 where name = 'r-single'$$) = 'ok'
+  and t.st('r-single') = 'null' and t.cs('r-single') = 'null/0/null');
+reset role;
+
+-- a Prisjagt product the person added directly (no shop_url)
+select t.rmk('r-pj', 'https://prisjagt.dk/product.php?p=11', 'choose', 3, null, null);
+select t.rmk('r-pj1', 'https://prisjagt.dk/product.php?p=12', 'tracking', 1, array['v1'], null);
+select t.rmk('r-pjt', 'https://prisjagt.dk/product.php?p=13', 'tracking', 3, array['v1'], null);
+select t.rmk('r-sw', 'https://prisjagt.dk/product.php?p=14', 'tracking', 2, array['v1'], null);
+update public.products set compare_state = 'done', compare_at = now(), shop_url = 'https://www.adidas.dk/sko/old', compare_tries = 1 where name = 'r-sw';
+set role authenticated; select t.asA();
+update public.products set requirements = 'hvid' where name in ('r-pj', 'r-pj1', 'r-pjt', 'r-sw');
+select t.chk('requirements: a direct Prisjagt product never gets a compare lookup (state stays null, link kept); only variants are re-evaluated',
+  t.cs('r-pj') = 'null/0/null' and t.cs('r-pjt') = 'null/0/null' and t.cs('r-pj1') = 'null/0/null'
+  and (select bool_and(source_url ~ '^https://prisjagt.dk/product.php') and bool_and(shop_url is null) from public.products where name in ('r-pj', 'r-pj1', 'r-pjt')));
+select t.chk('requirements: 2 or more variants: req_state {"want": true}; one variant: nothing to choose',
+  t.q($$select (req_state ->> 'want' = 'true')::text from public.products where name = 'r-pjt'$$) = 'true'
+  and t.q($$select (req_state ->> 'want' = 'true')::text from public.products where name = 'r-pj'$$) = 'true' and t.st('r-pj1') = 'null');
+select t.chk('requirements: a product the agent switched to Prisjagt (shop_url kept) is looked for again: state reset, link, shop_url, price state kept, variants flagged',
+  t.cs('r-sw') = 'null/0/null' and (select shop_url = 'https://www.adidas.dk/sko/old' and source_url = 'https://prisjagt.dk/product.php?p=14' and tracked_variants = array['v1'] and offers is not null from public.products where name = 'r-sw')
+  and t.q($$select (req_state ->> 'want' = 'true')::text from public.products where name = 'r-sw'$$) = 'true');
+update public.products set name = 'r-pjt' where name = 'r-pjt';
+select t.chk('requirements: an update of something else keeps req_state; the browser cannot write it', t.q($$select (req_state ->> 'want' = 'true')::text from public.products where name = 'r-pjt'$$) = 'true'
+  and t.try($$update public.products set req_state = null where name = 'r-pjt'$$) = 'ok' and t.q($$select (req_state ->> 'want' = 'true')::text from public.products where name = 'r-pjt'$$) = 'true');
+reset role;
+update public.products set req_state = '{"for":"hvid","by":"agent","n":1}' where name = 'r-pjt';
+set role authenticated; select t.asA();
+update public.products set requirements = 'blå' where name = 'r-pjt';
+select t.chk('requirements: new words replace an answer for the old words by the flag', t.q($$select (req_state ->> 'want' = 'true' and req_state -> 'for' is null)::text from public.products where name = 'r-pjt'$$) = 'true');
+update public.products set source_url = 'https://prisjagt.dk/product.php?p=99' where name = 'r-pjt';
+select t.chk('requirements: a new link resets the flag and the product (as always)', t.st('r-pjt') = 'null' and t.rq('r-pjt') = 'blå' and t.tv('r-pjt') = 'null');
+reset role;
+delete from public.products where name in ('r-pj', 'r-pj1', 'r-pjt', 'r-sw', 'r-single', 'r-sh', 'r-b');
+
+-- ---- resolver_list: three kinds
+delete from public.products;
+select t.rmk('v-ch', 'https://prisjagt.dk/product.php?p=21', 'choose', 3, null, 'hvid/grøn, str. 43');
+select t.rmk('v-want', 'https://prisjagt.dk/product.php?p=22', 'tracking', 2, array['v1'], 'sort');
+update public.products set req_state = '{"want":true,"at":"2026-11-01T10:00:00Z"}', created_at = now() - interval '9 days' where name = 'v-want';
+update public.products set created_at = now() - interval '2 days', last_checked = '2026-11-02T10:00:00Z' where name = 'v-ch';
+select t.rmk('c-w', 'https://www.adidas.dk/sko/x', 'tracking', 1, array['shop'], 'str. 43');
+update public.products set compare_state = 'wanted', compare_at = now() - interval '1 day' where name = 'c-w';
+select t.rmk('c-w0', 'https://www.proshop.dk/x', 'tracking', 1, array['shop'], null);
+update public.products set compare_state = 'wanted', compare_at = now() - interval '3 days' where name = 'c-w0';
+insert into public.products (user_id, name, target_type, created_at, requirements) values ('00000000-0000-0000-0000-0000000000a1', 'n-1', 'auto', now() - interval '1 day', 'XL'), ('00000000-0000-0000-0000-0000000000a1', 'n-0', 'auto', now() - interval '2 days', null);
+-- not waiting for a variant decision
+select t.rmk('x-noreq', 'https://prisjagt.dk/product.php?p=31', 'choose', 3, null, null);
+select t.rmk('x-one', 'https://prisjagt.dk/product.php?p=32', 'choose', 1, null, 'sort');
+select t.rmk('x-inact', 'https://prisjagt.dk/product.php?p=33', 'choose', 3, null, 'sort');
+update public.products set active = false where name = 'x-inact';
+select t.rmk('x-bought', 'https://prisjagt.dk/product.php?p=34', 'choose', 3, null, 'sort');
+update public.products set bought_at = now() where name = 'x-bought';
+select t.rmk('x-shop', 'https://www.adidas.dk/sko/y', 'choose', 3, null, 'sort');
+select t.rmk('x-track', 'https://prisjagt.dk/product.php?p=35', 'tracking', 3, array['v1'], 'sort');
+select t.rmk('x-chosen', 'https://prisjagt.dk/product.php?p=36', 'choose', 3, array['v2'], 'sort');
+select t.rmk('x-answered', 'https://prisjagt.dk/product.php?p=37', 'choose', 3, null, 'sort');
+update public.products set req_state = '{"for":"sort","by":"agent","n":0}' where name = 'x-answered';
+select t.rmk('x-stale', 'https://prisjagt.dk/product.php?p=38', 'choose', 3, null, 'sort');
+update public.products set req_state = '{"for":"gamle ord","by":"agent","n":0}' where name = 'x-stale';
+select t.rmk('x-novar', 'https://prisjagt.dk/product.php?p=39', 'pending', 0, null, 'sort');
+select t.tok(repeat('a', 64));
+set role anon;
+select t.chk('variant: resolver_list: name rows first, then variant rows, then compare rows (oldest request first)',
+  (select array_agg(kind order by o) = array['name', 'name', 'variant', 'variant', 'variant', 'compare', 'compare'] from (select row_number() over () o, kind from public.resolver_list()) y)
+  and (select array_agg(name order by o) filter (where kind <> 'variant') = array['n-0', 'n-1', 'Titel c-w0', 'Titel c-w'] from (select row_number() over () o, * from public.resolver_list()) y));
+select t.chk('variant: ... only the waiting products are variant rows (no requirements, one variant, inactive, bought, a shop link, tracking without the flag, a choice already made, answered for these words, no variants yet: none of them)',
+  (select count(*) = 3 and bool_and(name in ('Titel v-want', 'Titel v-ch', 'Titel x-stale')) from public.resolver_list() where kind = 'variant'));
+select t.chk('variant: ... req on every row (the person''s words or null), variants only on variant rows',
+  (select req = 'XL' from public.resolver_list() where name = 'n-1') and (select req is null from public.resolver_list() where name = 'n-0')
+  and (select req = 'str. 43' from public.resolver_list() where name = 'Titel c-w') and (select req is null from public.resolver_list() where name = 'Titel c-w0')
+  and (select bool_and(req is not null) from public.resolver_list() where kind = 'variant')
+  and (select bool_and(variants is null) from public.resolver_list() where kind <> 'variant') and (select bool_and(variants is not null) from public.resolver_list() where kind = 'variant'));
+select t.chk('variant: ... variants = [{id, name}] with the label as name, in the page''s order; host and price null',
+  (select variants = '[{"id":"v1","name":"Variant 1"},{"id":"v2","name":"Variant 2"},{"id":"v3","name":"Variant 3"}]'::jsonb and host is null and price is null and req = 'hvid/grøn, str. 43' and id = t.pid('v-ch') from public.resolver_list() where kind = 'variant' and name = 'Titel v-ch'));
+select t.chk('variant: ... the columns are id, name, created_at, kind, host, price, req, variants; the compare rows are as before',
+  (select proargnames = array['id', 'name', 'created_at', 'kind', 'host', 'price', 'req', 'variants'] from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace)
+  and (select host = 'adidas.dk' and price = 450 and variants is null from public.resolver_list() where name = 'Titel c-w'));
+reset role;
+update public.products set variants = (select jsonb_agg(jsonb_build_object('id', 'w' || g, 'label', repeat('å', 100) || g) order by g) from generate_series(1, 60) g) where name = 'v-ch';
+set role anon;
+select t.chk('variant: ... at most 40 variants, names cut at 80 characters, ids unchanged',
+  (select jsonb_array_length(variants) = 40 and (variants -> 0 ->> 'id') = 'w1' and (variants -> 39 ->> 'id') = 'w40' and (select bool_and(char_length(e ->> 'name') = 80) from jsonb_array_elements(variants) e) from public.resolver_list() where name = 'Titel v-ch'));
+reset role;
+insert into public.products (user_id, name, source_url, target_type, status, variants, requirements, created_at)
+  select '00000000-0000-0000-0000-0000000000a1', 'vv' || g, 'https://prisjagt.dk/product.php?p=' || (100 + g), 'auto', 'choose', t.vs(2), 'sort', now() - (g || ' hours')::interval from generate_series(1, 12) g;
+set role anon;
+select t.chk('variant: at most 10 rows in all: the 2 name rows first, then variant rows, compare rows only when room is left',
+  (select count(*) = 10 from public.resolver_list())
+  and (select array_agg(kind order by o) = array['name', 'name', 'variant', 'variant', 'variant', 'variant', 'variant', 'variant', 'variant', 'variant'] from (select row_number() over () o, kind from public.resolver_list()) y));
+reset role;
+delete from public.products where name ~ '^vv[0-9]+$';
+
+-- ---- resolver_variants
+select t.tok(repeat('a', 64));
+set role anon;
+select t.chk('variant: resolver_variants refuses a bad shape (not an array, empty, 21 ids, an id that is not text) and changes nothing',
+  t.rv('v-ch', '"v1"') like 'error:resolver: ids must be an array%' and t.rv('v-ch', '{"a":1}') like 'error:resolver: ids must be an array%'
+  and t.rv('v-ch', '[]') like 'error:resolver: ids must hold 1 to 20 variant ids, not 0%'
+  and t.rv('v-ch', (select jsonb_agg('w' || g) from generate_series(1, 21) g)) like 'error:resolver: ids must hold 1 to 20 variant ids, not 21%'
+  and t.rv('v-ch', '["w1", 2]') like 'error:resolver: a variant id must be text: 2%'
+  and t.rv('n-1', '[]') like 'error:resolver: ids must hold%' and t.st('v-ch') = 'null' and t.tv('v-ch') = 'null');
+select t.chk('variant: an id that is not among the product''s variants is refused, naming it, and nothing changes (also when one of several is good)',
+  t.rv('v-ch', '["w1", "nej-tak"]') = 'error:resolver: variant id not found in the product: nej-tak'
+  and t.rv('v-ch', '["w999"]') = 'error:resolver: variant id not found in the product: w999'
+  and t.rv('v-ch', jsonb_build_array(repeat('å', 200))) like 'error:resolver: variant id not found in the product: ååå%'
+  and t.st('v-ch') = 'null' and t.tv('v-ch') = 'null');
+select t.chk('variant: a product that is not waiting gives false (no requirements, tracking without the flag, a choice already made, answered, a shop link, a name-only product, inactive, bought, one variant)',
+  t.rv('x-noreq', '["v1"]') = 'false' and t.rv('x-track', '["v1"]') = 'false' and t.rv('x-chosen', '["v1"]') = 'false' and t.rv('x-answered', '["v1"]') = 'false'
+  and t.rv('x-shop', '["v1"]') = 'false' and t.rv('n-1', '["v1"]') = 'false' and t.rv('x-inact', '["v1"]') = 'false' and t.rv('x-bought', null) = 'false' and t.rv('x-one', null) = 'false');
+select t.chk('variant: ... and nothing was written for them', t.tv('x-noreq') = 'null' and t.tv('x-chosen') = 'v2' and t.st('x-answered') = '{"n": 0, "by": "agent", "for": "sort"}');
+select t.chk('variant: an answer with ids sets tracked_variants exactly (status untouched: the job starts on its next run), records the answer for these requirements, and leaves the queue',
+  t.rv('v-ch', '["w2", "w5", "w2"]') = 'true' and t.tv('v-ch') = 'w2,w5'
+  and t.q($$select (req_state ->> 'for' = 'hvid/grøn, str. 43' and req_state ->> 'by' = 'agent' and (req_state ->> 'n')::int = 2 and status = 'choose' and requirements = 'hvid/grøn, str. 43')::text from public.products where name = 'v-ch'$$) = 'true'
+  and t.rv('v-ch', '["w1"]') = 'false' and t.tv('v-ch') = 'w2,w5');
+select t.chk('variant: ... and the row has left the queue', not exists (select 1 from public.resolver_list() where name = 'Titel v-ch'));
+select t.chk('variant: the same for a tracking product that was flagged: the variants change, the flag is gone, status and prices stay',
+  t.rv('v-want', '["v2"]') = 'true' and t.tv('v-want') = 'v2' and t.q($$select (req_state ->> 'by' = 'agent' and req_state -> 'want' is null)::text from public.products where name = 'v-want'$$) = 'true'
+  and t.q($$select (status = 'tracking' and offers is not null)::text from public.products where name = 'v-want'$$) = 'true');
+select t.chk('variant: ... and leaves the queue', not exists (select 1 from public.resolver_list() where name = 'Titel v-want'));
+select t.chk('variant: null = cannot decide: only the answer is recorded (n 0), a product at "Vælg variant" stays there with nothing chosen, and it leaves the queue',
+  t.rv('x-stale', 'null'::jsonb) = 'true' and t.tv('x-stale') = 'null' and t.q($$select (status = 'choose' and (req_state ->> 'n')::int = 0 and req_state ->> 'for' = 'sort')::text from public.products where name = 'x-stale'$$) = 'true'
+  and t.rv('x-stale', null) = 'false');
+select t.chk('variant: ... and leaves the queue too', not exists (select 1 from public.resolver_list() where name = 'Titel x-stale'));
+reset role;
+update public.products set req_state = '{"want":true}' where name = 'x-track';
+set role anon;
+select t.chk('variant: null for a flagged tracking product: it keeps following what it followed',
+  t.rv('x-track', null) = 'true' and t.tv('x-track') = 'v1' and t.q($$select ((req_state ->> 'n')::int = 0)::text from public.products where name = 'x-track'$$) = 'true' and t.rv('x-track', null) = 'false');
+reset role;
+update public.products set req_state = null, tracked_variants = null, status = 'choose' where name = 'v-ch';
+set role authenticated; select t.asA();
+update public.products set requirements = 'sort, str. 42' where name = 'v-ch';
+select t.chk('variant: new words from the person put the product back in the queue (the answer for the old words no longer counts)',
+  t.q($$select (req_state ->> 'want' = 'true')::text from public.products where name = 'v-ch'$$) = 'true');
+reset role; set role anon;
+select t.chk('variant: ... and the agent sees the new words', (select count(*) = 1 and bool_and(req = 'sort, str. 42') from public.resolver_list() where name = 'Titel v-ch'));
+reset role;
+set role authenticated; select t.asA();
+update public.products set tracked_variants = array['w3'] where name = 'v-ch';
+select t.chk('variant: the person''s own choice wins: tracked_variants as written, the requirements marked as answered by the person',
+  t.tv('v-ch') = 'w3' and t.q($$select (req_state ->> 'for' = 'sort, str. 42' and req_state ->> 'by' = 'person' and req_state -> 'want' is null)::text from public.products where name = 'v-ch'$$) = 'true');
+reset role; set role anon;
+select t.chk('variant: ... and the row is out of the agent''s queue; the agent''s late answer is refused (false) and changes nothing',
+  t.rv('v-ch', '["w1"]') = 'false' and t.tv('v-ch') = 'w3' and not exists (select 1 from public.resolver_list() where name = 'Titel v-ch'));
+reset role;
+update public.products set req_state = '{"want":true}', tracked_variants = array['v1'] where name = 'v-want';
+set role authenticated; select t.asA();
+update public.products set tracked_variants = array['v1', 'v2'] where name = 'v-want';
+select t.chk('variant: the same for a flagged tracking product', t.tv('v-want') = 'v1,v2' and t.q($$select (req_state ->> 'by' = 'person')::text from public.products where name = 'v-want'$$) = 'true');
+reset role; set role anon;
+select t.chk('variant: ... out of the queue', not exists (select 1 from public.resolver_list() where name = 'Titel v-want'));
+reset role;
+update public.products set requirements = null, req_state = null where name = 'v-want';
+set role authenticated; select t.asA();
+update public.products set tracked_variants = array['v1'] where name = 'v-want';
+select t.chk('variant: a choice on a product without requirements writes no req_state', t.st('v-want') = 'null');
+reset role;
+
+-- the token and the grants
+select t.tok(null);
+create function t.rvc() returns text language plpgsql as $$ begin return (select count(*) from public.resolver_list())::text; exception when others then return sqlerrm; end $$;
+grant execute on function t.rvc() to public;
+update public.products set req_state = '{"want":true}', requirements = 'sort' where name = 'v-want';
+select t.chk('variant: the token is needed (none, empty, wrong, a prefix) for resolver_variants and resolver_list; nothing changes',
+  (select bool_and(r) from (
+    select t.rv('v-want', '["v1"]') = 'error:resolver: invalid or missing token' and t.rv('v-want', null) = 'error:resolver: invalid or missing token' as r from (select t.tok(null)) x union all
+    select t.rv('v-want', '["v1"]') = 'error:resolver: invalid or missing token' from (select t.tok('')) x union all
+    select t.rv('v-want', '["v1"]') = 'error:resolver: invalid or missing token' from (select t.tok('fel')) x union all
+    select t.rv('v-want', '["v1"]') = 'error:resolver: invalid or missing token' from (select t.tok(repeat('a', 63))) x) y)
+  and t.rv('v-want', '[]') = 'error:resolver: invalid or missing token' and t.rvc() = 'resolver: invalid or missing token' and t.st('v-want') = '{"want": true}' and t.tv('v-want') = 'v1');
+set role anon; select t.tok(null);
+select t.chk('variant: anon without a token: refused', t.rv('v-want', '["v1"]') = 'error:resolver: invalid or missing token');
+reset role; set role authenticated; select t.asA(); select t.tok('fel');
+select t.chk('variant: a signed-in user without the token: refused', t.rv('v-want', '["v1"]') = 'error:resolver: invalid or missing token' and t.rvc() = 'resolver: invalid or missing token');
+reset role;
+select t.chk('variant: grants as the other resolver functions; one resolver_list and one resolver_variants; the helper is not callable by the browser',
+  has_function_privilege('anon', 'public.resolver_variants(uuid, jsonb)', 'execute') and has_function_privilege('authenticated', 'public.resolver_variants(uuid, jsonb)', 'execute')
+  and not exists (select 1 from information_schema.routine_privileges where routine_name in ('resolver_variants', 'resolver_list') and grantee = 'PUBLIC')
+  and not has_function_privilege('anon', 'public.req_variant_waiting(public.products)', 'execute') and not has_function_privilege('authenticated', 'public.req_variant_waiting(public.products)', 'execute')
+  and (select count(*) = 1 from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace)
+  and (select count(*) = 1 from pg_proc where proname = 'resolver_variants' and pronamespace = 'public'::regnamespace));
+
+-- resolver_compare with the new state: a product switched earlier, looked for again
+select t.tok(repeat('a', 64));
+delete from public.products;
+select t.rmk('k-sw', 'https://prisjagt.dk/product.php?p=51', 'tracking', 2, array['v1'], 'hvid');
+update public.products set compare_state = 'wanted', compare_at = now(), shop_url = 'https://www.adidas.dk/sko/old', req_state = '{"want":true}' where name = 'k-sw';
+set role anon;
+select t.chk('requirements: resolver_list lists a switched product for compare (host prisjagt.dk) with its req, and for variants',
+  (select count(*) = 2 from public.resolver_list()) and (select host = 'prisjagt.dk' and req = 'hvid' from public.resolver_list() where kind = 'compare'));
+select t.chk('requirements: the agent keeps the page it is on (same link): state done, nothing reset, the original shop link kept',
+  t.rc('k-sw', 'https://www.prisjagt.dk/product.php?p=51') = 'true'
+  and t.q($$select (compare_state = 'done' and status = 'tracking' and offers is not null and tracked_variants = array['v1'] and shop_url = 'https://www.adidas.dk/sko/old' and req_state ->> 'want' = 'true')::text from public.products where name = 'k-sw'$$) = 'true');
+reset role;
+update public.products set compare_state = 'wanted' where name = 'k-sw';
+set role anon;
+select t.chk('requirements: not found elsewhere for a switched product: it stays switched (done), not none',
+  t.rc('k-sw', null) = 'true' and t.cs('k-sw') like 'done/%');
+reset role;
+update public.products set compare_state = 'wanted' where name = 'k-sw';
+set role anon;
+select t.chk('requirements: a different Prisjagt page: the new page, the ORIGINAL shop link kept in shop_url, state reset including req_state',
+  t.rc('k-sw', 'https://prisjagt.dk/product.php?p=52') = 'true'
+  and t.q($$select (source_url = 'https://prisjagt.dk/product.php?p=52' and shop_url = 'https://www.adidas.dk/sko/old' and compare_state = 'done' and status = 'pending' and offers is null and tracked_variants is null and req_state is null)::text from public.products where name = 'k-sw'$$) = 'true');
+reset role;
+select t.tok(null);
+delete from public.products;
+delete from public.lists where id = '00000000-0000-0000-0000-00000000aa77';
 select set_config('request.jwt.claims', '', false);
 
 -- 12. final whole-file run on the populated database

@@ -212,8 +212,11 @@ const COMPARE_SECOND_TRIES = 2;
 
 // 'first' | 'second' | null: which automatic marking (rules 3 and 4) applies to this product now.
 function autoCompare(prod, target, now) {
-  if (!target || !target.shop || prod.bought_at || prod.active === false) return null;
+  if (!target || prod.bought_at || prod.active === false) return null;
   if (!Object.prototype.hasOwnProperty.call(prod, 'compare_state')) return null;
+  // A product the agent switched to Prisjagt earlier (shop_url keeps the original shop link) whose requirements the person changed has
+  // compare_state null again (products_guard): the agent looks once more. A Prisjagt link the person added themself (no shop_url) never.
+  if (!target.shop) return prod.compare_state === null && !!prod.shop_url ? 'first' : null;
   if (prod.compare_state === null) return 'first';
   if (prod.compare_state !== 'none') return null;
   if (!Object.prototype.hasOwnProperty.call(prod, 'compare_tries') || !(Number(prod.compare_tries) < COMPARE_SECOND_TRIES)) return null;

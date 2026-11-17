@@ -50,6 +50,7 @@ const FAKE = `
         if (table === "imports" && db.noImports) return resolve({ data: null, error: { code: "PGRST205", message: "Could not find the table public.imports in the schema cache" } });
         if (q.op === "insert" && db.insertError && (table === "products" || table === "imports")) return resolve({ data: null, error: clone(db.insertError) });
         if (table === "products" && q.op === "insert" && db.oldGoalCheck && q.payload.target_type === "auto") return resolve({ data: null, error: { code: "23514", message: 'new row for relation "products" violates check constraint "products_target_type_check"', details: "Failing row contains (...)." } });
+        if (table === "products" && (q.op === "insert" || q.op === "update") && db.noReqCol && "requirements" in q.payload) return resolve({ data: null, error: { code: "PGRST204", message: "Could not find the 'requirements' column of 'products' in the schema cache" } });
         if (table === "lists" && db.noLists) return resolve({ data: null, error: { code: "42P01", message: "relation public.lists does not exist" } });
         if (q.op !== "select" && db.deny) return resolve({ data: null, error: { code: "42501", message: "new row violates row-level security policy" } });
         if (db.failReads && q.op === "select") return resolve({ data: null, error: { message: "boom" } });
@@ -2402,6 +2403,125 @@ let base;
       const ip = await bare({ userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1" });
       check("iOS shows a collapsed hint with the Del instruction", await ip.isVisible("#installIos") && !(await ip.evaluate(() => document.getElementById("installIos").open)) && /Tryk på Del, og vælg Føj til hjemmeskærm\./.test(await ip.textContent("#installIos")));
       await ip.context().close();
+    }
+  }
+
+  // 10h. details ("Detaljer", products.requirements): add form, the detail line, "Indstil vare", the variant prompt
+  {
+    const HOSTILE = '<img src=x onerror="window.__xss=1">&amp; "q" \'s\'';
+    const VARS = [{ id: "v1", label: "Hvid/grøn 43", lowest: 700, offers: 3, sample: "x" }, { id: "v2", label: "Sort 43", lowest: 650, offers: 2, sample: "y" }, { id: "v3", label: "Rød 40", lowest: 600, offers: 1, sample: "z" }];
+    const dp = (id, over) => row("test-ps5-pro", Object.assign({ id, name: "Stan Smith " + id, tracked_variants: ["v1"], variants: VARS, requirements: null, req_state: null }, over || {}));
+    const ch = (id, over) => dp(id, Object.assign({ status: "choose", tracked_variants: null, offers: null, history: null, verdict: null, normal_price: null, check_note: null }, over || {}));
+    const bodyOf = (p, id) => p.locator('.item:has([data-id="' + id + '"]) .body');
+    const inserts = p => p.evaluate(() => window.__db.ops.filter(o => o.op === "insert").map(o => o.payload));
+    {   // add form
+      const p = await open({ products: [], label: "req-add" });
+      await p.waitForSelector("#addForm:not([hidden])");
+      check("details: the input is not shown until the goal choices are (field not focused, no text)", !(await p.isVisible("#fReq")));
+      await p.focus("#fMain");
+      check("details: ... it shows with them, one small optional input with the short placeholder and a limit of 120",
+        (await p.isVisible("#fReq")) && (await p.getAttribute("#fReq", "placeholder")) === "Farve, størrelse m.m. (valgfrit)" && (await p.getAttribute("#fReq", "maxlength")) === "120"
+        && (await p.textContent('label[for="fReq"]')) === "Detaljer" && !/Krav/.test(await p.textContent("#addForm")));
+      await p.fill("#fMain", "Adidas Stan Smith"); await p.fill("#fReq", "  hvid/grøn,   str. 43 "); await p.click("#fSubmit");
+      await p.waitForFunction(() => window.__db.ops.some(o => o.op === "insert"));
+      let ins = await inserts(p);
+      check("details: a name-only product is sent with the details (trimmed, spaces collapsed)", ins.length === 1 && ins[0].name === "Adidas Stan Smith" && ins[0].requirements === "hvid/grøn, str. 43", JSON.stringify(ins));
+      check("details: ... and both fields are cleared", (await p.inputValue("#fReq")) === "" && (await p.inputValue("#fMain")) === "");
+      await p.fill("#fMain", "https://www.adidas.dk/sko/stan-smith"); await p.fill("#fReq", "str. 43"); await p.click("#fSubmit");
+      await p.waitForFunction(() => window.__db.ops.filter(o => o.op === "insert").length === 2);
+      ins = await inserts(p);
+      check("details: a shop link is sent with them too", ins[1].source_url === "https://www.adidas.dk/sko/stan-smith" && ins[1].requirements === "str. 43", JSON.stringify(ins[1]));
+      await p.fill("#fMain", "https://prisjagt.dk/product.php?p=777"); await p.click("#fSubmit");
+      await p.waitForFunction(() => window.__db.ops.filter(o => o.op === "insert").length === 3);
+      ins = await inserts(p);
+      check("details: nothing typed sends no key at all", !("requirements" in ins[2]), JSON.stringify(ins[2]));
+      await p.fill("#fMain", "Hostile vare"); await p.fill("#fReq", HOSTILE); await p.click("#fSubmit");
+      await p.waitForFunction(() => window.__db.ops.filter(o => o.op === "insert").length === 4);
+      ins = await inserts(p);
+      check("details: angle brackets and control characters never leave the form", ins[3].requirements.indexOf("<") < 0 && ins[3].requirements.indexOf(">") < 0 && /img src=x onerror/.test(ins[3].requirements) && ins[3].requirements.length <= 120, JSON.stringify(ins[3]));
+      await p.fill("#fMain", "https://onskeskyen.dk/s/e0mfx8"); await p.fill("#fReq", "ignoreres"); await p.click("#fSubmit");
+      await p.waitForFunction(() => window.__db.ops.some(o => o.table === "imports"));
+      const imp = await p.evaluate(() => window.__db.ops.filter(o => o.table === "imports").map(o => o.payload));
+      check("details: for a wish list link the details are ignored (and cleared)", imp.length === 1 && !("requirements" in imp[0]) && (await p.inputValue("#fReq")) === "", JSON.stringify(imp));
+      check("details: no page script ran", (await p.evaluate(() => window.__xss)) === undefined);
+      await p.context().close();
+      const o = await open({ products: [], label: "req-add-old" });
+      await o.waitForSelector("#addForm:not([hidden])");
+      await o.evaluate(() => { window.__db.noReqCol = true; });
+      await o.fill("#fMain", "Gammel database vare"); await o.fill("#fReq", "sort"); await o.click("#fSubmit");
+      await o.waitForFunction(() => window.__db.ops.filter(x => x.op === "insert").length === 2);
+      const oi = await inserts(o);
+      check("details: a database without the column gets the product without them (second try), no error shown", "requirements" in oi[0] && !("requirements" in oi[1]) && (await o.isHidden("#fMsg")), JSON.stringify(oi));
+      await o.context().close();
+    }
+    {   // the detail line and the input in "Indstil vare"
+      const noCol = dp("d0"); delete noCol.requirements; delete noCol.req_state;
+      const p = await open({ products: [dp("d1", { requirements: "hvid/grøn, str. 43" }), dp("d2"), dp("d3", { requirements: HOSTILE }), noCol,
+        dp("d4", { requirements: "str. 44", user_id: "o9", list_id: "lx" })], lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], label: "req-detail" });
+      await p.waitForSelector(".item");
+      for (const id of ["d1", "d2", "d3", "d0", "d4"]) await p.click('.head[data-id="' + id + '"]');
+      const line = async id => { const l = bodyOf(p, id).locator("p.req"); return (await l.count()) ? (await l.first().innerText()).trim() : null; };
+      check("details: one quiet line 'Detaljer: ...' at the top of the detail, before everything else",
+        (await line("d1")) === "Detaljer: hvid/grøn, str. 43" && (await bodyOf(p, "d1").evaluate(e => e.firstElementChild.className.indexOf("req") >= 0)));
+      check("details: no line without details, and none when the database has no such column (no input either)",
+        (await line("d2")) === null && (await line("d0")) === null && (await bodyOf(p, "d0").locator("[data-req]").count()) === 0 && !/Detaljer/.test(await bodyOf(p, "d0").innerText()));
+      check("details: hostile text is shown as text, escaped, and runs nothing", (await line("d3")) === "Detaljer: " + HOSTILE.slice(0, 120) && (await bodyOf(p, "d3").locator("img").count()) === 0 && (await p.evaluate(() => window.__xss)) === undefined);
+      check("details: the person's own product has the input 'Detaljer' with the saved words and 'Gem' in 'Indstil vare'",
+        (await bodyOf(p, "d1").locator('.manage form[data-req] label').textContent()) === "Detaljer" && (await bodyOf(p, "d1").locator('.manage form[data-req] input').inputValue()) === "hvid/grøn, str. 43"
+        && (await bodyOf(p, "d1").locator('.manage form[data-req] button').textContent()) === "Gem" && (await bodyOf(p, "d2").locator('.manage form[data-req]').count()) === 1);
+      check("details: a member of a shared list sees the line but has no input", (await line("d4")) === "Detaljer: str. 44" && (await bodyOf(p, "d4").locator("[data-req]").count()) === 0);
+      // edit and save
+      await p.fill('#rq-d2', "  sort,  str. 42 "); await bodyOf(p, "d2").locator('form[data-req] button').click();
+      await p.waitForFunction(() => window.__db.ops.some(o => o.op === "update" && "requirements" in o.payload));
+      let up = (await ops(p)).filter(o => o.op === "update" && "requirements" in o.payload);
+      check("details: saving sends only requirements (cleaned) for that product", up.length === 1 && up[0].payload.requirements === "sort, str. 42" && Object.keys(up[0].payload).length === 1 && up[0].filters[0][1] === "d2", JSON.stringify(up));
+      await p.waitForFunction(() => /Detaljer: sort, str\. 42/.test(document.body.innerText));
+      check("details: ... and the line appears", (await line("d2")) === "Detaljer: sort, str. 42" && (await p.inputValue("#rq-d2")) === "sort, str. 42");
+      await bodyOf(p, "d2").locator('form[data-req] button').click();
+      await p.waitForTimeout(150);
+      check("details: saving the same words again writes nothing", (await ops(p)).filter(o => o.op === "update" && "requirements" in o.payload).length === 1);
+      await p.fill('#rq-d1', ""); await bodyOf(p, "d1").locator('form[data-req] button').click();
+      await p.waitForFunction(() => window.__db.ops.filter(o => o.op === "update" && "requirements" in o.payload).length === 2);
+      up = (await ops(p)).filter(o => o.op === "update" && "requirements" in o.payload);
+      await p.waitForFunction(() => !/Detaljer: hvid/.test(document.body.innerText));
+      check("details: emptying the input clears them (null) and the line goes", up[1].payload.requirements === null && (await line("d1")) === null);
+      await p.fill('#rq-d2', HOSTILE); await bodyOf(p, "d2").locator('form[data-req] button').click();
+      await p.waitForFunction(() => window.__db.ops.filter(o => o.op === "update" && "requirements" in o.payload).length === 3);
+      up = (await ops(p)).filter(o => o.op === "update" && "requirements" in o.payload);
+      check("details: hostile input is cleaned before it is sent and shown as text", up[2].payload.requirements.indexOf("<") < 0 && (await bodyOf(p, "d2").locator("img").count()) === 0 && (await p.evaluate(() => window.__xss)) === undefined, JSON.stringify(up[2]));
+      await p.context().close();
+    }
+    {   // a product not yet fetched also has the input; a failing save says so
+      const p = await open({ products: [dp("e1", { status: "pending", offers: null, history: null, verdict: null, variants: null, tracked_variants: null })], label: "req-loose" });
+      await p.waitForSelector(".item"); await p.click('.head[data-id="e1"]');
+      check("details: a product that is not fetched yet has the input too", (await p.locator('.item form[data-req] input').count()) === 1);
+      await p.evaluate(() => { window.__db.netFail = true; });
+      await p.fill("#rq-e1", "rød"); await p.click('.item form[data-req] button');
+      await p.waitForFunction(() => /Kunne ikke gemme lige nu/.test(document.body.innerText));
+      check("details: a failing save says so and keeps the words in the field", (await p.inputValue("#rq-e1")) === "rød");
+      await p.context().close();
+    }
+    {   // "Finder den rigtige variant"
+      const noState = ch("f0", { requirements: "hvid/grøn, str. 43" }); delete noState.req_state;
+      const p = await open({ products: [ch("f1", { requirements: "hvid/grøn, str. 43" }), ch("f2", { requirements: "hvid/grøn, str. 43", req_state: { for: "hvid/grøn, str. 43", by: "agent", n: 0 } }),
+        ch("f3", { requirements: "hvid/grøn, str. 43", req_state: { for: "gamle ord", by: "agent", n: 1 } }), ch("f4"), noState,
+        ch("f5", { requirements: "str. 43", tracked_variants: ["v2"] }), ch("f6", { requirements: "str. 43", user_id: "o9", list_id: "lx" }),
+        ch("f7", { requirements: "str. 43", variants: [VARS[0]] })], lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], label: "req-find" });
+      await p.waitForSelector(".item");
+      const finding = async id => (await bodyOf(p, id).locator(".req-find").count()) ? (await bodyOf(p, id).locator(".req-find").innerText()).trim() : null;
+      check("details: at 'Vælg variant' with details and no answer yet: the quiet text, above the chooser", (await finding("f1")) === "Finder den rigtige variant"
+        && (await bodyOf(p, "f1").evaluate(e => { var a = e.querySelector(".req-find"), c = e.querySelector("form.choose"); return !!a && !!c && (a.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0; })));
+      check("details: ... and the detail line is above it", (await bodyOf(p, "f1").locator("p.req").innerText()).trim() === "Detaljer: hvid/grøn, str. 43");
+      check("details: not once the agent has answered for these words (even with nothing chosen), again for other words", (await finding("f2")) === null && (await finding("f3")) === "Finder den rigtige variant");
+      check("details: not without details, not when the database has no req_state, not when a choice is waiting to be read, not for someone else's product, not with one variant",
+        (await finding("f4")) === null && (await finding("f0")) === null && (await finding("f5")) === null && (await finding("f6")) === null && (await finding("f7")) === null);
+      await bodyOf(p, "f1").locator('input[data-var="v2"]').check(); await bodyOf(p, "f1").locator("form.choose button[type=submit]").click();
+      await p.waitForFunction(() => window.__db.ops.some(o => o.op === "update" && "tracked_variants" in o.payload));
+      const tv = (await ops(p)).filter(o => o.op === "update" && "tracked_variants" in o.payload);
+      check("details: the person can choose at any time: the normal write of tracked_variants", tv.length === 1 && JSON.stringify(tv[0].payload) === '{"tracked_variants":["v2"]}' && tv[0].filters[0][1] === "f1", JSON.stringify(tv));
+      await p.waitForFunction(() => !document.querySelector('.item:has([data-id="f1"]) .req-find'));
+      check("details: ... and the text is gone", (await finding("f1")) === null);
+      await p.context().close();
     }
   }
 

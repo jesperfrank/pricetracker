@@ -1181,7 +1181,7 @@ const ONSKE = require('./lib/onskeskyen');
 const { makeClient } = require('./lib/supabase');
 // the real answer of the public page for the test list (12 wishes); our own smaller query returns the same wish fields
 const WISHES = JSON.parse(fs.readFileSync(path.join(FIX, 'onskeskyen-wishes.json'), 'utf8')).data.wishlist.wishes.data
-  .map((w) => ({ id: w.id, title: w.title, price: w.price, currency: w.currency, url: w.url, photos: w.photos }));
+  .map((w) => ({ id: w.id, title: w.title, price: w.price, currency: w.currency, url: w.url, photos: w.photos, description: w.description }));
 const LIST_ID = '4seSLtIddxXUVB2Z';
 const HASH_URL = 'https://api.gowish.com/graphql/aa669a674603b59c80ba4bf22e4c64db';
 const jsonResp = (status, obj) => resp(status, typeof obj === 'string' ? obj : JSON.stringify(obj));
@@ -1419,7 +1419,7 @@ test('onskeskyen: the rows are inserted in one request, as a browser would have 
   const bodies = []; const f = makeFake(db);
   await ONSKE.runImports({ sb: makeClient('https://x.supabase.test', SERVICE_KEY, async (u, o) => { if (o && o.method === 'POST' && /\/products$/.test(u)) bodies.push(JSON.parse(o.body)); return f(u, o); }), fetch: f, now: () => NOW, sleep: async () => {}, log: () => {} });
   assert.strictEqual(bodies.length, 1); assert.strictEqual(bodies[0].length, 12);
-  assert.deepStrictEqual(Object.keys(bodies[0][0]).sort(), ['active', 'compare_state', 'image_url', 'list_id', 'name', 'source_url', 'status', 'target_type', 'target_value', 'user_id']);
+  assert.deepStrictEqual(Object.keys(bodies[0][0]).sort(), ['active', 'compare_state', 'image_url', 'list_id', 'name', 'requirements', 'source_url', 'status', 'target_type', 'target_value', 'user_id']);
 });
 
 test('onskeskyen: the query asks for photos; the first https photo of each wish becomes image_url, nothing else is fetched', async () => {
@@ -1468,6 +1468,69 @@ test('onskeskyen: a database without image_url still gets the products (the colu
   await ONSKE.runImports({ sb, fetch: f, now: () => NOW, sleep: async () => {}, log: () => {} });
   assert.strictEqual(seen.length, 2); assert(seen[0].indexOf('image_url') >= 0 && seen[1].indexOf('image_url') < 0 && seen[1].indexOf('compare_state') >= 0);
   assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(mine(db).length, 12);
+});
+
+// ---------------------------------------------------------------- requirements (the person's own words, products.requirements)
+
+test('requirements: a wish note is copied into requirements at insert (cleaned, 1 to 120 characters), the query asks for it', async () => {
+  const web = onskeWeb(), db = importsDb(web); impRow(db, SHARE);
+  await runImp(db);
+  assert(/data \{[^}]*\bdescription\b[^}]*\}/.test(JSON.parse(web.posts()[0].body).query), 'description is part of the wish fields');
+  const rows = db.inserted.filter((x) => x.table === 'products').map((x) => x.row);
+  WISHES.forEach((w, i) => {
+    const want = ONSKE.cleanRequirements(w.description);
+    if (want === null) assert(!('requirements' in rows[i]), 'wish ' + i + ' has no usable note, so no key');
+    else assert.strictEqual(rows[i].requirements, want, 'wish ' + i);
+  });
+  assert.strictEqual(rows[0].requirements, 'XL'); assert.strictEqual(rows[2].requirements, 'Størrelse 43'); assert.strictEqual(rows[3].hasOwnProperty('requirements'), false);
+});
+
+test('requirements: cleanRequirements keeps 1 to 120 characters, drops control characters and angle brackets, never throws', () => {
+  const c = ONSKE.cleanRequirements;
+  assert.strictEqual(c('  hvid/grøn,   str. 43 '), 'hvid/grøn, str. 43');
+  assert.strictEqual(c('a\nb\tc'), 'a b c'); assert.strictEqual(c('<b>sort</b>'), 'b sort /b');
+  assert.strictEqual(c('x'.repeat(120)), 'x'.repeat(120)); assert.strictEqual(c('x'.repeat(121)), null);
+  [null, undefined, '', '   ', '<>', 42, {}, ['a']].forEach((v) => assert.strictEqual(c(v), null, String(v)));
+});
+
+test('requirements: the daily sync gives a new wish its note; the person\'s own words on existing products are never touched', async () => {
+  const web = mutableWeb(WISHES), db = importsDb(web);
+  impRow(db, SHARE); await runImp(db);
+  mine(db)[0].requirements = 'mine egne ord';                                          // the person has written their own words on a wish that has a note
+  web.lists[LIST_ID].wishes = WISHES.map((w) => Object.assign({}, w, { description: 'ændret hos ønskeskyen' })).concat([{ id: 'n1', title: 'Ny cykel', url: 'https://www.cykler.dk/p/1', description: ' 56 cm, sort ' }, { id: 'n2', title: 'Ny lampe', url: 'https://www.lamper.dk/p/2', description: 'x'.repeat(121) }]);
+  const bodies = [];
+  const f = makeFake(db);
+  await ONSKE.runImports({ sb: makeClient('https://x.supabase.test', SERVICE_KEY, async (u, o) => { if (o && o.method && o.method !== 'GET' && /\/products/.test(u)) bodies.push({ m: o.method, b: o.body }); return f(u, o); }),
+    fetch: f, now: at('2026-11-17T08:00:00Z'), sleep: async () => {}, log: () => {} });
+  assert.deepStrictEqual(bodies.map((x) => x.m), ['POST'], 'one insert, no patch of existing products');
+  const rows = JSON.parse(bodies[0].b);
+  assert.strictEqual(rows.length, 2); assert.strictEqual(rows[0].requirements, '56 cm, sort'); assert(!('requirements' in rows[1]), 'a note over 120 characters is not used');
+  assert.strictEqual(mine(db)[0].requirements, 'mine egne ord');
+});
+
+test('requirements: a database without the column still gets the products (the key is left out and the insert is repeated)', async () => {
+  const web = onskeWeb(), db = importsDb(web); impRow(db, SHARE);
+  const f = makeFake(db), seen = [];
+  const sb = makeClient('https://x.supabase.test', SERVICE_KEY, async (u, o) => {
+    if (o && o.method === 'POST' && /\/products$/.test(u)) {
+      const b = JSON.parse(o.body); seen.push(b.some((r) => 'requirements' in r));
+      if (b.some((r) => 'requirements' in r)) return resp(400, JSON.stringify({ code: 'PGRST204', message: "Could not find the 'requirements' column of 'products' in the schema cache" }));
+    }
+    return f(u, o);
+  });
+  await ONSKE.runImports({ sb, fetch: f, now: () => NOW, sleep: async () => {}, log: () => {} });
+  assert.deepStrictEqual(seen, [true, false]);
+  assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(mine(db).length, 12);
+  assert(mine(db).every((p) => !('requirements' in p)));
+});
+
+test('requirements: rows with requirements and req_state go through the run untouched; the job never writes them', async () => {
+  const db = newDb();
+  db.products.push(product('Q1', 'u1', 'sony', { requirements: 'hvid, str. 43', req_state: { want: true, at: '2026-11-01T00:00:00Z' } }));
+  await R.run(ctxFor(db, { [urlOf('sony')]: fixturePage('sony') }));
+  const q1 = db.products[0];
+  assert.strictEqual(q1.status, 'choose'); assert.strictEqual(q1.requirements, 'hvid, str. 43'); assert.deepStrictEqual(q1.req_state, { want: true, at: '2026-11-01T00:00:00Z' });
+  assert(db.patches.length > 0 && db.patches.every((x) => !('requirements' in x.body) && !('req_state' in x.body)), 'no write of the new columns');
 });
 
 // ---------------------------------------------------------------- product pictures (only the address, from pages the job reads anyway)
@@ -2690,6 +2753,10 @@ test("compare everything: every active single-shop product without a state is ma
   const db2 = newDb(); db2.products.push(shopProduct('N1', 'u1', 'https://www.s1.dk/v')); delete db2.products[0].compare_state; delete db2.products[0].compare_at; delete db2.products[0].shop_url; delete db2.products[0].compare_tries;
   await R.run(shopCtx(db2, map)); assert(!('compare_state' in db2.products[0]) && !('compare_tries' in db2.products[0]));
   assert.strictEqual(R.autoCompare({ compare_state: null, active: true }, { shop: false }, new Date()), null);
+  // requirements: a product the agent switched to Prisjagt (shop_url kept) whose state the person reset is looked for again; a plain Prisjagt link never
+  assert.strictEqual(R.autoCompare({ compare_state: null, active: true, shop_url: 'https://old.dk/x' }, { shop: false }, new Date()), 'first');
+  assert.strictEqual(R.autoCompare({ compare_state: 'done', active: true, shop_url: 'https://old.dk/x' }, { shop: false }, new Date()), null);
+  assert.strictEqual(R.autoCompare({ compare_state: null, active: true, shop_url: null }, { shop: false }, new Date()), null);
 });
 
 test("second chance: a single-shop 'none' with tries below 2, no extras and at least an hour old is asked once more, in any status; nothing else", async () => {
