@@ -16,16 +16,35 @@ create table if not exists public.profiles (
   shops_always text[] default '{}',
   shops_exclude text[] default '{}',
   shops_only   boolean default false,
-  notify_email boolean default true,
+  notify_email boolean default false,
   sound        text default 'jubel' check (sound is null or char_length(sound) <= 40),
   created_at   timestamptz default now(),
   constraint profiles_shops_len check (
     coalesce(cardinality(shops_always), 0) <= 100 and coalesce(cardinality(shops_exclude), 0) <= 100)
 );
 
--- The one morning mail (opt-in, written by the person). digest_sent_at = when the job last claimed a morning mail for this
--- person (job only: see profiles_guard). Added later, re-runnable.
+-- The daily overview (opt-in, written by the person; "Daglig oversigt om morgenen"): one mail a day at the first run from 07:00 Copenhagen
+-- time with what is on offer now and what moved at least 5 % since yesterday. It never replaces or delays the mail for a new deal
+-- (notify_email). digest_sent_at = when the job last claimed the day's overview for this person (job only: see profiles_guard).
+-- Added later, re-runnable.
 alter table public.profiles add column if not exists mail_digest boolean not null default false;
+
+-- Mail is opt-in: a NEW profile has "Mail ved nyt tilbud" (notify_email) off, and so has the overview. The default is changed here for
+-- new rows only; every existing row keeps exactly the value it has (set default never rewrites a row). The job treats a person without
+-- a profile row as off as well.
+alter table public.profiles alter column notify_email set default false;
+
+-- mail_asked_at: when the person answered the one small question "Vil du have mail ved nye tilbud?" (either answer), so it is asked once.
+-- Written by the person, but stamped with the server's clock and set once (profiles_guard). Added once: the block below gives every
+-- profile that exists when the column is added a time (those people already have a stored choice and are not asked); a re-run
+-- never touches the rows again.
+do $$
+begin
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'profiles' and column_name = 'mail_asked_at') then
+    alter table public.profiles add column mail_asked_at timestamptz;
+    update public.profiles set mail_asked_at = now();
+  end if;
+end $$;
 alter table public.profiles add column if not exists digest_sent_at timestamptz;
 
 create table if not exists public.products (
@@ -75,10 +94,24 @@ alter table public.products drop constraint if exists products_bought_price_chec
 alter table public.products add constraint products_bought_price_check check (
   bought_price is null or (bought_at is not null and bought_price > 0 and bought_price <= 10000000));
 
--- One morning mail (profiles.mail_digest): a goal hit is collected instead of mailed at once. digest_price = the price that
--- triggered the hit, digest_at = when it was collected. Written by the job only (see products_guard).
+-- digest_price / digest_at: no longer used. They once held a hit that was collected for the one morning mail; the daily overview
+-- does not collect anything any more (it is built from the current data). The columns stay (dropping data from the live database is
+-- not worth it); the job neither reads nor writes them, and products_guard still keeps them out of the browser's reach.
 alter table public.products add column if not exists digest_price numeric;
 alter table public.products add column if not exists digest_at timestamptz;
+
+-- notify_silent_until: written by the job and by this file only (products_guard). While it lies in the future a hit is only
+-- remembered (notified_price / notified_at), never mailed. It exists for ONE moment: when the rules for "one mail per deal" shipped,
+-- every product that already existed got 24 hours of quiet, so that a product whose hit used to flicker (and was mailed again and
+-- again) does not mail once more just because its notified state was cleared by the old rules. New products have null (no quiet).
+-- Added once: the block runs the update only when it adds the column, so a re-run never starts a new quiet period.
+do $$
+begin
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name = 'notify_silent_until') then
+    alter table public.products add column notify_silent_until timestamptz;
+    update public.products set notify_silent_until = now() + interval '24 hours';
+  end if;
+end $$;
 
 -- "Alternativer" (see "alternatives" below): similar products and deals in the same category, answered by the AI agent.
 -- alt_requested_at = when the person asked (browser, but stamped with the server clock by products_guard); alternatives,
@@ -303,7 +336,7 @@ begin
     new.title := null; new.variants := null; new.offers := null; new.history := null;
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
-    new.digest_price := null; new.digest_at := null;
+    new.digest_price := null; new.digest_at := null; new.notify_silent_until := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
     new.compare_state := null; new.compare_at := null; new.shop_url := null; new.image_url := null; new.compare_tries := 0;
     new.extra_urls := null; new.extra_state := null; new.req_state := null;
@@ -326,7 +359,12 @@ begin
   new.normal_price := old.normal_price; new.verdict := old.verdict; new.warning := old.warning;
   new.check_note := old.check_note; new.last_checked := old.last_checked;
   new.notified_price := old.notified_price; new.notified_at := old.notified_at; new.backfill_state := old.backfill_state;
-  new.digest_price := old.digest_price; new.digest_at := old.digest_at;
+  new.digest_price := old.digest_price; new.digest_at := old.digest_at; new.notify_silent_until := old.notify_silent_until;
+  -- a new goal (kind or value) starts the notifications over: the job mails the next time the product is a hit, whatever was mailed
+  -- under the old goal. (A new link does the same, see the source_url block below.)
+  if new.target_type is distinct from old.target_type or new.target_value is distinct from old.target_value then
+    new.notified_price := null; new.notified_at := null;
+  end if;
   new.image_url := old.image_url; new.compare_tries := old.compare_tries; new.req_state := old.req_state;
   -- extra shops: the agent's and the job's. The person (only their own product gets this far) may only remove ONE entry of extra_urls
   -- (the same array minus one element, same order; removing the only entry gives null, and the product then counts as "not found
@@ -473,8 +511,12 @@ begin
   end if;
   if tg_op = 'INSERT' then
     new.digest_sent_at := null;
+    if new.mail_asked_at is not null then new.mail_asked_at := now(); end if;
   else
     new.digest_sent_at := old.digest_sent_at;
+    -- the question is answered once: the time is the server's and stays
+    if old.mail_asked_at is not null then new.mail_asked_at := old.mail_asked_at;
+    elsif new.mail_asked_at is not null then new.mail_asked_at := now(); end if;
   end if;
   return new;
 end;

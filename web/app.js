@@ -29,7 +29,7 @@
   }
 
   var state = { goalOpen: {}, manage: {}, allShops: {}, pshops: {}, errOpen: false, ord: null, share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
-    prefs: { always: [], exclude: [], only: false, notify: true, digest: false }, profileSound: null };
+    prefs: { always: [], exclude: [], only: false, notify: false, digest: false, asked: true }, profileSound: null };
   var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
   var noacc = { on: false, state: "", timer: null, busy: false, msg: "" };
   var sb = null, user = null, channel = null, pollTimer = null, fetching = false, again = false, lastFetch = 0, fetchSeq = 0;
@@ -1207,7 +1207,7 @@
   // ---- data ----
   function isDenied(e) { return !!e && (e.code === "42501" || /row-level security|permission denied|not allowed/i.test(String(e.message || ""))); }
   function applyAccess() {
-    $("readonly").hidden = state.canWrite;
+    $("readonly").hidden = state.canWrite; showMailAsk();
     $("addForm").hidden = !state.canWrite; $("fHint").hidden = !state.canWrite || $("fTypeAuto").checked;
     render();
   }
@@ -1267,13 +1267,29 @@
   }
   function refreshSoon() { if (Date.now() - lastFetch > 2500) fetchProducts(); else { again = true; setTimeout(function () { if (again && !fetching) { again = false; fetchProducts(); } }, 2600); } }
   function setPrefs(d) {
-    state.prefs = { always: shopList(d.shops_always), exclude: shopList(d.shops_exclude), only: !!d.shops_only, notify: d.notify_email !== false, digest: d.mail_digest === true };
+    // asked: has the person answered "Vil du have mail ved nye tilbud?" (profiles.mail_asked_at). Without the column (an older database) nobody is asked.
+    var asked = "mail_asked_at" in d ? !!d.mail_asked_at : state.prefs.asked;
+    state.prefs = { always: shopList(d.shops_always), exclude: shopList(d.shops_exclude), only: !!d.shops_only, notify: d.notify_email !== false, digest: d.mail_digest === true, asked: asked };
     $("shAlways").value = state.prefs.always.join(", "); $("shExclude").value = state.prefs.exclude.join(", ");
     $("shOnly").checked = state.prefs.only; $("shNotify").checked = state.prefs.notify;
     $("shDigest").checked = state.prefs.digest; $("shDigest").disabled = !state.prefs.notify;
+    showMailAsk();
     render();
   }
-  function ensureProfile() {
+  // The one small question to a person who has never chosen: shown once, only with write access, gone after either answer.
+  function showMailAsk() { $("mailAsk").hidden = !(user && state.canWrite && !noacc.on && !state.prefs.asked && !state.prefs.notify); }
+  function answerMail(yes) {
+    if (!sb || !user) return;
+    var btns = [$("mailYes"), $("mailNo")]; btns.forEach(function (b) { b.disabled = true; });
+    sb.from("profiles").upsert({ user_id: user.id, notify_email: yes, mail_asked_at: new Date().toISOString() }).then(function (r) {
+      btns.forEach(function (b) { b.disabled = false; });
+      if (r && r.error) { onWriteError(r.error); return; }
+      state.prefs.asked = true; state.prefs.notify = yes; $("shNotify").checked = yes; $("shDigest").disabled = !yes; showMailAsk();
+    }, function () { btns.forEach(function (b) { b.disabled = false; }); });
+  }
+  $("mailYes").addEventListener("click", function () { answerMail(true); });
+  $("mailNo").addEventListener("click", function () { answerMail(false); });
+  function ensureProfile(created) {
     var uid = user.id;
     sb.from("profiles").select("*").eq("user_id", uid).maybeSingle().then(function (r) {
       if (!user || user.id !== uid) return;
@@ -1285,10 +1301,13 @@
         }
         return;
       }
-      return sb.from("profiles").upsert({ user_id: uid, notify_email: true }).then(function (u) { if (u && u.error) onWriteError(u.error); });
+      if (created) return;
+      // a new person: mail is off until they say yes (the database default says the same)
+      return sb.from("profiles").upsert({ user_id: uid, notify_email: false }).then(function (u) { if (u && u.error) onWriteError(u.error); else ensureProfile(true); });
     }, function () {});
   }
   function startSession() {
+    state.prefs.asked = true; state.prefs.notify = false; $("mailAsk").hidden = true;
     state.loaded = false; state.products = []; state.canWrite = true; state.ord = null; state.errOpen = false;
     state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.share = null; state.confirmMember = null; state.confirmLeave = null; state.memCount = {}; state.people = {}; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null;
     $("status").textContent = "Henter listen …";

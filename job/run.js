@@ -17,7 +17,7 @@ const X = require('./lib/extras');
 const WB = require('./lib/wayback');
 const ONSKE = require('./lib/onskeskyen');
 const D = require('./lib/digest');
-const { composeMail, composeOwnerMail, composeApprovedMail, sendResend } = require('./lib/mail');
+const { composeMail, composeOverview, composeOwnerMail, composeApprovedMail, sendResend } = require('./lib/mail');
 const { makeClient } = require('./lib/supabase');
 
 const PAUSE_MS = 1500;
@@ -103,7 +103,15 @@ function trackingPatch(prod, profile, parsed, now) {
 
   const filtered = P.applyPrefs(deduped, P.mergePrefs(prod, profile));
   const low = P.lowestInStock(filtered);
-  const offers = filtered.slice(0, P.MAX_OFFERS).map((o) => ({ store: o.store, price: o.price, url: o.url, inStock: o.inStock, note: o.note || null, variant: o.variant }));
+  const offers = filtered.slice(0, P.MAX_OFFERS).map((o) => {
+    const out = { store: o.store, price: o.price, url: o.url, inStock: o.inStock, note: o.note || null, variant: o.variant };
+    if (o.stale && isFinite(o.readAt)) {          // the shop could not be read this time: its last offer, with when it was read
+      out.readAt = new Date(o.readAt).toISOString().replace(/\.\d+Z$/, 'Z');
+      const m = X.staleNote(o.readAt, now, P.copenhagenDate);
+      if (m) out.note = out.note ? out.note + ' · ' + m : m;
+    }
+    return out;
+  });
 
   let history = Array.isArray(prod.history) ? prod.history : [];
   // Going from "choose" to "tracking": the page's own history is for the page as a whole. Keep it only when
@@ -123,23 +131,20 @@ function trackingPatch(prod, profile, parsed, now) {
   // A bought product is still checked (the person can see what the price did after buying), but never notifies.
   const bought = !!prod.bought_at;
   let goal = bought ? { hit: false, newHit: false, fields: {}, reason: null } : P.goalOutcome(prod, low, normal, iso, { verdict, history });
-  // Silent: a would-be hit is only remembered (notified_price), never announced. Only a later, lower price mails.
+  // Silent: a would-be hit is only remembered (notified_price, notified_at), never announced. Only a later, lower price mails.
   // The same when the cheapest offer comes from an extra shop (products.extra_urls) that has not been read before: a newly added shop being
-  // cheaper than the one shop followed so far is no price drop (the rows carry extraNew, see runWithExtras).
-  const silent = firstAfterSwitch || !!(low && low.extraNew);
-  if (silent && !bought) goal = { hit: goal.hit, newHit: false, fields: goal.hit && low ? { notified_price: low.price } : { notified_price: null }, reason: null };
+  // cheaper than the one shop followed so far is no price drop (the rows carry extraNew, see runWithExtras). And for the first 24 hours after
+  // the one-mail-per-deal rules shipped (products.notify_silent_until, set once by the schema): a hit that used to flicker and be mailed
+  // again and again must not mail once more only because its notified state was cleared under the old rules.
+  const quiet = prod.notify_silent_until ? Date.parse(prod.notify_silent_until) > now.getTime() : false;
+  const silent = firstAfterSwitch || !!(low && low.extraNew) || quiet;
+  if (silent && !bought && goal.newHit) goal = { hit: goal.hit, newHit: false, fields: goal.fields, reason: null };
 
   const patch = Object.assign({
     status: 'tracking', title: prod.title || parsed.title || null, variants, offers, history, normal_price: normal, verdict, warning,
     check_note: filtered.length === 0 ? 'Ingen butikker matcher dine butiksvalg.' : (parsed.note || null), last_checked: iso,
   }, goal.fields);
   addImage(patch, prod, parsed);
-  // One morning mail: a new hit of a person who wants it is collected (price and time) instead of mailed at once. A collected hit
-  // that is no longer a hit, or a product that has been bought, is forgotten. Only where the database has the columns.
-  if (Object.prototype.hasOwnProperty.call(prod, 'digest_price')) {
-    if (goal.newHit && D.isDigestUser(profile)) { patch.digest_price = low.price; patch.digest_at = iso; }
-    else if (prod.digest_price != null && (bought || goal.fields.notified_price === null)) { patch.digest_price = null; patch.digest_at = null; }
-  }
   return {
     patch,
     hit: goal.newHit ? { productId: prod.id, userId: prod.user_id, name: prod.name, price: low.price, store: low.store, url: low.url, verdict: verdict.text, warning, reason: goal.reason } : null,
@@ -265,7 +270,7 @@ function applyBackfill(r, points, state, now) {
   let hit = r.hit;
   if (!r.hit && again.hit) {
     patch.notified_price = again.hit.price;                       // silent: remembered as already announced
-    delete patch.notified_at;
+    patch.notified_at = again.patch.notified_at;
   } else {
     ['notified_price', 'notified_at'].forEach((k) => { if (k in r.patch) patch[k] = r.patch[k]; else delete patch[k]; });
   }
@@ -430,7 +435,7 @@ async function run(ctx) {
   const runWithExtras = async (prod, todo, target, ls) => {
     const profile = profiles[prod.user_id] || null, iso = isoNow(now);
     const mainKey = SHOP.registrableDomain(new URL(target.url).hostname);
-    const prev = X.stateOf(prod), next = {};
+    const prev = X.stateOf(prod), next = {}, offerOf = {};
     let main = null, mainErr = null;
     if (stats.blockedHosts.indexOf(mainKey) !== -1) mainErr = Object.assign(new PJ.PageError('blocked', 'afvist tidligere i kørslen'), { shop: true });
     else {
@@ -440,20 +445,37 @@ async function run(ctx) {
     }
     const vid = main && main.variants && main.variants[0] ? main.variants[0].id : SHOP.SHOP_ID;
     const fresh = [], carried = [];
-    const carry = (url) => {        // not fetched this run (capped, or out of time): the offer of the last check stays as it was
-      const o = (Array.isArray(prod.offers) ? prod.offers : []).find((x) => x && x.url === url && typeof x.price === 'number');
-      if (o) carried.push({ key: url, variant: vid, store: o.store, price: o.price, url, inStock: o.inStock !== false, stock: o.inStock === false ? 'OutOfStock' : 'InStock', note: o.note || null, name: o.store, saleKnown: false, sale: false, carried: true });
+    // The last known offer of a shop that was not read this run: because it was not tried (capped, out of time), or because it failed for a
+    // transient reason (refused, timeout, network, 5xx; the per-host skip counts). It counts like a fresh offer for up to 24 hours after it
+    // was last READ (X.lastOffer); then it is gone. Marked stale with the time it was read; kept in extra_state[url].offer.
+    const keep = (url) => {
+      const o = X.lastOffer(prod, prev[url], url, now);
+      if (!o) return null;
+      offerOf[url] = { store: o.store, price: o.price, inStock: o.inStock, note: o.note, at: new Date(o.at).toISOString().replace(/\.\d+Z$/, 'Z') };
+      return { key: url, variant: vid, store: o.store, price: o.price, url, inStock: o.inStock, stock: o.inStock ? 'InStock' : 'OutOfStock', note: o.note, name: o.store, saleKnown: false, sale: false, carried: true, stale: true, readAt: o.at };
+    };
+    const carry = (url) => {
+      const row = keep(url);
+      if (row) carried.push(row);
       if (prev[url]) next[url] = prev[url];
     };
+    // the main shop could not be read for a transient reason: its last offer stands in for it
+    let mainStale = null;
+    if (!main && X.transient(mainErr)) mainStale = keep(target.url);
+    if (!main && mainStale) carried.push(mainStale);
     for (const url of ls) {
       const stt = prev[url] || {}, hostKey = SHOP.registrableDomain(new URL(url).hostname);
       if (!extraOK.has(prod.id + '|' + url)) { carry(url); continue; }
-      if (stats.blockedHosts.indexOf(hostKey) !== -1) { if (prev[url]) next[url] = prev[url]; continue; }     // refused earlier in this run: left alone
+      if (stats.blockedHosts.indexOf(hostKey) !== -1) { carry(url); continue; }     // refused earlier in this run: left alone, its last offer stands
       if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; carry(url); continue; }
       stats.extraPages++;
       const got = await fetchCached(url);
       const fail = (why) => { stats.extraFail++; log('  ' + (prod.name || prod.id) + ' (' + hostKey + '): ' + why); next[url] = { seen: !!stt.seen, fails: (Number(stt.fails) || 0) + 1, at: iso }; };
-      if (got.error) { noteBlocked(got.error, hostKey); fail(errorNote(got.error)); continue; }
+      if (got.error) {
+        noteBlocked(got.error, hostKey); fail(errorNote(got.error));
+        if (X.transient(got.error)) { const row = keep(url); if (row) carried.push(row); }
+        continue;
+      }
       const row = got.page && Array.isArray(got.page.rows) ? got.page.rows[0] : null;
       if (!row || typeof row.price !== 'number') { fail('ingen pris'); continue; }
       fresh.push({ url, hostKey, stt, page: got.page, row: Object.assign({}, row, { variant: vid, url, key: url, extraNew: X.isNew(prod, stt) }) });
@@ -468,25 +490,40 @@ async function run(ctx) {
       return false;
     });
     // one offer per shop name: a second shop with the same name is called by its address instead
-    const names = new Set((main ? main.rows : []).map((r) => String(r.store || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')));
+    const mainRows = main ? main.rows : (mainStale ? [mainStale] : []);
+    const names = new Set(mainRows.map((r) => String(r.store || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')));
     const extraRows = [];
-    kept.concat(carried.map((c) => ({ carriedRow: c, url: c.url, row: c }))).forEach((f) => {
+    kept.concat(carried.filter((c) => c !== mainStale).map((c) => ({ carriedRow: c, url: c.url, row: c }))).forEach((f) => {
       const row = f.row;
       let k = String(row.store || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
       if (names.has(k)) { row.store = X.hostOf(f.url); k = row.store.replace(/[^\p{L}\p{N}]/gu, ''); }
-      if (names.has(k)) return;
+      if (names.has(k)) { if (f.carriedRow) delete offerOf[f.url]; return; }
       names.add(k); extraRows.push(row);
     });
+    const hasFresh = !!main || kept.length > 0;
     const extraPatch = (tp) => {     // the job's own bookkeeping, written along with the check
       if (!Object.prototype.hasOwnProperty.call(prod, 'extra_state')) return {};
       const recorded = !!tp && Object.prototype.hasOwnProperty.call(tp.patch, 'offers');
-      kept.forEach((f) => { if (extraRows.indexOf(f.row) !== -1) next[f.url] = { seen: !!f.stt.seen || recorded, fails: 0, at: iso }; else next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso }; });
+      kept.forEach((f) => {
+        if (extraRows.indexOf(f.row) !== -1) {
+          next[f.url] = { seen: !!f.stt.seen || recorded, fails: 0, at: iso };
+          offerOf[f.url] = { store: f.row.store, price: f.row.price, inStock: f.row.inStock !== false, note: f.row.note || null, at: iso };
+        } else next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso };
+      });
       const out = {};
-      ls.forEach((u) => { if (next[u]) out[u] = next[u]; });
+      ls.forEach((u) => {
+        if (!next[u]) return;
+        const e = Object.assign({}, next[u]); delete e.offer;
+        if (offerOf[u]) e.offer = offerOf[u];
+        out[u] = e;
+      });
+      // the main shop has an entry only to remember its last offer (it is not an extra link)
+      if (main && main.rows[0] && typeof main.rows[0].price === 'number') out[target.url] = { offer: { store: main.rows[0].store, price: main.rows[0].price, inStock: main.rows[0].inStock !== false, note: main.rows[0].note || null, at: iso } };
+      else if (mainStale && offerOf[target.url]) out[target.url] = { offer: offerOf[target.url] };
       const val = Object.keys(out).length ? out : null;
       return JSON.stringify(val) === JSON.stringify(prod.extra_state === undefined ? null : prod.extra_state) ? {} : { extra_state: val };
     };
-    if (!main && !kept.length) {      // nothing to go on: as a plain failure of the main page (the failing extras are counted in the state)
+    if (!hasFresh && !carried.length) {      // nothing to go on: as a plain failure of the main page (the failing extras are counted in the state)
       const err = mainErr || new PJ.PageError('layout', 'ingen butikker kunne læses');
       const note = errorNote(err);
       log('  ' + (prod.name || prod.id) + ': ' + note);
@@ -496,14 +533,18 @@ async function run(ctx) {
       else results.push({ prod, patch: Object.assign({ check_note: note }, want, ep), hit: null });
       return;
     }
-    const rows = (main ? main.rows : []).concat(extraRows);
+    const rows = mainRows.concat(extraRows);
     const inStock = rows.filter((r) => r.inStock).map((r) => r.price);
     const first = kept[0] ? kept[0].page : null;
     const variant = main
       ? Object.assign({}, main.variants[0], { lowest: inStock.length ? Math.min.apply(null, inStock) : null, offers: rows.length })
-      : { id: vid, label: extraRows[0].store, lowest: inStock.length ? Math.min.apply(null, inStock) : null, offers: rows.length, sample: first && first.variants && first.variants[0] ? first.variants[0].sample : null };
-    const parsed = main ? Object.assign({}, main, { rows, variants: [variant] })
+      : { id: vid, label: rows[0].store, lowest: inStock.length ? Math.min.apply(null, inStock) : null, offers: rows.length, sample: first && first.variants && first.variants[0] ? first.variants[0].sample : null };
+    const parsed = main ? Object.assign({}, main, { rows: mainRows.concat(extraRows), variants: [variant] })
       : { title: first ? first.title : null, rows, variants: [variant], history: [], note: null, shop: true, source: first ? first.source : null, image: null };
+    // nothing at all was read this time (every shop is refused or down, the prices are the last known ones): the product is still checked
+    // with them, but "last checked" does not move and the note says why
+    const noteOnly = !hasFresh ? errorNote(mainErr || new PJ.PageError('network', 'ingen butikker kunne læses')) : null;
+    const fin = (tp) => { if (noteOnly && tp.patch.status === 'tracking') { delete tp.patch.last_checked; tp.patch.check_note = noteOnly; } return tp; };
     if (todo === 'initial') {
       const ip = initialPatch(prod, parsed, now);
       if (ip.track) {
@@ -512,7 +553,7 @@ async function run(ctx) {
         results.push({ prod, patch: Object.assign({}, ip.patch, tp.patch, extraPatch(tp)), hit: tp.hit, base: nb, parsed, profile, shop: true });
       } else results.push({ prod, patch: Object.assign({}, ip.patch, extraPatch(null)), hit: null });
     } else {
-      const tp = trackingPatch(prod, profile, parsed, now);
+      const tp = fin(trackingPatch(prod, profile, parsed, now));
       results.push({ prod, patch: Object.assign({}, tp.patch, extraPatch(tp)), hit: tp.hit, base: prod, parsed, profile, shop: true });
     }
   };
@@ -623,23 +664,19 @@ async function run(ctx) {
   }
 
   // 5. e-mail
-  // A person with "one morning mail" switched on gets their hits collected (see trackingPatch) and mailed in one go, once a day, at the
-  // first run from 07:00 Copenhagen time. Everybody else gets a mail per run with hits, as before.
+  // Two kinds, independent of each other:
+  //  a) "Mail ved nyt tilbud" (profiles.notify_email, default on): a mail per run and person with the products that became a hit under the
+  //     rules of goalOutcome (first hit, a further drop, or a hit again after 7 days; a changed goal or link starts over). Never held back.
+  //  b) "Daglig oversigt om morgenen" (profiles.mail_digest, default off): once a day, at the first run from 07:00 Copenhagen time, what is
+  //     on offer now and what moved at least 5 % since yesterday. Only for a person with a) switched on (the master switch).
   const hitsByUser = {};
   results.forEach((r) => { if (r.hit) (hitsByUser[r.hit.userId] = hitsByUser[r.hit.userId] || []).push(r); });
   stats.hits = results.filter((r) => r.hit).length;
-  const revert = (rs) => rs.forEach((r) => { r.patch.notified_price = typeof r.prod.notified_price === 'number' ? r.prod.notified_price : null; delete r.patch.notified_at; });
+  // a mail that could not go out: the hit is found again as new in the next run (the notified fields are not written)
+  const revert = (rs) => rs.forEach((r) => { delete r.patch.notified_price; delete r.patch.notified_at; });
   const canMail = !!ctx.resendKey && !!ctx.mailFrom;
   if (stats.hits && !canMail) { stats.mailNote = ctx.resendKey ? 'MAIL_FROM mangler' : 'RESEND_API_KEY mangler'; log('E-mail springes over: ' + stats.mailNote + '.'); }
   const resultOf = new Map(results.map((r) => [r.prod.id, r]));
-  // products with a collected hit: from an earlier run, or collected just now
-  const collected = (p) => { const r = resultOf.get(p.id); return typeof p.digest_price === 'number' || !!(r && typeof r.patch.digest_price === 'number'); };
-  const withDigest = new Set(products.filter(collected).map((p) => p.user_id));
-  // the product as it is after this run's check, and the collected hits of one person that are waiting
-  const waiting = (userId, profile) => products.filter((p) => p.user_id === userId && collected(p)).map((prod) => {
-    const r = resultOf.get(prod.id), state = Object.assign({}, prod, r ? r.patch : {}), low = D.pendingLow(state, profile && profile.digest_sent_at);
-    return low ? { prod, r, hit: r && r.hit ? r.hit : D.hitFromState(state, low) } : null;
-  }).filter(Boolean);
   // the address of a person who may be mailed, or null (and why in the log)
   const addressOf = async (userId) => {
     const u = await sb.authUser(userId);
@@ -650,64 +687,59 @@ async function run(ctx) {
     return addr;
   };
 
-  // the morning mail. Claim-then-send: the day is claimed in profiles.digest_sent_at (only if nobody else changed it meanwhile)
-  // BEFORE the mail goes out, so a crash or a parallel run can never send a second one for the same day. A failed send gives the
-  // claim back, so the next run tries again. The hits found in this run are saved first, so they cannot turn up as "new" again.
-  const sendDigest = async (userId, profile) => {
-    const sentAt = profile.digest_sent_at || null;
-    const items = waiting(userId, profile);
-    if (!items.length || !D.digestWindow(now, sentAt)) return;
-    if (!canMail) { stats.mailSkipped++; stats.mailNote = ctx.resendKey ? 'MAIL_FROM mangler' : 'RESEND_API_KEY mangler'; return; }
-    if (stats.sent >= MAX_MAILS) { stats.mailSkipped++; stats.mailNote = 'loft på ' + MAX_MAILS + ' e-mails nået'; return; }
-    const addr = await addressOf(userId);
-    if (!addr) return;
-    const send = [];
-    for (const it of items) {
-      if (it.r && it.r.hit && !it.r.written) {
-        try { await sb.patch('products', 'id=eq.' + encodeURIComponent(it.prod.id), it.r.patch); it.r.written = true; stats.written++; }
-        catch (e) { it.r.skipWrite = true; stats.writeFail++; log('  Kunne ikke skrive ' + (it.prod.name || it.prod.id) + ': ' + (e && e.message || e)); continue; }   // found again, as new, in the next run
-      }
-      send.push(it);
-    }
-    if (!send.length) return;
-    const claim = isoNow(now);
-    const rows = await sb.patch('profiles', 'user_id=eq.' + encodeURIComponent(userId) + '&digest_sent_at=' + (sentAt ? 'eq.' + encodeURIComponent(sentAt) : 'is.null'), { digest_sent_at: claim }, true);
-    if (!Array.isArray(rows) || !rows.length) { log('  Morgenmail til bruger ' + userId + ' er allerede taget af en anden kørsel.'); return; }
-    try {
-      const mail = composeMail(send.map((it) => it.hit), ctx.siteUrl);
-      mail.subject = D.digestSubject(send.length);
-      await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, addr, mail);
-      stats.sent++; stats.digests++;
-    } catch (e) {
-      log('  Morgenmail til bruger ' + userId + ' fejlede: ' + (e && e.message || e));
-      stats.mailSkipped++;
-      try { await sb.patch('profiles', 'user_id=eq.' + encodeURIComponent(userId) + '&digest_sent_at=eq.' + encodeURIComponent(claim), { digest_sent_at: sentAt }); }
-      catch (e2) { log('  Kunne ikke give dagens morgenmail tilbage: ' + (e2 && e2.message || e2)); }
-    }
-  };
-
-  for (const userId of Array.from(new Set(Object.keys(hitsByUser).concat(Array.from(withDigest))))) {
-    const rs = hitsByUser[userId] || [];
+  for (const userId of Object.keys(hitsByUser)) {
+    const rs = hitsByUser[userId];
     const profile = profiles[userId];
     try {
-      if (profile && profile.notify_email === false) { if (rs.length) stats.mailSkipped++; continue; }       // opted out: hit is recorded, no mail
-      if (D.isDigestUser(profile)) { await sendDigest(userId, profile); continue; }
-      // everybody else: a mail per run. Hits still waiting from a time the morning mail was switched on go along (switched off again).
-      const flush = withDigest.has(userId) ? waiting(userId, profile).filter((it) => !rs.some((r) => r === it.r)) : [];
-      if (!rs.length && !flush.length) continue;
+      // Mail is opt-in: no profile row (the person never signed in and chose) or the switch off means no mail; the hit is still recorded
+      if (!profile || profile.notify_email === false) { stats.mailSkipped++; continue; }
       if (!canMail) { revert(rs); stats.mailSkipped++; continue; }                            // retry once mail is configured
       if (stats.sent >= MAX_MAILS) { revert(rs); stats.mailSkipped++; stats.mailNote = 'loft på ' + MAX_MAILS + ' e-mails nået'; continue; }
       const addr = await addressOf(userId);
       if (!addr) continue;
-      await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, addr, composeMail(rs.map((r) => r.hit).concat(flush.map((it) => it.hit)), ctx.siteUrl));
+      await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, addr, composeMail(rs.map((r) => r.hit), ctx.siteUrl));
       stats.sent++;
-      flush.forEach((it) => {                                                                    // sent now: no longer waiting
-        if (it.r) Object.assign(it.r.patch, { digest_price: null, digest_at: null });
-        else { const nr = { prod: it.prod, patch: { digest_price: null, digest_at: null }, hit: null }; results.push(nr); resultOf.set(it.prod.id, nr); }
-      });
     } catch (e) {
       log('  E-mail til bruger ' + userId + ' fejlede: ' + (e && e.message || e));
-      if (!D.isDigestUser(profile)) revert(rs);                // a collected hit stays collected; a hit for a normal mail is found again next run
+      revert(rs);
+      stats.mailSkipped++;
+    }
+  }
+
+  // the daily overview. Claim-then-send: the day is claimed in profiles.digest_sent_at (only if nobody else changed it meanwhile) BEFORE
+  // the mail goes out, so a crash or a parallel run can never send a second one for the same day. A failed send gives the claim back, so
+  // the next run tries again. A day with nothing to say is claimed too (nothing is sent), so the job does not look again every run.
+  for (const userId of Object.keys(profiles)) {
+    const profile = profiles[userId];
+    try {
+      if (!D.isDigestUser(profile)) continue;
+      const sentAt = profile.digest_sent_at || null;
+      if (!D.digestWindow(now, sentAt)) continue;
+      const states = products.filter((p) => p.user_id === userId).map((p) => { const r = resultOf.get(p.id); return r ? Object.assign({}, p, r.patch) : p; });
+      const ov = D.overview(states, now);
+      const empty = !ov.hits.length && !ov.changes.length;
+      let addr = null;
+      if (!empty) {
+        if (!canMail) { stats.mailSkipped++; stats.mailNote = ctx.resendKey ? 'MAIL_FROM mangler' : 'RESEND_API_KEY mangler'; continue; }
+        if (stats.sent >= MAX_MAILS) { stats.mailSkipped++; stats.mailNote = 'loft på ' + MAX_MAILS + ' e-mails nået'; continue; }
+        addr = await addressOf(userId);
+        if (!addr) continue;
+      }
+      const claim = isoNow(now);
+      const rows = await sb.patch('profiles', 'user_id=eq.' + encodeURIComponent(userId) + '&digest_sent_at=' + (sentAt ? 'eq.' + encodeURIComponent(sentAt) : 'is.null'), { digest_sent_at: claim }, true);
+      if (!Array.isArray(rows) || !rows.length) { log('  Oversigten til bruger ' + userId + ' er allerede taget af en anden kørsel.'); continue; }
+      if (empty) continue;
+      try {
+        await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, addr, composeOverview(ov, ctx.siteUrl));
+        stats.sent++; stats.digests++;
+      } catch (e) {
+        log('  Oversigten til bruger ' + userId + ' fejlede: ' + (e && e.message || e));
+        stats.mailSkipped++;
+        try { await sb.patch('profiles', 'user_id=eq.' + encodeURIComponent(userId) + '&digest_sent_at=eq.' + encodeURIComponent(claim), { digest_sent_at: sentAt }); }
+        catch (e2) { log('  Kunne ikke give dagens oversigt tilbage: ' + (e2 && e2.message || e2)); }
+      }
+    } catch (e) {
+      log('  Oversigten til bruger ' + userId + ' fejlede: ' + (e && e.message || e));
       stats.mailSkipped++;
     }
   }
@@ -728,7 +760,7 @@ async function run(ctx) {
     'Produkter: ' + stats.total + ' aktive (nye: ' + stats.pending + ', følges: ' + stats.tracking + ', venter på valg: ' + stats.choose + ', fejl: ' + stats.error + ').',
     'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.extraPages ? ' (ekstra butikker: ' + stats.extraPages + ', uden pris: ' + stats.extraFail + ', forkastet som anden vare: ' + stats.extraDropped + ')' : '') + (stats.blockedHosts.length ? ' (afvist af ' + stats.blockedHosts.join(', ') + ': resten derfra sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
     'Nye hits: ' + stats.hits + '.' + (stats.backfilled ? ' Ældre priser fra Internet Archive: ' + stats.backfillPoints + ' for ' + stats.backfilled + ' produkt(er).' : ''),
-    'E-mails sendt: ' + stats.sent + (stats.digests ? ' (heraf morgenmails: ' + stats.digests + ')' : '') + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte' + (stats.accessPending == null ? '' : ', ' + stats.accessPending + ' venter') + (stats.accessAdmins == null ? '' : ', ' + stats.accessAdmins + (stats.accessAdmins === 1 ? ' administrator' : ' administratorer')) + '.',
+    'E-mails sendt: ' + stats.sent + (stats.digests ? ' (heraf oversigter: ' + stats.digests + ')' : '') + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte' + (stats.accessPending == null ? '' : ', ' + stats.accessPending + ' venter') + (stats.accessAdmins == null ? '' : ', ' + stats.accessAdmins + (stats.accessAdmins === 1 ? ' administrator' : ' administratorer')) + '.',
     'Skrevet til databasen: ' + stats.written + ', skrivefejl: ' + stats.writeFail + '. Tid: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s.',
   ];
   summary.forEach((l) => log(l));

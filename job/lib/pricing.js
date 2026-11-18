@@ -262,8 +262,14 @@ function autoReason(low, verdict, history) {
 }
 
 // hit = lowest in-stock offer at or below the goal (type 'auto': autoReason says so; extra = {verdict, history}).
-// Announce once, again only if the price drops further; reset when no longer a hit.
-// Returns the notified_* fields to write (and reason for type 'auto').
+// ONE MAIL PER DEAL. notified_price / notified_at = the last time we announced (or silently recorded) a hit at that price. They are never
+// cleared when a hit ends (a shop that flickers in and out must not mail again and again); only the person changing the goal or the link
+// clears them (products_guard). A hit is NEW, and mails, when:
+//   1. nothing was announced before (no notified_price), or
+//   2. the price is lower than the announced one (a further drop), or
+//   3. at least 7 days have passed since the last announcement and it is a hit now.
+// Returns the notified_* fields to write (empty when nothing changes) and reason for type 'auto'.
+const RENOTIFY_MS = 7 * DAY;
 function goalOutcome(prod, low, normal, iso, extra) {
   let hit, reason = null;
   if (prod.target_type === 'auto') {
@@ -277,16 +283,17 @@ function goalOutcome(prod, low, normal, iso, extra) {
   const hasPrev = typeof prevN === 'number';
   const out = { hit, newHit: false, fields: {}, reason };
   if (hit) {
-    if (!hasPrev || low.price < prevN) {
+    const last = prod.notified_at ? Date.parse(prod.notified_at) : NaN, now = Date.parse(iso);
+    if (!hasPrev || low.price < prevN || (isFinite(last) && isFinite(now) && now - last >= RENOTIFY_MS)) {
       out.newHit = true;
       out.fields = { notified_price: low.price, notified_at: iso };
-    } else out.fields = { notified_price: prevN };
-  } else out.fields = { notified_price: null };
+    } else if (!isFinite(last)) out.fields = { notified_at: iso };      // a price recorded without a time (older rows): the 7 days start now
+  }
   return out;
 }
 
 module.exports = {
   HISTORY_DAYS, MAX_OFFERS, copenhagenDate, dayNum, numDay, fmtKr, normShop, matchShop, anyMatch, mergePrefs, applyPrefs,
   lowestInStock, onePerStore, sanityCheck, cutoffDate, mergeHistory, mergeBackfill, mergePageHistory, dailySeries, normalPrice, verdictFor,
-  priceWarning, targetPrice, autoReason, goalOutcome,
+  priceWarning, targetPrice, autoReason, goalOutcome, RENOTIFY_MS,
 };

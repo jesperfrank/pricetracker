@@ -19,7 +19,7 @@ const server = http.createServer((req, res) => {
 const FAKE = `
 (function () {
   var init = window.__INIT || {};
-  var db = window.__db = { products: init.products || [], lists: init.lists || [], noLists: !!init.noLists, profiles: init.profiles || [], imports: init.imports || [], noImports: !!init.noImports, members: init.members || [], people: init.people || {}, noMembers: !!init.noMembers, shareAnswer: "ok", ops: [], deny: false, otpError: null,
+  var db = window.__db = { products: init.products || [], lists: init.lists || [], noLists: !!init.noLists, profiles: init.profiles || [], imports: init.imports || [], noImports: !!init.noImports, members: init.members || [], people: init.people || {}, noMembers: !!init.noMembers, noAskedCol: !!init.noAskedCol, shareAnswer: "ok", ops: [], deny: false, otpError: null,
     session: init.session || null, seq: 100, admin: !!init.admin, requests: init.requests || [], allowedList: init.allowed || [], rpcs: [], askReply: "requested", access: init.access || "allowed", accessErr: !!init.accessErr };
   var authCb = null, rt = [];
   // the 60-second poll: remember its callback so a test can run it at once
@@ -112,7 +112,12 @@ const FAKE = `
         }
         if (q.op === "upsert") {
           var ex = rows.filter(function (r) { return r.user_id === q.payload.user_id; })[0];
-          if (ex) Object.assign(ex, clone(q.payload)); else rows.push(clone(q.payload));
+          var pl = clone(q.payload);
+          if (table === "profiles") {   // the database: new rows have mail off and are not asked yet; the answer is stamped once with the server's time (profiles_guard)
+            if (pl.mail_asked_at) pl.mail_asked_at = (ex && ex.mail_asked_at) || "2026-11-16T12:00:00Z"; else if (ex && ex.mail_asked_at) delete pl.mail_asked_at;
+            if (db.noAskedCol) delete pl.mail_asked_at;
+          }
+          if (ex) Object.assign(ex, pl); else rows.push(table === "profiles" ? Object.assign({ notify_email: false, mail_digest: false }, db.noAskedCol ? {} : { mail_asked_at: null }, pl) : pl);
           return resolve({ data: null, error: null });
         }
         if (q.op === "delete") {
@@ -236,7 +241,7 @@ async function open(opts = {}) {
   await page.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
   // config.js in the repo holds the real project's values, so both cases are served from the test, never from the file.
   await page.route(/\/config\.js$/, r => r.fulfill({ contentType: "text/javascript", body: opts.config === false ? "window.PV_CONFIG={supabaseUrl:\"\",supabaseAnonKey:\"\"};" : 'window.PV_CONFIG={supabaseUrl:"https://x.supabase.test",supabaseAnonKey:"anon"};' }));
-  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, imports: opts.imports || [], noImports: !!opts.noImports, members: opts.members || [], people: opts.people || {}, noMembers: !!opts.noMembers, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [], access: opts.access, accessErr: !!opts.accessErr };
+  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, imports: opts.imports || [], noImports: !!opts.noImports, members: opts.members || [], people: opts.people || {}, noMembers: !!opts.noMembers, noAskedCol: !!opts.noAskedCol, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [], access: opts.access, accessErr: !!opts.accessErr };
   await page.addInitScript("window.__INIT = " + JSON.stringify(init) + ";");
   if (opts.fake !== false) await page.addInitScript(FAKE);
   // The behaviour tests below work with the sections "Indstil vare", "Vis alle butikker" and the group of products that cannot be fetched opened (they are collapsed by default; the tests
@@ -1884,30 +1889,77 @@ let base;
       await q.context().close();
     }
 
-    // the morning mail setting
+    // the mail settings and the one question
     {
       const p = await open({ products: [], label: "digest" });
       await p.waitForSelector("#addForm:not([hidden])");
       await openSettings(p);
-      check("digest: the setting 'Saml tilbud i én morgenmail', off by default", /^\s*Saml tilbud i én morgenmail\s*$/.test(await p.textContent('label.chk:has(#shDigest)')) && !(await p.isChecked("#shDigest")) && !(await p.isDisabled("#shDigest")));
+      check("mail: the labels are 'Mail ved nyt tilbud' and 'Daglig oversigt om morgenen', both off for a new person",
+        /^\s*Mail ved nyt tilbud\s*$/.test(await p.textContent('label.chk:has(#shNotify)')) && /^\s*Daglig oversigt om morgenen\s*$/.test(await p.textContent('label.chk:has(#shDigest)'))
+        && !(await p.isChecked("#shNotify")) && !(await p.isChecked("#shDigest")));
+      check("mail: the overview is greyed out while the master switch is off", await p.isDisabled("#shDigest"));
+      await p.check("#shNotify");
+      check("mail: ... and available when it is on", !(await p.isDisabled("#shDigest")));
       await p.check("#shDigest"); await p.click('#shopForm button[type=submit]');
       await p.waitForFunction(() => window.__db.profiles[0] && window.__db.profiles[0].mail_digest === true);
       const pr = await p.evaluate(() => window.__db.ops.filter(x => x.table === "profiles" && "mail_digest" in x.payload).pop().payload);
-      check("digest: saved as mail_digest true with the other settings; never digest_sent_at", pr.mail_digest === true && pr.notify_email === true && !("digest_sent_at" in pr), JSON.stringify(pr));
+      check("mail: saved as mail_digest true with notify_email true; never digest_sent_at or mail_asked_at", pr.mail_digest === true && pr.notify_email === true && !("digest_sent_at" in pr) && !("mail_asked_at" in pr), JSON.stringify(pr));
       await p.uncheck("#shNotify");
-      check("digest: follows the e-mail switch (off means no mails at all, so the choice is greyed out)", await p.isDisabled("#shDigest"));
+      check("mail: the overview follows the master switch (off means no mails at all, so the choice is greyed out)", await p.isDisabled("#shDigest"));
       await p.check("#shNotify");
-      check("digest: and is available again", !(await p.isDisabled("#shDigest")));
       await p.uncheck("#shDigest"); await p.click('#shopForm button[type=submit]');
       await p.waitForFunction(() => window.__db.profiles[0].mail_digest === false);
-      check("digest: switched off again", true);
+      check("mail: overview switched off again", true);
       await p.context().close();
-      const q = await open({ products: [], label: "digest-on", profiles: [{ user_id: "u1", notify_email: true, mail_digest: true, shops_always: [], shops_exclude: [], shops_only: false }] });
+      const q = await open({ products: [], label: "digest-on", profiles: [{ user_id: "u1", notify_email: true, mail_digest: true, mail_asked_at: "2026-01-01T00:00:00Z", shops_always: [], shops_exclude: [], shops_only: false }] });
       await q.waitForSelector("#addForm:not([hidden])");
       await openSettings(q);
       await q.waitForFunction(() => document.getElementById("shDigest").checked);
-      check("digest: shown on when the profile has it on", true);
+      check("mail: shown on when the profile has it on, and the existing person is not asked", (await q.isChecked("#shNotify")) && !(await q.isVisible("#mailAsk")));
       await q.context().close();
+    }
+    {
+      // a new person: the row is created with mail off, the question shows once near the top of the list
+      const p = await open({ products: [], label: "ask-yes" });
+      await p.waitForSelector("#addForm:not([hidden])"); await p.waitForSelector("#mailAsk:not([hidden])");
+      check("ask: a new person sees the one line with two answers, a profile with mail off and no answer yet", /^Vil du have mail ved nye tilbud\?\s*Ja tak\s*Nej tak$/.test((await p.textContent("#mailAsk")).trim())
+        && await p.evaluate(() => window.__db.profiles.length === 1 && window.__db.profiles[0].notify_email === false && window.__db.profiles[0].mail_asked_at === null && window.__db.profiles[0].mail_digest === false));
+      check("ask: it is a line, not a dialog, and sits above the lists/products", await p.evaluate(() => { var el = document.getElementById("mailAsk"); return !el.closest("[role=dialog]") && getComputedStyle(el).position !== "fixed" && el.compareDocumentPosition(document.getElementById("listsBox")) & Node.DOCUMENT_POSITION_FOLLOWING; }));
+      await p.click("#mailYes");
+      await p.waitForSelector("#mailAsk", { state: "hidden" });
+      const r = await p.evaluate(() => window.__db.profiles[0]);
+      check("ask: 'Ja tak' turns the master switch on, stores the answer, leaves the overview off", r.notify_email === true && !!r.mail_asked_at && r.mail_digest === false, JSON.stringify(r));
+      await openSettings(p);
+      check("ask: the settings show it on, the overview off and available", (await p.isChecked("#shNotify")) && !(await p.isChecked("#shDigest")) && !(await p.isDisabled("#shDigest")));
+      await p.context().close();
+      const again = await open({ products: [], label: "ask-again", profiles: [r] });
+      await again.waitForSelector("#addForm:not([hidden])"); await again.waitForTimeout(300);
+      check("ask: it never comes back", !(await again.isVisible("#mailAsk")));
+      await again.context().close();
+      const n = await open({ products: [], label: "ask-no" });
+      await n.waitForSelector("#mailAsk:not([hidden])"); await n.click("#mailNo"); await n.waitForSelector("#mailAsk", { state: "hidden" });
+      const rn = await n.evaluate(() => window.__db.profiles[0]);
+      check("ask: 'Nej tak' stores the answer with mail off", rn.notify_email === false && !!rn.mail_asked_at, JSON.stringify(rn));
+      await n.context().close();
+      const n2 = await open({ products: [], label: "ask-no-again", profiles: [rn] });
+      await n2.waitForSelector("#addForm:not([hidden])"); await n2.waitForTimeout(300);
+      check("ask: ... and it is not asked again", !(await n2.isVisible("#mailAsk")));
+      await n2.context().close();
+      // an existing row with mail off and no answer stored is asked only when the column exists (an older database has no mail_asked_at)
+      const old = await open({ products: [], label: "ask-oldcol", noAskedCol: true });
+      await old.waitForSelector("#addForm:not([hidden])"); await old.waitForTimeout(300);
+      check("ask: a database without mail_asked_at asks nobody", !(await old.isVisible("#mailAsk")));
+      await old.context().close();
+      // no write access: no question; the failed answer keeps the line and shows the read-only notice
+      const ro = await open({ products: [], label: "ask-denied" });
+      await ro.waitForSelector("#mailAsk:not([hidden])"); await ro.evaluate(() => { window.__db.deny = true; }); await ro.click("#mailYes");
+      await ro.waitForSelector("#readonly:not([hidden])");
+      check("ask: without write access the question is gone (the read-only notice shows instead)", !(await ro.isVisible("#mailAsk")));
+      await ro.context().close();
+      const na = await open({ products: [], label: "ask-noaccess", access: "none" });
+      await na.waitForSelector("#noAccessView:not([hidden])"); await na.waitForTimeout(300);
+      check("ask: not on the no-access screen", !(await na.isVisible("#mailAsk")));
+      await na.context().close();
     }
   }
 

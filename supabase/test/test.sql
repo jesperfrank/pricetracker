@@ -773,6 +773,59 @@ select t.chk('profiles: a signed-in stranger sees and writes nothing', (select c
   and t.try($$insert into public.profiles (user_id, mail_digest) values ('00000000-0000-0000-0000-0000000000c3', true)$$) = 'denied');
 reset role;
 
+-- opt-in mail: a new profile has everything off and has not been asked; the question is answered once, with the server's clock
+delete from public.profiles where user_id = '00000000-0000-0000-0000-0000000000b2';
+set role authenticated;
+select t.asB();
+insert into public.profiles (user_id) values ('00000000-0000-0000-0000-0000000000b2');
+select t.chk('opt-in: a brand-new profile has mail off, the overview off and has not been asked',
+  (select notify_email = false and mail_digest = false and mail_asked_at is null from public.profiles));
+update public.profiles set notify_email = true, mail_asked_at = '2001-01-01';
+select t.chk('opt-in: answering "ja tak" switches mail on and stamps the server time (not the sent time)',
+  (select notify_email and mail_digest = false and mail_asked_at > now() - interval '1 minute' and mail_asked_at <= now() from public.profiles));
+update public.profiles set notify_email = false, mail_asked_at = '2001-01-01';
+select t.chk('opt-in: the person can change the switch later, but not the time of the answer', (select not notify_email and mail_asked_at > now() - interval '1 minute' from public.profiles));
+update public.profiles set mail_asked_at = null;
+select t.chk('opt-in: ... and cannot clear it (to be asked again)', (select mail_asked_at is not null from public.profiles));
+reset role;
+delete from public.profiles where user_id = '00000000-0000-0000-0000-0000000000b2';
+set role authenticated;
+select t.asB();
+insert into public.profiles (user_id, notify_email, mail_asked_at) values ('00000000-0000-0000-0000-0000000000b2', false, '2001-01-01');
+select t.chk('opt-in: an insert with an answer is stamped with the server time too', (select mail_asked_at > now() - interval '1 minute' and not notify_email from public.profiles));
+reset role;
+delete from public.profiles where user_id = '00000000-0000-0000-0000-0000000000b2';
+insert into public.profiles (user_id, notify_email, mail_digest) values ('00000000-0000-0000-0000-0000000000b2', false, false);
+
+-- one mail per deal: a changed goal (kind or value) or link clears the notified fields, nothing else does; notify_silent_until is not the browser's
+insert into public.products (id, user_id, name, source_url, target_type, target_value, status, notified_price, notified_at, notify_silent_until)
+values ('00000000-0000-0000-0000-00000000ee01', '00000000-0000-0000-0000-0000000000a1', 'maal-skift', 'https://shop.example.dk/m', 'price', 100, 'tracking', 90, '2026-11-10 10:00:00+00', '2030-01-01');
+set role authenticated;
+select t.asA();
+update public.products set name = 'maal-skift2', shops_exclude = array['X'] where id = '00000000-0000-0000-0000-00000000ee01';
+update public.products set target_value = 100.00 where id = '00000000-0000-0000-0000-00000000ee01';
+select t.chk('goal change: a change of name or shops, or the same value written again, keeps the notified fields',
+  (select notified_price = 90 and notified_at is not null and notify_silent_until = '2030-01-01' from public.products where id = '00000000-0000-0000-0000-00000000ee01'));
+update public.products set target_value = 80, notify_silent_until = null where id = '00000000-0000-0000-0000-00000000ee01';
+select t.chk('goal change: a new value clears notified_price and notified_at; the quiet period is not the browser''s to touch',
+  (select notified_price is null and notified_at is null and target_value = 80 and notify_silent_until = '2030-01-01' from public.products where id = '00000000-0000-0000-0000-00000000ee01'));
+reset role;
+update public.products set notified_price = 70, notified_at = now() where id = '00000000-0000-0000-0000-00000000ee01';
+set role authenticated;
+select t.asA();
+update public.products set target_type = 'auto', target_value = null where id = '00000000-0000-0000-0000-00000000ee01';
+select t.chk('goal change: a new kind of goal clears them too', (select notified_price is null and notified_at is null and target_type = 'auto' from public.products where id = '00000000-0000-0000-0000-00000000ee01'));
+reset role;
+update public.products set notified_price = 70, notified_at = now() where id = '00000000-0000-0000-0000-00000000ee01';
+set role authenticated;
+select t.asA();
+update public.products set source_url = 'https://shop.example.dk/anden' where id = '00000000-0000-0000-0000-00000000ee01';
+select t.chk('goal change: a new link clears them (as before)', (select notified_price is null and notified_at is null and status = 'pending' from public.products where id = '00000000-0000-0000-0000-00000000ee01'));
+insert into public.products (id, user_id, name, source_url, target_type, notify_silent_until) values ('00000000-0000-0000-0000-00000000ee02', '00000000-0000-0000-0000-0000000000a1', 'ny-uden-stilhed', 'https://shop.example.dk/n', 'auto', '2030-01-01');
+select t.chk('quiet period: a new product has none, whatever the browser sends', (select notify_silent_until is null from public.products where id = '00000000-0000-0000-0000-00000000ee02'));
+reset role;
+delete from public.products where id in ('00000000-0000-0000-0000-00000000ee01', '00000000-0000-0000-0000-00000000ee02');
+
 -- imports: the sync columns belong to the job
 set role authenticated;
 select t.asA();
@@ -968,13 +1021,13 @@ reset role;
 -- a donor row that differs from a-gave in every column but the bought ones, used to try every column
 insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
   status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id,
-  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state, requirements, req_state)
+  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state, requirements, req_state, notify_silent_until)
 values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
   'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01',
-  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}', 'donor krav', '{"want":true}');
+  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}', 'donor krav', '{"want":true}', '2001-08-08');
 update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
   variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04',
-  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg', extra_urls = '["https://tredje.example.dk/gave"]', extra_state = '{"x":{"fails":3}}', requirements = 'gave krav', req_state = '{"for":"gave krav","by":"agent"}'
+  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg', extra_urls = '["https://tredje.example.dk/gave"]', extra_state = '{"x":{"fails":3}}', requirements = 'gave krav', req_state = '{"for":"gave krav","by":"agent"}', notify_silent_until = '2002-07-07'
  where name = 'a-gave';
 create table t.donor as select * from public.products where name = 'donor';
 create table t.snap as select id, to_jsonb(p) as j from public.products p where name = 'a-gave';

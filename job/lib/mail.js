@@ -2,6 +2,7 @@
 // Plain-text Danish e-mail. Product names and shop names are untrusted text: no HTML is built from them.
 
 const { fmtKr } = require('./pricing');
+const { digestSubject } = require('./digest');
 
 function clean(s, max) {
   return String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max || 160);
@@ -32,8 +33,35 @@ function composeMail(hits, siteUrl) {
     lines.push('');
   });
   if (siteUrl) lines.push('Se alle dine produkter: ' + clean(siteUrl, 300), '');
-  lines.push('Vil du ikke have e-mails? Slå "Send e-mail" fra under dine indstillinger på siden.');
+  lines.push('Vil du ikke have e-mails? Slå "Mail ved nyt tilbud" fra under dine indstillinger på siden.');
   return { subject, text: lines.join('\n') + '\n' };
+}
+
+// The daily overview. hits: [{name, price, store, url, goal}], changes: [{name, from, to, pct, store}] (see digest.overview).
+function composeOverview(ov, siteUrl) {
+  const lines = ['Godmorgen. Her er dit overblik.', ''];
+  if (ov.hits.length) {
+    lines.push('På tilbud nu', '');
+    ov.hits.forEach((h, i) => {
+      lines.push((i + 1) + '. ' + clean(h.name, 140));
+      lines.push('   Pris: ' + fmtKr(h.price) + ' hos ' + clean(h.store, 80));
+      if (h.goal) lines.push('   ' + clean(h.goal, 300));
+      if (h.url) lines.push('   Link til butikken: ' + clean(h.url, 500));
+      lines.push('');
+    });
+  }
+  if (ov.changes.length) {
+    lines.push('Ændret siden i går', '');
+    ov.changes.forEach((c, i) => {
+      const p = Math.round(Math.abs(c.pct) * 100);
+      lines.push((i + 1) + '. ' + clean(c.name, 140));
+      lines.push('   ' + fmtKr(c.from) + ' i går, ' + fmtKr(c.to) + ' nu (' + p + ' % ' + (c.pct < 0 ? 'lavere' : 'højere') + ') hos ' + clean(c.store, 80));
+      lines.push('');
+    });
+  }
+  if (siteUrl) lines.push('Se alle dine produkter: ' + clean(siteUrl, 300), '');
+  lines.push('Vil du ikke have den daglige oversigt? Slå "Daglig oversigt om morgenen" fra under dine indstillinger på siden.');
+  return { subject: digestSubject(ov.hits.length, ov.changes.length), text: lines.join('\n') + '\n' };
 }
 
 // requests: [{email, name}] (untrusted text: plain text only, line breaks and control characters removed, lengths capped)
@@ -75,4 +103,4 @@ async function sendResend(fetchImpl, apiKey, from, to, mail) {
   } finally { clearTimeout(t); }
 }
 
-module.exports = { composeMail, composeOwnerMail, composeApprovedMail, sendResend, clean };
+module.exports = { composeMail, composeOverview, composeOwnerMail, composeApprovedMail, sendResend, clean };

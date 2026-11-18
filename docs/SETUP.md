@@ -82,6 +82,8 @@ I Supabase: **Project Settings** > **API** (eller *API Keys*). Noter:
 1. Opret konto på resend.com. Under **Domains** kan du verificere dit eget domæne og sende fra f.eks. `pris@dit-domæne.dk`. Uden eget domæne kan du til test kun sende fra `onboarding@resend.dev` til din egen adresse.
 2. **API Keys** > opret en nøgle med rettigheden *Sending access*.
 
+**Hvem får mail.** Mail er til-valg: ingen får prismails, før de selv siger ja. Første gang en ny person åbner siden, står der en lille linje øverst: "Vil du have mail ved nye tilbud?" med "Ja tak" og "Nej tak". Svaret gemmes, og linjen kommer ikke igen. Under Indstillinger findes to valg: **Mail ved nyt tilbud** (en mail, når et produkt første gang rammer målet, eller når prisen falder yderligere; samme tilbud mailes ikke igen, før der er gået 7 dage, medmindre man ændrer mål eller link) og **Daglig oversigt om morgenen** (slået fra som standard; én mail om dagen ved første kørsel efter kl. 7 dansk tid med det, der er på tilbud nu, og de produkter, hvis laveste pris har ændret sig mindst 5 % siden i går; ingen mail, hvis der intet er at sige). Den daglige oversigt kræver, at "Mail ved nyt tilbud" er slået til, og forsinker aldrig tilbudsmailen. En butik, der af og til afviser os, beholder sit seneste tilbud i op til 24 timer, så prisen ikke hopper frem og tilbage. Mail om adgang (til dig og til nygodkendte) er ikke prismails og sendes uanset valgene. Felterne `products.digest_price` og `products.digest_at` bruges ikke længere og er blot ladt stå.
+
 ## 6. GitHub: hemmeligheder og tidsplan
 
 1. Repoet > **Settings** > **Secrets and variables** > **Actions** > **New repository secret**. Opret disse fem:
