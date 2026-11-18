@@ -1,5 +1,7 @@
 'use strict';
-// Extra shops for a single-shop product (products.extra_urls, written by the AI agent): pure helpers for the job. No I/O.
+// Extra shops for a product (products.extra_urls, written by the AI agent or added by hand by the person): pure helpers for the job. No I/O.
+// Two kinds of product have them: a single-shop product (the main shop plus the extras) and a product on prisjagt.dk (the Prisjagt offers
+// plus the extras, which are the shops Prisjagt does not list, for example the manufacturer's own web shop).
 //   products.extra_urls   1 to 5 https product-page links, one per shop (the database checks the rule; the job re-checks what it fetches)
 //   products.extra_state  the job's own bookkeeping, one entry per link: {"seen": true, "fails": 0, "at": "<time of the last attempt>"}
 //     seen  = the link has been read successfully and its offer was recorded once (so its price is not "new" any more)
@@ -9,8 +11,13 @@
 //             when the shop cannot be read for a transient reason (refused, timeout, network, 5xx), so the lowest price and the hit do not
 //             flicker. The main shop of a product with extras is kept the same way, under its own link (products.source_url as fetched).
 //             Dropped at once when the page is read and shows no price / another product / is gone (that is real information).
+//     why   = why the link does NOT contribute an offer after its last attempt, for the person's list "Butikker, vi følger" (absent when it
+//             does, also when its last offer stands in for it): 'err' (the page could not be read), 'noprice' (read, no price), 'outlier'
+//             (the price is far from the other shops: probably another product), 'dup' (the shop is among the Prisjagt offers already).
+//             A stale offer is shown through the note of the offer itself ("pris fra i går").
 
 const SHOP = require('./shop');
+const PRICING = require('./pricing');
 
 const MAX_FETCHES = 30;               // extra pages fetched per run, over all products
 const FAIL_STREAK = 10;               // after this many failures in a row a link is tried once a day only
@@ -25,12 +32,12 @@ const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
 function hostOf(u) { try { return new URL(u).hostname.toLowerCase().replace(/^www\./, ''); } catch (e) { return ''; } }
 
-// The links of a product that may be fetched: [] when the row has no such column (an older database), when it is not an array, or when
-// the product's own link is a prisjagt.dk page. Each entry must pass the shop URL guard and be https; an entry that does not, is the same
-// shop as the product's own link (same host) or repeats an earlier one is left out. At most 5.
+// The links of a product that may be fetched: [] when the row has no such column (an older database) or when it is not an array. The
+// product's own link may be a shop or a prisjagt.dk page. Each entry must pass the shop URL guard and be https and not be on prisjagt.dk;
+// an entry that does not, is the same shop as the product's own link (same host) or repeats an earlier one is left out. At most 5.
 function links(prod) {
   if (!prod || !has(prod, 'extra_urls') || !Array.isArray(prod.extra_urls)) return [];
-  if (typeof prod.source_url !== 'string' || SHOP.isPrisjagtHost(hostOf(prod.source_url))) return [];
+  if (typeof prod.source_url !== 'string') return [];
   const taken = new Set([hostOf(prod.source_url)]), out = [];
   for (const raw of prod.extra_urls.slice(0, 5)) {
     const u = SHOP.validateShopUrl(raw);
@@ -75,6 +82,24 @@ function isOutlier(price, others) {
   return price < LOW_RATIO * m || price > HIGH_RATIO * m;
 }
 
+// Is this extra shop one that the Prisjagt offers cover already? Then the Prisjagt row is kept and the extra one dropped. The rule, in this order:
+//  1. an offer whose link is NOT on prisjagt.dk (a direct link) and has the same registrable domain as the extra link;
+//  2. an offer whose shop name equals the extra offer's shop name, both normalised (lower case, no www, no .dk / .com, letters and digits only);
+//  3. an offer whose normalised shop name equals the registrable name of the extra link (roborock.com/dk -> "roborock").
+// Equality only, never "contains": a shop that is only similar in name (Coolshop / Coolshop Outlet) is a shop of its own and stays.
+// Prisjagt's own offer links are go-to-shop links on prisjagt.dk, so in practice it is the names that decide. rows = the offers of the
+// product's tracked variants; extra = {url, store}.
+function covered(rows, extra) {
+  const dom = (h) => SHOP.registrableDomain(h), name = (s) => PRICING.normShop(s);
+  const eh = hostOf(extra.url), ed = eh ? dom(eh) : '', en = name(extra.store), eg = eh ? name(SHOP.registrable(eh).name) : '';
+  return (rows || []).some((r) => {
+    const rh = hostOf(r.url);
+    if (rh && !SHOP.isPrisjagtHost(rh) && ed && dom(rh) === ed) return true;
+    const rn = name(r.store);
+    return !!rn && (rn === en || rn === eg);
+  });
+}
+
 // The fetches of this run: candidates [{key, at, n}] (at = time of the last attempt, 0 = never), the longest-untried first, at most max.
 function pick(cands, max) {
   return cands.slice().sort((a, b) => (a.at - b.at) || (a.n - b.n)).slice(0, max === undefined ? MAX_FETCHES : max).map((c) => c.key);
@@ -112,4 +137,4 @@ function staleNote(readAtMs, now, copenhagenDate) {
   return copenhagenDate(new Date(readAtMs)) === copenhagenDate(now) ? STALE_NOTES[1] : STALE_NOTES[0];
 }
 
-module.exports = { STALE_MS, STALE_NOTE_MS, transient, lastOffer, staleNote, strip, MAX_FETCHES, FAIL_STREAK, SLOW_MS, LOW_RATIO, HIGH_RATIO, links, stateOf, isNew, slow, median, isOutlier, pick, hostOf };
+module.exports = { STALE_MS, STALE_NOTE_MS, transient, lastOffer, staleNote, strip, MAX_FETCHES, FAIL_STREAK, covered, SLOW_MS, LOW_RATIO, HIGH_RATIO, links, stateOf, isNew, slow, median, isOutlier, pick, hostOf };

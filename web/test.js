@@ -89,6 +89,7 @@ const FAKE = `
         }
         if (q.op === "update" && table === "products" && "bought_price" in q.payload && q.payload.bought_price !== null && !(q.payload.bought_price > 0 && q.payload.bought_price <= 10000000)) return resolve({ data: null, error: { code: "23514", message: "products_bought_price_check" } });
         if (q.op === "update" && table === "products" && "alt_requested_at" in q.payload && db.altError) return resolve({ data: null, error: clone(db.altError) });
+        if (q.op === "update" && table === "products" && "extra_urls" in q.payload && db.xaddError) return resolve({ data: null, error: clone(db.xaddError) });
         if (q.op === "update") {
           rows.filter(match).forEach(function (r) {
             if (table === "products" && "alt_requested_at" in q.payload && q.payload.alt_requested_at) r.alt_requested_at = new Date().toISOString();   // products_guard: the server stamps the time
@@ -102,8 +103,9 @@ const FAKE = `
                          && (r.compare_state == null || (r.compare_state === "none" && Date.now() - Date.parse(r.compare_at) > 7 * 864e5))) { r.compare_state = "wanted"; r.compare_at = new Date().toISOString(); }
               delete q.payload.compare_state;
             }
-            if (table === "products" && "extra_urls" in q.payload) {   // products_guard: only the removal of ONE entry is accepted (the last one with null); the rest is ignored
-              var oldX = r.extra_urls, newX = q.payload.extra_urls, okX = false;
+            if (table === "products" && "extra_urls" in q.payload) {   // products_guard: the removal of ONE entry (the last one with null) or the addition of ONE at the end is accepted; the rest is ignored
+              var oldX = r.extra_urls, newX = q.payload.extra_urls, okX = false, oldN = Array.isArray(oldX) ? oldX.length : 0;
+              if (Array.isArray(newX) && newX.length === oldN + 1 && JSON.stringify(newX.slice(0, oldN)) === JSON.stringify(oldX || [])) { r.extra_urls = newX; oldX = null; }
               if (Array.isArray(oldX)) {
                 if (newX === null) okX = oldX.length === 1;
                 else if (Array.isArray(newX) && oldX.length >= 2 && newX.length === oldX.length - 1) okX = oldX.some(function (_, i) { return JSON.stringify(oldX.filter(function (__, j) { return j !== i; })) === JSON.stringify(newX); });
@@ -2321,7 +2323,7 @@ let base;
       check("extras: 'Vis alle butikker' holds the rest (the dearer one and the sold-out one)", /Butik C/.test(await body(p, "x1").locator(".allshops").innerText()) && /Ikke på lager/.test(await body(p, "x1").locator(".allshops").innerText()) && /Vis alle butikker/.test(t1));
       check("extras: the single-shop note is gone", !/Kun denne butik/.test(t1) && !/Kun denne butik/.test(norm(await body(p, "x3").innerText())));
       check("extras: the quiet line says how many shops: 1 + extras", (await body(p, "x1").locator(".cmp").innerText()).trim() === "Følger 5 butikker." && (await body(p, "x3").locator(".cmp").innerText()).trim() === "Følger 3 butikker.");
-      check("extras: without extras (none) the old note and the 'none' line stay", /Kun denne butik/.test(await body(p, "x2").innerText()) && /Fandt ikke varen hos andre butikker/.test(await body(p, "x2").innerText()) && !/Butikker, vi følger/.test(await body(p, "x2").innerText()));
+      check("extras: without extras (none) the old note and the 'none' line stay; the owner gets the empty list with the add line", /Kun denne butik/.test(await body(p, "x2").innerText()) && /Fandt ikke varen hos andre butikker/.test(await body(p, "x2").innerText()) && /Butikker, vi følger/.test(await body(p, "x2").innerText()) && (await body(p, "x2").locator('.xshops .foot').count()) === 0 && (await body(p, "x2").locator('[data-xadd]').count()) === 1);
       check("extras: a database without the column shows nothing about it (old note, no list, no line)", /Kun denne butik/.test(await body(p, "x0").innerText()) && !/Butikker, vi følger|Følger \d/.test(await body(p, "x0").innerText()));
      
       const m1 = body(p, "x1").locator(".xshops");
@@ -2337,7 +2339,7 @@ let base;
         && (await body(p, "x4").locator(".cmp").innerText()).trim() === "Følger 2 butikker.", await body(p, "x4").innerHTML());
      
       const m3 = body(p, "x3").locator(".xshops");
-      check("extras: someone else's product in a shared list shows the shops but no 'Fjern'", (await m3.locator(".foot").count()) === 2 && (await m3.locator('[data-act="x-rm"]').count()) === 0);
+      check("extras: someone else's product in a shared list shows the shops but no 'Fjern' and no add line", (await m3.locator(".foot").count()) === 2 && (await m3.locator('[data-act="x-rm"]').count()) === 0 && (await m3.locator('[data-xadd]').count()) === 0);
       check("extras: no em-dash and no exclamation mark in the new texts", !/[—!]/.test(await m1.innerText()) && !/[—!]/.test((await body(p, "x1").locator(".cmp").innerText())));
       // remove the second shop
       await m1.locator('[data-act="x-rm"]').nth(1).click();
@@ -2358,7 +2360,7 @@ let base;
       const os = await ops(p);
       check("extras: the entries go one at a time; the last one is removed with null", JSON.stringify(os.map(x => x.payload.extra_urls)) === JSON.stringify([[XA, XC, XD], [XC, XD], [XD], null]), JSON.stringify(os.map(x => x.payload)));
       await p.waitForFunction(() => /Fandt ikke varen hos andre butikker/.test(document.body.innerText));
-      check("extras: with none left the list and the line are gone and the single-shop note is back", !/Butikker, vi følger|Følger \d/.test(await body(p, "x1").innerText()) && /Kun denne butik/.test(await body(p, "x1").innerText()));
+      check("extras: with none left the list and the line are gone (the owner keeps the empty block with the add line) and the single-shop note is back", !/Følger \d/.test(await body(p, "x1").innerText()) && (await body(p, "x1").locator(".xshops .foot").count()) === 0 && (await body(p, "x1").locator("[data-xadd]").count()) === 1 && /Kun denne butik/.test(await body(p, "x1").innerText()));
       check("extras: nothing else was written", (await p.evaluate(() => window.__db.writes().length)) === 4 && (await p.evaluate(() => window.__db.products.filter(x => x.id === "x1")[0].extra_urls)) === null);
       await p.context().close();
     }
@@ -2369,6 +2371,96 @@ let base;
       await p.click('[data-act="x-rm"][data-id="f1"] >> nth=0');
       await p.waitForFunction(() => /Kunne ikke gemme/.test(document.body.innerText));
       check("extras: a failing save says so; the shop stays and can be tried again", /Kunne ikke gemme lige nu/.test(await body(p, "f1").innerText()) && (await body(p, "f1").locator('.xshops [data-act="x-rm"]').count()) === 2 && !(await body(p, "f1").locator('[data-act="x-rm"]').first().isDisabled()));
+      await p.context().close();
+    }
+  }
+
+  // 10h. extra shops on a Prisjagt product, and "Tilføj" (the person adds one shop link by hand)
+  {
+    const DAY = 864e5, ago = d => new Date(Date.now() - d * DAY).toISOString();
+    const MFR = "https://www.roborock.com/dk/saros-10r", XB = "https://butik-b.dk/p/2", XC = "https://shop.butik-c.dk/p/3", XD = "https://butik-d.dk/p/4", XE = "https://butik-e.dk/p/5", XF = "https://butik-f.dk/p/6";
+    const pj = (id, extra, over) => row("test-dyson-v15", Object.assign({ id, name: "Saros " + id, compare_state: null, compare_at: null, shop_url: null, extra_urls: extra, extra_state: null }, over || {}));
+    const body = (p, id) => p.locator('.item:has([data-id="' + id + '"]) .body');
+    const norm = t => t.replace(/\s+/g, " ").trim();
+    const noCol = pj("p0", null); delete noCol.extra_urls;
+    const single = row("test-dyson-v15", { id: "p6", name: "Enkelt", source_url: "https://www.hovedbutik.dk/vare/1", tracked_variants: ["shop"], variants: [{ id: "shop", label: "Hovedbutik", lowest: 450, offers: 1, sample: "Kit" }],
+      offers: [{ store: "Hovedbutik", price: 450, url: "https://www.hovedbutik.dk/vare/1", inStock: true, note: null, variant: "shop" }], compare_state: "none", compare_at: ago(3), shop_url: null, extra_urls: null, extra_state: null });
+    const stale = pj("p5", [XB, XC, XD, XE], { extra_state: { [XB]: { why: "err", seen: false, fails: 2 }, [XC]: { seen: true, fails: 0 }, [XD]: { why: "outlier" }, [XE]: { why: "<img src=x onerror=alert(1)>" } },
+      offers: [{ store: "Dyson", price: 3999, url: "https://prisjagt.dk/go-to-shop/1/offer/2", inStock: true, note: null, variant: "v1" }, { store: "Butik C", price: 3900, url: XC, inStock: true, note: "Fri fragt · pris fra i går", variant: "v1" }] });
+    {
+      const p = await open({ products: [pj("p1", null), noCol, pj("p2", [MFR], { extra_state: { [MFR]: { seen: true, fails: 0, at: ago(0), offer: { store: "Roborock", price: 4050, inStock: true, note: null, at: ago(0) } } } }), pj("p3", null, { user_id: "o9", list_id: "lx" }),
+        pj("p4", [MFR], { user_id: "o9", list_id: "lx" }), stale, single, pj("p7", null, { compare_state: "wanted", compare_at: ago(0.01) }), pj("p8", [MFR, XB, XC, XD, XE]), pj("p9", [XB], { extra_state: { [XB]: { why: "noprice", seen: false, fails: 1 } } })],
+        lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], label: "extra-pj" });
+      await p.waitForSelector(".item");
+      for (const id of ["p1", "p0", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9"]) await p.click('.head[data-id="' + id + '"]');
+      const t1 = norm(await body(p, "p1").innerText());
+      check("pj extras: a Prisjagt product shows 'Butikker, vi følger' with an empty list, the add line and no 'Kun denne butik'", /Butikker, vi følger/.test(t1) && (await body(p, "p1").locator(".xshops .foot").count()) === 0 && !/Kun denne butik/.test(t1)
+        && (await body(p, "p1").locator('[data-xadd] input').getAttribute("placeholder")) === "Link til varen i en butik" && (await body(p, "p1").locator('[data-xadd] button').innerText()) === "Tilføj", t1.slice(0, 300));
+      check("pj extras: the input is one line (maxlength 500, type url) with a label for screen readers", (await body(p, "p1").locator('[data-xadd] input').getAttribute("maxlength")) === "500" && (await body(p, "p1").locator('[data-xadd] input').getAttribute("type")) === "url" && (await body(p, "p1").locator('[data-xadd] label').innerText()) === "Link til varen i en butik");
+      check("pj extras: a database without the column shows nothing", !/Butikker, vi følger/.test(await body(p, "p0").innerText()) && (await body(p, "p0").locator("[data-xadd]").count()) === 0);
+      check("pj extras: a product of someone else in a shared list: no add line, and no empty block; with shops the list without 'Fjern'", !/Butikker, vi følger/.test(await body(p, "p3").innerText())
+        && /Butikker, vi følger/.test(await body(p, "p4").innerText()) && (await body(p, "p4").locator('.xshops .foot').count()) === 1 && (await body(p, "p4").locator('[data-xadd], [data-act="x-rm"]').count()) === 0);
+      check("pj extras: the line 'Leder efter flere butikker.' while the agent looks; nothing for a Prisjagt product otherwise", /Leder efter flere butikker\./.test(await body(p, "p7").innerText()) && !/Leder efter|Følger \d/.test(await body(p, "p1").innerText()));
+      const m9 = body(p, "p9").locator(".xshops");
+      check("pj extras: 'ingen pris' for a page that was read without a price", JSON.stringify(await m9.locator(".xwhy").allInnerTexts()) === JSON.stringify(["ingen pris"]));
+      const m5 = body(p, "p5").locator(".xshops");
+      const states = await m5.locator(".foot").evaluateAll(fs => fs.map(f => [f.querySelector("a").textContent, (f.querySelector(".xwhy") || {}).textContent || ""]));
+      check("pj extras: each link that gives no price says why, short and muted: kunne ikke læses, anden vare?; a stale offer 'pris fra i går'; nothing else is shown (ingen pris is tested below)",
+        JSON.stringify(states) === JSON.stringify([["butik-b.dk", "kunne ikke læses"], ["shop.butik-c.dk", "pris fra i går"], ["butik-d.dk", "anden vare?"], ["butik-e.dk", ""]]), JSON.stringify(states));
+      check("pj extras: nothing the job wrote is shown as html, no em dash, no exclamation mark", !/onerror|<img/.test(await m5.innerHTML()) && !/[—!]/.test(await m5.innerText()));
+      // the add: a valid link is appended, one write, nothing else
+      const inp = body(p, "p1").locator('[data-xadd] input');
+      await inp.fill("  https://WWW.Roborock.com/dk/saros-10r#x  "); await body(p, "p1").locator('[data-xadd] button').click();
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      const o = (await ops(p))[0];
+      check("pj extras: 'Tilføj' sends the old list plus the new link at the end, trimmed and without the fragment, and nothing else", o.table === "products" && o.op === "update" && o.filters[0][1] === "p1" && JSON.stringify(o.payload) === JSON.stringify({ extra_urls: ["https://www.roborock.com/dk/saros-10r"] }), JSON.stringify(o));
+      await p.waitForFunction(() => document.querySelector('.item:has([data-id="p1"]) .xshops .foot'));
+      check("pj extras: the shop is in the list at once (host without www), the input is empty again, still after the list is read again", /roborock\.com/.test(await body(p, "p1").locator(".xshops .foot").innerText()) && (await body(p, "p1").locator('[data-xadd] input').inputValue()) === "");
+      await p.waitForTimeout(150);
+      check("pj extras: ... still there after the read", (await body(p, "p1").locator(".xshops .foot").count()) === 1);
+      // a second one is appended to the first
+      await body(p, "p1").locator('[data-xadd] input').fill(XB); await body(p, "p1").locator('[data-xadd] input').press("Enter");
+      await p.waitForFunction(() => window.__db.writes().length === 2);
+      check("pj extras: a second link is appended after the first (Enter submits)", JSON.stringify((await ops(p))[1].payload) === JSON.stringify({ extra_urls: ["https://www.roborock.com/dk/saros-10r", XB] }));
+      // the rules the page checks before it asks (no write)
+      const msgOf = id => body(p, id).locator('[data-rowmsg="x-' + id + '"]').innerText();
+      const tryAdd = async (id, v) => { await body(p, id).locator('[data-xadd] input').fill(v); await body(p, id).locator('[data-xadd] button').click(); await p.waitForTimeout(60); return msgOf(id); };
+      const before = (await ops(p)).length;
+      const bad = [];
+      for (const v of ["", "roborock.dk", "http://www.roborock.com/x", "https://www.prisjagt.dk/product.php?p=1", "javascript:alert(1)", "https://u:p@shop.dk/x", "https://shop.dk:8443/x", "https://localhost/x", "https://10.0.0.1/x"]) bad.push(await tryAdd("p1", v));
+      check("pj extras: not a link to a shop page (empty, no scheme, http, prisjagt.dk, script, password, port, localhost, an address): 'Brug et link ...'", bad.every(m => m === "Brug et link til varens egen side i butikken."), JSON.stringify(bad));
+      check("pj extras: a shop that is followed already (also www and another path): 'Den butik følges allerede.'", (await tryAdd("p1", "https://roborock.com/dk/anden")) === "Den butik følges allerede." && (await tryAdd("p1", "https://BUTIK-B.dk/andet")) === "Den butik følges allerede.");
+      check("pj extras: ... the own shop of a single-shop product too", (await tryAdd("p6", "https://hovedbutik.dk/anden-vare")) === "Den butik følges allerede.");
+      check("pj extras: five are followed already: 'Du kan højst følge 5 ekstra butikker.'", (await tryAdd("p8", XF)) === "Du kan højst følge 5 ekstra butikker.");
+      check("pj extras: none of those wrote anything", (await ops(p)).length === before);
+      await p.context().close();
+    }
+    {   // a single-shop product gets the add line too; the database's own answers are shown; a failing save says so
+      const single2 = row("test-dyson-v15", { id: "q1", name: "Enkelt", source_url: "https://www.hovedbutik.dk/vare/1", tracked_variants: ["shop"], variants: [{ id: "shop", label: "Hovedbutik", lowest: 450, offers: 1, sample: "Kit" }],
+        offers: [{ store: "Hovedbutik", price: 450, url: "https://www.hovedbutik.dk/vare/1", inStock: true, note: null, variant: "shop" }], compare_state: "none", compare_at: ago(3), shop_url: null, extra_urls: null, extra_state: null });
+      const p = await open({ products: [single2, pj("q2", [MFR])], label: "extra-pj-save" });
+      await p.waitForSelector(".item"); await p.click('.head[data-id="q1"]'); await p.click('.head[data-id="q2"]');
+      const msgOf = id => body(p, id).locator('[data-rowmsg="x-' + id + '"]').innerText();
+      await body(p, "q1").locator('[data-xadd] input').fill(XB); await body(p, "q1").locator('[data-xadd] button').click();
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      await p.waitForFunction(() => document.querySelector('.item:has([data-id="q1"]) .xshops .foot'));
+      check("pj extras: a single-shop product can add a link too; compare_state is not touched (the database keeps it)", /butik-b\.dk/.test(await body(p, "q1").locator(".xshops").innerText()) && (await p.evaluate(() => window.__db.products.filter(x => x.id === "q1")[0].compare_state)) === "none");
+      await p.evaluate(() => { window.__db.xaddError = { code: "23514", message: "Den butik følges allerede." }; });
+      await body(p, "q2").locator('[data-xadd] input').fill(XC); await body(p, "q2").locator('[data-xadd] button').click();
+      await p.waitForFunction(() => /Den butik følges allerede\./.test(document.body.innerText));
+      check("pj extras: the database's answer 'Den butik følges allerede.' is shown, the link is not listed", (await msgOf("q2")) === "Den butik følges allerede." && !/butik-c\.dk/.test(await body(p, "q2").locator(".xshops").innerText()));
+      await p.evaluate(() => { window.__db.xaddError = { code: "23514", message: "Du kan højst følge 5 ekstra butikker." }; });
+      await body(p, "q2").locator('[data-xadd] button').click(); await body(p, "q2").locator('[data-xadd] input').fill(XD); await body(p, "q2").locator('[data-xadd] button').click();
+      await p.waitForFunction(() => /højst følge 5/.test(document.body.innerText));
+      check("pj extras: ... also the cap message", (await msgOf("q2")) === "Du kan højst følge 5 ekstra butikker.");
+      await p.evaluate(() => { window.__db.xaddError = { code: "XX000", message: "something <b>odd</b> inside the database" }; });
+      await body(p, "q2").locator('[data-xadd] button').click();
+      await p.waitForFunction(() => /Kunne ikke gemme lige nu/.test(document.body.innerText));
+      check("pj extras: any other error is the usual short text, never the database's words", (await msgOf("q2")) === "Kunne ikke gemme lige nu. Prøv igen om lidt." && !/odd/.test(await body(p, "q2").innerText()));
+      await p.evaluate(() => { window.__db.xaddError = null; window.__db.netFail = true; });
+      await body(p, "q2").locator('[data-xadd] button').click();
+      await p.waitForFunction(() => /Kunne ikke gemme/.test(document.body.innerText));
+      check("pj extras: a failing save says so; the line stays and can be tried again", (await body(p, "q2").locator(".xshops .foot").count()) === 1 && !(await body(p, "q2").locator('[data-xadd] button').isDisabled()));
       await p.context().close();
     }
   }

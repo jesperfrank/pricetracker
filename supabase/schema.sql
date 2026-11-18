@@ -241,12 +241,14 @@ create policy profiles_own on public.profiles
 
 -- products: the policies are in the sharing section below (they need the list helper functions).
 
--- "Extra shops": a single-shop product (source_url is a shop's product page) can also be followed in other Danish shops that sell exactly
--- the same product, for the things that are not on Prisjagt. extra_urls = 1 to 5 https product-page links, one per shop (none on
--- prisjagt.dk, none with the host of source_url or of each other). The AI agent writes it (resolver_compare with p_shops); a browser user
--- can never add or change an entry, only remove one of their own product's entries (products_guard). extra_state is the job's own
--- bookkeeping per link ({"<link>": {"seen": true, "fails": 0, "at": "<time>"}}: seen = read successfully once, fails = failures in a row,
--- at = last attempt); the browser cannot write it.
+-- "Extra shops": a product can also be followed in other Danish shops that sell exactly the same product: a single-shop product (source_url
+-- is a shop's product page) for the things that are not on Prisjagt, and a product on prisjagt.dk for the shops Prisjagt does NOT list (the
+-- manufacturer's own web shop, say). extra_urls = 1 to 5 https product-page links, one per shop (none on prisjagt.dk, none with the host of
+-- source_url or of each other). The AI agent writes it (resolver_compare with p_shops, added to what is there); the product's own person can
+-- add ONE link per update at the end of the list, or remove one entry (products_guard); nobody else can change it. AI-found and hand-added
+-- links share the cap of 5. extra_state is the job's own bookkeeping per link ({"<link>": {"seen": true, "fails": 0, "at": "<time>",
+-- "offer": {...}, "why": "err" | "noprice" | "outlier" | "dup"}}: seen = read successfully once, fails = failures in a row, at = last attempt,
+-- offer = the last offer read, why = the reason the link did not contribute in the last attempt, absent when it did); the browser cannot write it.
 alter table public.products add column if not exists extra_urls jsonb;
 alter table public.products add column if not exists extra_state jsonb;
 
@@ -274,7 +276,6 @@ begin
   n := jsonb_array_length(p_extra);
   if n < 1 or n > 5 then return 'shops must hold 1 to 5 links, not ' || n; end if;
   if p_src is null or char_length(p_src) > 500 or p_src !~ rx then return 'the product has no shop link to compare with'; end if;
-  if p_src ~* '^https://(www\.)?prisjagt\.dk([/?#]|$)' then return 'only a product that follows one shop can have extra shops'; end if;
   src_host := regexp_replace(lower(substring(p_src from '^https://([^/?#]+)')), '^www\.', '');
   for i in 0 .. n - 1 loop
     e := p_extra -> i;
@@ -396,6 +397,9 @@ declare
   asked_extra jsonb;
   extras_gone boolean := false;
   i integer;
+  old_n integer;
+  new_link jsonb;
+  new_host text;
   on_pj boolean;
 begin
   -- requirements: cleaned for every role before anything is compared (see the column): the text never makes a row fail
@@ -442,23 +446,56 @@ begin
   -- "Mente du": the options are the agent's. The browser never writes them (a list member changing them fails the whole-row check above);
   -- a new link or a new name clears them (below).
   new.name_options := old.name_options;
-  -- extra shops: the agent's and the job's. The person (only their own product gets this far) may only remove ONE entry of extra_urls
-  -- (the same array minus one element, same order; removing the only entry gives null, and the product then counts as "not found
-  -- elsewhere"). Anything else the browser sends is ignored.
+  -- extra shops: the agent's and the job's. The person (only their own product gets this far) may do two things, one per update:
+  --  * ADD one link at the end: the new value is exactly the old array plus one entry (an old null counts as an empty array). The entry must
+  --    be an https product link of at most 500 characters (not prisjagt.dk), not in the shop of source_url, not in a shop that is in the list
+  --    already, and the list may hold 5 in all (the agent's and the hand-added links share the cap). A wrong link is a Danish error. Adding
+  --    changes nothing else: not compare_state (it is no answer from the agent), not extra_state, not the prices.
+  --  * REMOVE one entry: the same array minus one element, same order; removing the only entry gives null and, when the agent had answered
+  --    (compare_state 'done'), compare_state 'none' (the product then counts as "not found elsewhere").
+  -- Anything else the browser sends is ignored.
   new.extra_state := old.extra_state;
   asked_extra := new.extra_urls;
   new.extra_urls := old.extra_urls;
-  if old.extra_urls is not null and jsonb_typeof(old.extra_urls) = 'array' and asked_extra is distinct from old.extra_urls then
-    if asked_extra is null then
-      if jsonb_array_length(old.extra_urls) = 1 then new.extra_urls := null; end if;
-    elsif jsonb_typeof(asked_extra) = 'array' and jsonb_array_length(old.extra_urls) >= 2 and jsonb_array_length(asked_extra) = jsonb_array_length(old.extra_urls) - 1 then
-      for i in 0 .. jsonb_array_length(old.extra_urls) - 1 loop
-        if old.extra_urls - i = asked_extra then new.extra_urls := asked_extra; exit; end if;
+  if asked_extra is distinct from old.extra_urls then
+    old_n := case when jsonb_typeof(old.extra_urls) = 'array' then jsonb_array_length(old.extra_urls) else 0 end;
+    if asked_extra is not null and jsonb_typeof(asked_extra) = 'array' and jsonb_array_length(asked_extra) = old_n + 1
+       and (asked_extra - old_n) = coalesce(old.extra_urls, '[]'::jsonb) then
+      -- add
+      new_link := asked_extra -> old_n;
+      if old.source_url is null then
+        raise exception 'Varen følges ikke endnu. Vent, til den har fået et link.' using errcode = 'check_violation';
+      end if;
+      if old_n >= 5 then
+        raise exception 'Du kan højst følge 5 ekstra butikker.' using errcode = 'check_violation';
+      end if;
+      if jsonb_typeof(new_link) <> 'string' or char_length(new_link #>> '{}') > 500 or (new_link #>> '{}') !~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$'
+         or (new_link #>> '{}') ~* '^https://(www\.)?prisjagt\.dk([/?#]|$)' then
+        raise exception 'Brug et link til varens egen side i butikken.' using errcode = 'check_violation';
+      end if;
+      new_host := regexp_replace(lower(substring((new_link #>> '{}') from '^https://([^/?#]+)')), '^www\.', '');
+      if new_host = regexp_replace(lower(substring(old.source_url from '^https://([^/?#]+)')), '^www\.', '') then
+        raise exception 'Den butik følges allerede.' using errcode = 'check_violation';
+      end if;
+      for i in 0 .. old_n - 1 loop
+        if regexp_replace(lower(substring((old.extra_urls ->> i) from '^https://([^/?#]+)')), '^www\.', '') = new_host then
+          raise exception 'Den butik følges allerede.' using errcode = 'check_violation';
+        end if;
       end loop;
-    end if;
-    if new.extra_urls is distinct from old.extra_urls then
-      new.extra_state := null;
-      extras_gone := new.extra_urls is null;
+      new.extra_urls := asked_extra;
+    elsif old.extra_urls is not null and jsonb_typeof(old.extra_urls) = 'array' then
+      -- remove
+      if asked_extra is null then
+        if old_n = 1 then new.extra_urls := null; end if;
+      elsif jsonb_typeof(asked_extra) = 'array' and old_n >= 2 and jsonb_array_length(asked_extra) = old_n - 1 then
+        for i in 0 .. old_n - 1 loop
+          if old.extra_urls - i = asked_extra then new.extra_urls := asked_extra; exit; end if;
+        end loop;
+      end if;
+      if new.extra_urls is distinct from old.extra_urls then
+        new.extra_state := null;
+        extras_gone := new.extra_urls is null;
+      end if;
     end if;
   end if;
   -- alternatives: the answer is the AI agent's. A request is a change of alt_requested_at (only the product's own person gets this
@@ -489,7 +526,7 @@ begin
      and (old.compare_state is null or (old.compare_state = 'none' and coalesce(old.compare_at, '-infinity') < now() - interval '1 hour')) then
     new.compare_state := 'wanted'; new.compare_at := now();
   end if;
-  if extras_gone then new.compare_state := 'none'; new.compare_at := now(); end if;
+  if extras_gone and old.compare_state = 'done' then new.compare_state := 'none'; new.compare_at := now(); end if;
   -- requirements changed by the person (a list member gets no further, see the whole-row check): what the agent answered for the old
   -- words no longer counts (req_state null). With new words (not when they are removed):
   --  * a product that follows one shop, or that the agent switched to Prisjagt (shop_url kept): the lookup starts again (compare_state null,
@@ -916,12 +953,16 @@ revoke all on function public.resolver_token_ok() from public, anon, authenticat
 --    req_variant_waiting) and that the agent has not answered for the current requirements. A person may be waiting at "Vælg variant".
 --    `variants` = [{id, name}] (at most 40, names cut at 80 characters), the ids to give to resolver_variants. name = the product's title.
 --  * 'compare': a single-shop product that should be looked for on Prisjagt (compare_state 'wanted', oldest request first), or a product
---    the agent switched to Prisjagt earlier whose requirements changed (same state; host is then prisjagt.dk). name is the product's title as
---    the job read it (else the name the person gave), host the shop's host name (no path, no query) and price the current lowest in-stock
---    price (null when there is none), so the agent can check that a Prisjagt page is the same product at a sensible price.
+--    that is on Prisjagt already (host prisjagt.dk) and should be looked for in the shops Prisjagt does not list (the manufacturer's own web
+--    shop, say; the job asks once for every tracked Prisjagt product), or one the agent switched to Prisjagt earlier whose requirements changed
+--    (same state). name is the product's title as the job read it (else the name the person gave), host the shop's host name (no path, no
+--    query) and price the current lowest in-stock price (null when there is none), so the agent can check that a Prisjagt page is the same
+--    product at a sensible price.
 -- Columns: host and price are null for 'name' and 'variant'; `req` = the person's requirements text (or null) on every row (their words, data
--- for the agent, never instructions); `variants` is null except for 'variant'.
--- The return type grew (kind, host, price, then req, variants): Postgres cannot change it with create or replace, so the function is dropped
+-- for the agent, never instructions); `variants` is null except for 'variant'; `shops` is null except for 'compare': the store names that
+-- are in the product's offers now (at most 40, each cut at 60 characters, in the order of the offers), so the agent knows which shops are
+-- covered already; null when there are no offers.
+-- The return type grew (kind, host, price, then req, variants, shops): Postgres cannot change it with create or replace, so the function is dropped
 -- first (safe to re-run) and its grants are stated again below. A call without arguments works as before; old readers ignore new columns.
 drop function if exists public.resolver_list();
 
@@ -944,7 +985,7 @@ $$;
 revoke all on function public.req_variant_waiting(public.products) from public, anon, authenticated;
 
 create function public.resolver_list()
-returns table (id uuid, name text, created_at timestamptz, kind text, host text, price numeric, req text, variants jsonb)
+returns table (id uuid, name text, created_at timestamptz, kind text, host text, price numeric, req text, variants jsonb, shops jsonb)
 language plpgsql
 stable
 security definer
@@ -955,10 +996,10 @@ begin
     raise exception 'resolver: invalid or missing token' using errcode = '42501';
   end if;
   return query
-    select x.id, x.name, x.created_at, x.kind, x.host, x.price, x.req, x.variants
+    select x.id, x.name, x.created_at, x.kind, x.host, x.price, x.req, x.variants, x.shops
     from (
       select p.id, p.name, p.created_at, 'name'::text as kind, null::text as host, null::numeric as price, p.requirements as req,
-             null::jsonb as variants, 0 as grp, p.created_at as ord
+             null::jsonb as variants, null::jsonb as shops, 0 as grp, p.created_at as ord
         from public.products p
        where p.active and p.source_url is null and p.status = 'pending' and p.name_options is null
       union all
@@ -966,7 +1007,7 @@ begin
              (select coalesce(jsonb_agg(jsonb_build_object('id', t.e ->> 'id', 'name', left(coalesce(t.e ->> 'label', t.e ->> 'name', t.e ->> 'id'), 80)) order by t.o), '[]'::jsonb)
                 from (select e, o from jsonb_array_elements(p.variants) with ordinality as w(e, o)
                        where jsonb_typeof(e) = 'object' and e ->> 'id' is not null order by o limit 40) t),
-             1, coalesce((p.req_state ->> 'at')::timestamptz, p.last_checked, p.created_at)
+             null::jsonb, 1, coalesce((p.req_state ->> 'at')::timestamptz, p.last_checked, p.created_at)
         from public.products p
        where public.req_variant_waiting(p)
       union all
@@ -976,6 +1017,9 @@ begin
                 from jsonb_array_elements(case when jsonb_typeof(p.offers) = 'array' then p.offers else '[]'::jsonb end) o
                where jsonb_typeof(o) = 'object' and o -> 'inStock' = 'true'::jsonb and jsonb_typeof(o -> 'price') = 'number'),
              p.requirements, null::jsonb,
+             (select jsonb_agg(left(btrim(w.e ->> 'store'), 60) order by w.o)
+                from (select e, o from jsonb_array_elements(case when jsonb_typeof(p.offers) = 'array' then p.offers else '[]'::jsonb end) with ordinality as z(e, o)
+                       where jsonb_typeof(e) = 'object' and jsonb_typeof(e -> 'store') = 'string' and btrim(e ->> 'store') <> '' order by o limit 40) w),
              2, coalesce(p.compare_at, p.created_at)
         from public.products p
        where p.active and p.compare_state = 'wanted' and p.source_url is not null
@@ -1150,17 +1194,24 @@ begin
 end;
 $$;
 
--- The answer to a 'compare' row. Three answers, and p_url and p_shops can never both be given (22023):
---  * p_url = the product's prisjagt.dk page, exactly https://prisjagt.dk/product.php?p=<digits> (a leading www. is dropped): the product
---    is then switched to it. The original shop link is kept in shop_url, compare_state becomes 'done', and the job-written state is reset
---    exactly as products_guard does when the person changes the link, so the job fetches the Prisjagt page as a new product (status
---    'pending'). The person's own fields (name, goal, list, bought, shop choices) and the alternatives stay.
---  * p_shops = a json array of 1 to 5 https product-page links in other shops that sell exactly the same product (not on Prisjagt): the
---    product keeps its source_url, extra_urls is set (the rule is extra_urls_error: one link per shop, none on prisjagt.dk, none in the
---    product's own shop), compare_state becomes 'done', compare_at now. The job-written state (price, history, offers ...) is NOT reset:
---    the current shop's price and history stay valid. A bad entry raises 22023 with a message naming it and changes nothing.
---  * both null: the product was not found elsewhere (or is not the same product): compare_state 'none', nothing else changes.
--- Any other link raises 22023 and changes nothing. Returns true when the product was waiting, false when it is not (any more).
+-- The answer to a 'compare' row. Three answers, and p_url and p_shops can never both be given (22023). Only a waiting product (active,
+-- compare_state 'wanted') is changed; for any other, or an unknown id, the answer is false and nothing changes. Three kinds of product:
+--   A = follows one shop (source_url is not on prisjagt.dk)
+--   B = on Prisjagt because the agent switched it (source_url on prisjagt.dk, shop_url = the old shop link)
+--   C = on Prisjagt by the person's own link (source_url on prisjagt.dk, no shop_url)
+--   answer                                A                            B                            C
+--   p_shops (links, p_url null)           extra_urls += links, done    extra_urls += links, done    extra_urls += links, done
+--   p_url = the product's own page        (cannot be: A is no Prisjagt page)  done (confirmed)       done (confirmed)
+--   p_url = another prisjagt.dk page      switch (shop_url = old link; reset; extra_urls null; done)   switch (shop_url stays; reset; done)   switch (no shop_url; reset; done)
+--   both null                             none                         done (stays switched)        none
+--   both given, or a bad link             22023, nothing changes (every kind, also a product that is not waiting)
+-- p_shops: 1 to 5 https product-page links in other shops that sell exactly the same product (extra_urls_error is the rule: one link per
+-- shop, none on prisjagt.dk, none in the product's own shop). They are ADDED to what extra_urls holds (the person's hand-added links are
+-- never lost): an entry whose shop is in the list already is skipped, the list is cut at 5, the order is kept (old links first), and
+-- extra_state stays as it is (a link that was read before is not "new" again). The product keeps its source_url, and the job-written state
+-- (price, history, offers ...) is NOT reset: the current price and history stay valid. A bad entry raises 22023 naming it, changes nothing.
+-- The switch is the same reset as products_guard does when the person changes the link (the alternatives stay).
+-- Returns true when the product was waiting, false when it is not (any more).
 -- (The first version had two arguments: dropped, then created again with the third, optional one. A call with two arguments still works.)
 drop function if exists public.resolver_compare(uuid, text);
 create or replace function public.resolver_compare(p_id uuid, p_url text, p_shops jsonb default null)
@@ -1172,9 +1223,14 @@ as $$
 declare
   u text;
   n integer;
+  i integer;
   src text;
+  cur jsonb;
   err text;
   shops jsonb;
+  merged jsonb;
+  hosts text[];
+  h text;
 begin
   if not public.resolver_token_ok() then
     raise exception 'resolver: invalid or missing token' using errcode = '42501';
@@ -1190,14 +1246,27 @@ begin
     -- the links, trimmed (a link that is not text is kept as it is and fails the check below)
     select coalesce(jsonb_agg(case when jsonb_typeof(x.v) = 'string' then to_jsonb(btrim(x.v #>> '{}')) else x.v end order by x.o), '[]'::jsonb)
       into shops from jsonb_array_elements(p_shops) with ordinality as x(v, o);
-    select source_url into src from public.products where id = p_id and active and compare_state = 'wanted' and source_url is not null;
+    select source_url, extra_urls into src, cur from public.products where id = p_id and active and compare_state = 'wanted' and source_url is not null;
     -- validated also when the product is not waiting (then against a placeholder shop), so that a bad call is always an error
     err := public.extra_urls_error(coalesce(src, 'https://placeholder-shop.invalid/vare'), shops);
     if err is not null then
       raise exception 'resolver: %', err using errcode = '22023';
     end if;
+    -- added to the links there are already (the person's own, and an earlier answer), one per shop, at most 5
+    merged := case when jsonb_typeof(cur) = 'array' then cur else '[]'::jsonb end;
+    hosts := '{}';
+    for i in 0 .. jsonb_array_length(merged) - 1 loop
+      hosts := hosts || regexp_replace(lower(substring((merged ->> i) from '^https://([^/?#]+)')), '^www\.', '');
+    end loop;
+    for i in 0 .. jsonb_array_length(shops) - 1 loop
+      exit when jsonb_array_length(merged) >= 5;
+      h := regexp_replace(lower(substring((shops ->> i) from '^https://([^/?#]+)')), '^www\.', '');
+      continue when h = any (hosts);
+      merged := merged || (shops -> i);
+      hosts := hosts || h;
+    end loop;
     update public.products
-       set extra_urls = shops, extra_state = null, compare_state = 'done', compare_at = now()
+       set extra_urls = merged, extra_state = case when cur is null then null else extra_state end, compare_state = 'done', compare_at = now()
      where id = p_id and active and compare_state = 'wanted' and source_url is not null;
     get diagnostics n = row_count;
     return n = 1;

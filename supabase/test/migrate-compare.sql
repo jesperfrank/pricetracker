@@ -50,7 +50,7 @@ select t.chk('migrated twice: the three columns, the two checks, exactly one res
   and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_compare_state_check')
   and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_shop_url_check')
   and (select count(*) = 1 from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace)
-  and (select proargnames = array['id', 'name', 'created_at', 'kind', 'host', 'price', 'req', 'variants'] from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace)
+  and (select proargnames = array['id', 'name', 'created_at', 'kind', 'host', 'price', 'req', 'variants', 'shops'] from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace)
   and (select count(*) = 1 from pg_proc where proname = 'resolver_compare' and pronamespace = 'public'::regnamespace));
 select t.chk('migrated twice: grants are as they were (anon and authenticated may execute, public may not), the secret token is kept',
   has_function_privilege('anon', 'public.resolver_list()', 'execute') and has_function_privilege('authenticated', 'public.resolver_list()', 'execute')

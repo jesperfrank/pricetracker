@@ -2344,7 +2344,8 @@ test('extras: the links the job will fetch (guard, https, own shop, duplicates, 
   assert.strictEqual(X.links(row(['https://a1.dk/x', 'https://a2.dk/x', 'https://a3.dk/x', 'https://a4.dk/x', 'https://a5.dk/x', 'https://a6.dk/x'])).length, 5);
   assert.deepStrictEqual(X.links({ source_url: EX_MAIN }), [], 'a database without the column');
   assert.deepStrictEqual(X.links(row(null)), []); assert.deepStrictEqual(X.links(row('x')), []); assert.deepStrictEqual(X.links(row({ a: 1 })), []);
-  assert.deepStrictEqual(X.links(row([EX_A], { source_url: 'https://prisjagt.dk/product.php?p=1' })), [], 'never for a prisjagt product');
+  assert.deepStrictEqual(X.links(row([EX_A, 'https://www.prisjagt.dk/product.php?p=1', 'https://prisjagt.dk/x'], { source_url: 'https://prisjagt.dk/product.php?p=1' })), [EX_A], 'a prisjagt product has extras too (never a prisjagt link)');
+  assert.deepStrictEqual(X.links({ source_url: null, extra_urls: [EX_A] }), []);
 });
 
 test('extras: the outlier rule (below 40 % or above 250 % of the median of the other shops, at least two others) and the rotation order', () => {
@@ -2647,6 +2648,266 @@ test('compare markings can never loop: at most 3 automatic markings per product 
     }
     assert.strictEqual(markings, expected, why); assert(db.products[0].compare_tries <= 3, why);
   }
+});
+
+// ---------------------------------------------------------------- extra shops for products on Prisjagt
+
+const PJ_ROBO = urlOf('roborock'), SAROS_V = '16566539';
+const MFR = 'https://www.roborock.com/dk/saros-10r', ELG = 'https://www.elgiganten.dk/product/saros';
+// a Prisjagt product that is tracked (colour Black); the lowest in-stock price of the saved page is 5298, raised by 202 to 5500 by saros()
+function pjProduct(id, extra) {
+  return product(id, 'u1', 'roborock', Object.assign({ name: 'Saros ' + id, status: 'tracking', tracked_variants: [SAROS_V], target_type: 'price', target_value: 4100, extra_urls: null, extra_state: null, image_url: null }, extra || {}));
+}
+const saros = (add) => pageFor('roborock', (r) => r.price + (add === undefined ? 202 : add));
+function pjCtx(db, pjPage, map, extra) {
+  const calls = [];
+  const ctx = ctxFor(db, {}, Object.assign({ calls, getPage: async (url) => {
+    ctx.fetched.push(url);
+    if (new URL(url).hostname === 'prisjagt.dk') { if (pjPage instanceof Error) throw pjPage; return typeof pjPage === 'function' ? pjPage() : pjPage; }
+    return fetchShop(url, map, calls);
+  } }, extra || {}));
+  return ctx;
+}
+const pjRun = (db, page, map, iso, extra) => R.run(pjCtx(db, page, map, Object.assign({ now: at(iso) }, extra || {})));
+const H10 = '2026-11-16T10:00:00Z', H11 = '2026-11-16T11:00:00Z', H12 = '2026-11-16T12:00:00Z', H13 = '2026-11-16T13:00:00Z';
+const lastPrice = (p) => p.history[p.history.length - 1].p;
+
+test('prisjagt extras: dedupe by link host (when the offer links to the shop itself), by equal shop name, by the host\'s own name; never by a similar name', () => {
+  const X = require('./lib/extras');
+  const rows = [{ store: 'Elgiganten', url: 'https://prisjagt.dk/go-to-shop/1/offer/2' }, { store: 'Power', url: 'https://prisjagt.dk/go-to-shop/3/offer/4' }, { store: 'Coolshop Outlet', url: 'https://prisjagt.dk/go-to-shop/5/offer/6' }, { store: 'Dyson DK', url: 'https://www.dyson.dk/vare/1' }];
+  assert.strictEqual(X.covered(rows, { url: 'https://www.elgiganten.dk/p/1', store: 'Elgiganten' }), true, 'same name');
+  assert.strictEqual(X.covered(rows, { url: 'https://www.elgiganten.dk/p/1', store: 'Elgiganten Danmark' }), true, 'the host\'s own name equals the shop name');
+  assert.strictEqual(X.covered(rows, { url: 'https://www.power.dk/p/1', store: 'POWER.dk' }), true, 'case and .dk do not matter');
+  assert.strictEqual(X.covered(rows, { url: 'https://shop.dyson.dk/anden', store: 'Dyson Webshop' }), true, 'a direct link of the offer has the same registrable domain');
+  assert.strictEqual(X.covered(rows, { url: 'https://www.coolshop.dk/p/1', store: 'Coolshop' }), false, 'a similar name is another shop');
+  assert.strictEqual(X.covered(rows, { url: 'https://www.roborock.com/dk/x', store: 'Roborock' }), false);
+  assert.strictEqual(X.covered([], { url: 'https://www.roborock.com/dk/x', store: 'Roborock' }), false); assert.strictEqual(X.covered(null, { url: 'https://a.dk/x', store: 'A' }), false);
+  assert.strictEqual(X.covered([{ store: '', url: null }], { url: 'https://a.dk/x', store: '' }), false, 'no name, no match');
+});
+
+test('prisjagt extras, the live scenario: Prisjagt 5.500, the manufacturer 4.050 added by hand: it is the price, first in the list, silent once, mails at 3.900, an outlier is dropped', async () => {
+  const db = newDb();
+  db.products.push(pjProduct('S1'));
+  db.profiles.push(dprofile({ mail_digest: false }));
+  // run 0: no extras, as before (price 5500, no hit under the goal 4100)
+  let ctx = pjCtx(db, saros(), {}, { now: at(H10) }); let res = await R.run(ctx);
+  const S = () => db.products[0];
+  assert.deepStrictEqual(ctx.fetched, [PJ_ROBO]); assert.strictEqual(S().status, 'tracking'); assert.strictEqual(lastPrice(S()), 5500); assert.strictEqual(db.sent.length, 0);
+  assert.strictEqual(S().offers[0].price, 5500); assert(S().extra_state === null, 'nothing to remember: the state stays null');
+  // the person adds the manufacturer's page (the guard only appends the link: state and compare_state stay)
+  S().extra_urls = [MFR]; db.profiles[0].mail_digest = true;
+  const map = { [MFR]: xHtml('Roborock Danmark', 4050, true, 'https://cdn.example.dk/m.jpg') };
+  ctx = pjCtx(db, saros(), map, { now: at(H11) }); res = await R.run(ctx);
+  assert.deepStrictEqual(ctx.fetched, [PJ_ROBO, MFR], 'the Prisjagt page, then the extra page, once each');
+  assert.strictEqual(lastPrice(S()), 4050, 'the lowest in-stock price of all shops is the price of the product');
+  assert.deepStrictEqual(S().offers[0], { store: 'Roborock Danmark', price: 4050, url: MFR, inStock: true, note: null, variant: SAROS_V }, 'the shop list shows it first');
+  assert.strictEqual(S().offers.length, 14, '13 Prisjagt offers of the colour plus the manufacturer');
+  assert.strictEqual(S().offers.filter((o) => o.url === MFR).length, 1);
+  assert.strictEqual(S().status, 'tracking'); assert.strictEqual(S().check_note, null);
+  assert.strictEqual(res.stats.hits, 0, 'silent: the cheapest price is from a shop read for the first time'); assert.strictEqual(S().notified_price, 4050, 'but the hit is remembered');
+  assert.deepStrictEqual(Object.keys(S().extra_state), [MFR]); assert(S().extra_state[MFR].seen === true && S().extra_state[MFR].fails === 0 && S().extra_state[MFR].why === undefined);
+  assert.deepStrictEqual(S().extra_state[MFR].offer, { store: 'Roborock Danmark', price: 4050, inStock: true, note: null, at: H11 });
+  assert.strictEqual(S().variants.length, 2, 'the Prisjagt variants are as the page gave them'); assert.strictEqual(S().variants.find((v) => v.id === SAROS_V).lowest, 5500);
+  // no deal mail; the product still is a hit and in the daily overview (the only mail is the overview)
+  assert.strictEqual(db.sent.length, 1, 'only the daily overview'); assert(/tilbud/.test(db.sent[0].subject) && db.sent[0].text.includes('4.050 kr.') && db.sent[0].text.includes('Roborock Danmark'), db.sent[0].text);
+  const D = require('./lib/digest'); const ov = D.overview([S()], at(H11)());
+  assert.strictEqual(ov.hits.length, 1); assert.strictEqual(ov.hits[0].price, 4050); assert.strictEqual(ov.hits[0].store, 'Roborock Danmark');
+  // a later run at the same price: nothing new
+  res = await pjRun(db, saros(), map, H12); assert.strictEqual(res.stats.hits, 0); assert.strictEqual(db.sent.length, 1);
+  // a further drop to 3.900 mails
+  map[MFR] = xHtml('Roborock Danmark', 3900, true);
+  res = await pjRun(db, saros(), map, H13); assert.strictEqual(res.stats.hits, 1); assert.strictEqual(db.sent.length, 2);
+  assert(db.sent[1].text.includes('3.900 kr.') && db.sent[1].text.includes('Roborock Danmark'), db.sent[1].text); assert.strictEqual(S().notified_price, 3900); assert.strictEqual(lastPrice(S()), 3900);
+  // an outlier: 1.000 kr. is another product (an accessory); dropped with the state "outlier", the price stays what the shops say
+  const db2 = newDb(); db2.products.push(pjProduct('S2', { extra_urls: [MFR] }));
+  res = await pjRun(db2, saros(), { [MFR]: xHtml('Roborock Danmark', 1000, true) }, H10);
+  const S2 = db2.products[0];
+  assert.strictEqual(lastPrice(S2), 5500); assert(!S2.offers.some((o) => o.url === MFR)); assert.strictEqual(res.stats.extraDropped, 1); assert.strictEqual(res.stats.hits, 0);
+  assert.deepStrictEqual([S2.extra_state[MFR].why, S2.extra_state[MFR].seen, S2.extra_state[MFR].fails], ['outlier', false, 1]); assert.strictEqual(S2.extra_state[MFR].offer, undefined);
+  // 26 % under the cheapest Prisjagt shop passes (the live case), 60 % under does not (the limit is 40 % of the median)
+  const db3 = newDb(); db3.products.push(pjProduct('S3', { extra_urls: [MFR] }));
+  await pjRun(db3, saros(), { [MFR]: xHtml('Roborock Danmark', 4050, true) }, H10); assert.strictEqual(lastPrice(db3.products[0]), 4050);
+  const db4 = newDb(); db4.products.push(pjProduct('S4', { extra_urls: [MFR] }));
+  await pjRun(db4, saros(), { [MFR]: xHtml('Roborock Danmark', 2100, true) }, H10); assert.strictEqual(lastPrice(db4.products[0]), 5500, 'median 5.3xx: 40 % is about 2.1xx');
+});
+
+test('prisjagt extras: a shop that Prisjagt lists already is dropped in favour of the Prisjagt row, whatever its price (state "dup"); a similar name stays', async () => {
+  const db = newDb(); db.products.push(pjProduct('D1', { extra_urls: [ELG, 'https://www.coolshop.dk/p/1'] }));
+  const names = saros().rows.map((r) => r.store);
+  assert(names.includes('Elgiganten') && !names.includes('Coolshop'));
+  const res = await pjRun(db, saros(), { [ELG]: xHtml('Elgiganten', 4900, true), 'https://www.coolshop.dk/p/1': xHtml('Coolshop', 5400, true) }, H10);
+  const D1 = db.products[0];
+  assert(!D1.offers.some((o) => o.url === ELG), 'the extra Elgiganten row is gone'); assert(D1.offers.some((o) => o.store === 'Elgiganten' && o.url.indexOf('prisjagt.dk/go-to-shop') !== -1), 'the Prisjagt row stays');
+  assert(D1.offers.some((o) => o.url === 'https://www.coolshop.dk/p/1'), 'another shop stays'); assert.strictEqual(lastPrice(D1), 5400, 'the Prisjagt price of Elgiganten (5.500 and up) stays, the other shop at 5.400 is the lowest');
+  assert.deepStrictEqual([D1.extra_state[ELG].why, D1.extra_state[ELG].fails, D1.extra_state[ELG].seen], ['dup', 0, false]); assert.strictEqual(D1.extra_state['https://www.coolshop.dk/p/1'].why, undefined);
+  assert.strictEqual(res.stats.hits, 0);
+  // a shop whose store name is not Prisjagt's but whose address is: the host's own name decides
+  const db2 = newDb(); db2.products.push(pjProduct('D2', { extra_urls: [ELG] }));
+  await pjRun(db2, saros(), { [ELG]: xHtml('Giganten Online', 4900, true) }, H10); assert(!db2.products[0].offers.some((o) => o.url === ELG), 'elgiganten.dk is the shop Elgiganten');
+});
+
+test('prisjagt extras: no extras before a variant is chosen, in the first fetch, or when the chosen variant is gone; Prisjagt failing changes nothing because of extras', async () => {
+  const mapAll = { [MFR]: xHtml('Roborock Danmark', 4050, true) };
+  // choose (nothing chosen), pending (first fetch)
+  for (const extra of [{ status: 'choose', tracked_variants: null, variants: [{ id: SAROS_V }, { id: 'x' }] }, { status: 'pending' }]) {
+    const db = newDb(); db.products.push(pjProduct('C1', Object.assign({ extra_urls: [MFR] }, extra)));
+    const ctx = pjCtx(db, saros(), mapAll, { now: at(H10) }); await R.run(ctx);
+    assert.deepStrictEqual(ctx.fetched, extra.status === 'choose' ? [] : [PJ_ROBO], 'nothing but Prisjagt, and nothing at all at "choose": ' + extra.status); assert(db.products[0].extra_state === null);
+  }
+  // a variant just chosen by the person (status is still "choose" until the job has looked): the first tracking check reads the extras
+  const dbc = newDb(); dbc.products.push(pjProduct('C3', { status: 'choose', extra_urls: [MFR] }));
+  const cc = pjCtx(dbc, saros(), mapAll, { now: at(H10) }); await R.run(cc); assert.deepStrictEqual(cc.fetched, [PJ_ROBO, MFR]); assert.strictEqual(dbc.products[0].status, 'tracking');
+  // a chosen variant that is not on the page any more: back to "choose", the extra page is not read
+  const dbg = newDb(); dbg.products.push(pjProduct('C2', { extra_urls: [MFR], tracked_variants: ['gone'] }));
+  const cg = pjCtx(dbg, saros(), mapAll, { now: at(H10) }); await R.run(cg);
+  assert.deepStrictEqual(cg.fetched, [PJ_ROBO]); assert.strictEqual(dbg.products[0].status, 'choose');
+  // Prisjagt fails: the check note as today, the extras are not read, the state and the price are not touched
+  for (const err of [new PJ.PageError('blocked', 'HTTP 403'), new PJ.PageError('network', 'HTTP 500'), new PJ.PageError('layout', 'x')]) {
+    const db = newDb();
+    db.products.push(pjProduct('F1', { extra_urls: [MFR], offers: [{ store: 'Elgiganten', price: 5500, url: 'https://prisjagt.dk/go-to-shop/1/offer/1', inStock: true, note: null, variant: SAROS_V }], history: [{ d: '2026-11-15', p: 5500, s: 'Elgiganten', src: 'check' }],
+      last_checked: '2026-11-16T08:00:00Z', extra_state: { [MFR]: { seen: true, fails: 0, at: '2026-11-16T08:00:00Z', offer: { store: 'Roborock Danmark', price: 4050, inStock: true, note: null, at: '2026-11-16T08:00:00Z' } } } }));
+    const before = JSON.stringify(db.products[0]);
+    const ctx = pjCtx(db, err, mapAll, { now: at(H10) }); const res = await R.run(ctx);
+    const P1 = db.products[0];
+    assert.deepStrictEqual(ctx.fetched, [PJ_ROBO], err.kind); assert.strictEqual(P1.status, 'tracking'); assert(/Prisjagt|Siden/.test(P1.check_note), P1.check_note);
+    assert.strictEqual(JSON.stringify(Object.assign({}, P1, { check_note: null })), JSON.stringify(Object.assign(JSON.parse(before), { check_note: null })), 'nothing but the note changed: ' + err.kind);
+    assert.strictEqual(res.stats.hits, 0); assert.strictEqual(res.stats.extraPages, 0);
+  }
+});
+
+test('prisjagt extras: an unreadable extra shop keeps its offer for 24 hours (stale), then goes; the states say why a link does not contribute', async () => {
+  const db = newDb(); db.products.push(pjProduct('T1', { extra_urls: [MFR, ELG, 'https://www.nyt.dk/p', 'https://www.tom.dk/p'], target_value: 1 }));
+  const NYT = 'https://www.nyt.dk/p', TOM = 'https://www.tom.dk/p';
+  const ok = { [MFR]: xHtml('Roborock Danmark', 4050, true), [NYT]: xHtml('Nyt', 5400, true), [TOM]: xHtml('Tom', 5400, true), [ELG]: xHtml('Elgiganten', 5000, true) };
+  await pjRun(db, saros(), ok, H10);
+  const T = () => db.products[0];
+  assert.strictEqual(lastPrice(T()), 4050);
+  assert.deepStrictEqual(Object.keys(T().extra_state).sort(), [ELG, MFR, NYT, TOM].sort()); assert.strictEqual(T().extra_state[ELG].why, 'dup');
+  // the manufacturer refuses (403): its last offer, two hours old, stands in, no marker yet; Nyt has no price, Tom is gone; the others are read
+  const bad = Object.assign({}, ok, { [MFR]: () => resp(403, 'Forbidden'), [NYT]: shopHtml('shop-noprice'), [TOM]: () => resp(404, '') });
+  const res = await pjRun(db, saros(), bad, H12);
+  let m = T().offers.find((o) => o.url === MFR); assert(m && m.price === 4050 && m.readAt === H10 && m.note === null); assert.strictEqual(lastPrice(T()), 4050);
+  assert.strictEqual(T().extra_state[MFR].why, undefined, 'a stale offer contributes: no state'); assert.strictEqual(T().extra_state[NYT].why, 'noprice'); assert.strictEqual(T().extra_state[TOM].why, 'err');
+  assert.strictEqual(T().extra_state[MFR].offer.at, H10, 'the time it was read is kept'); assert.strictEqual(T().extra_state[NYT].fails, 1); assert(!T().offers.some((o) => o.url === NYT || o.url === TOM));
+  assert.strictEqual(res.stats.extraFail, 3);
+  // 7 hours later: the marker; a day and an hour later: gone, and the price is Prisjagt's again
+  await pjRun(db, saros(), bad, '2026-11-16T17:00:00Z'); m = T().offers.find((o) => o.url === MFR); assert.strictEqual(m.note, 'pris fra tidligere i dag');
+  await pjRun(db, saros(), bad, '2026-11-17T11:00:00Z'); assert(!T().offers.some((o) => o.url === MFR), 'older than 24 hours'); assert.strictEqual(lastPrice(T()), 5500, 'Nyt and Tom are gone, so is the manufacturer: Prisjagt\'s own lowest price'); assert(!T().extra_state[MFR].offer, 'its offer is forgotten');
+  assert.strictEqual(T().extra_state[MFR].why, 'err');
+  // read again: the state is clean and it is not new any more (seen), so a lower price than before mails
+  await pjRun(db, saros(), ok, '2026-11-17T12:00:00Z'); assert.strictEqual(T().extra_state[MFR].why, undefined); assert.strictEqual(T().extra_state[MFR].fails, 0); assert.strictEqual(lastPrice(T()), 4050);
+});
+
+test('prisjagt extras: politeness, caps and refusals are the same as for single-shop products (30 pages a run, longest-untried first, a refusing host once, pauses)', async () => {
+  const db = newDb(), map = {};
+  for (let i = 0; i < 32; i++) { const u = 'https://www.extra' + i + '.dk/v'; map[u] = xHtml('Extra ' + i, 5000, true); db.products.push(pjProduct('Q' + i, { extra_urls: [u], target_value: 1 })); }
+  let ctx = pjCtx(db, saros(), map, { now: at(H10) }); let res = await R.run(ctx);
+  assert.strictEqual(res.stats.extraPages, 30); assert.strictEqual(ctx.fetched.filter((u) => /extra\d+/.test(u)).length, 30); assert.strictEqual(ctx.fetched.filter((u) => u === PJ_ROBO).length, 1, 'the Prisjagt page once for all');
+  const waited = db.products.filter((p) => !p.extra_state);
+  assert.strictEqual(waited.length, 2);
+  ctx = pjCtx(db, saros(), map, { now: at(H11) }); await R.run(ctx);
+  waited.forEach((p) => assert(ctx.fetched.includes(p.extra_urls[0]) && p.extra_state, 'the ones that waited go first'));
+  // a host that refuses: the second link on that host is not asked
+  const d2 = newDb(); d2.products.push(pjProduct('R1', { extra_urls: ['https://www.slem.dk/a'] }), pjProduct('R2', { extra_urls: ['https://shop.slem.dk/b'], name: 'R2' }));
+  const c2 = pjCtx(d2, saros(), { 'https://www.slem.dk/a': () => resp(429, 'x') }, { now: at(H10) }); const r2 = await R.run(c2);
+  assert.deepStrictEqual(r2.stats.blockedHosts, ['slem.dk']); assert.deepStrictEqual(c2.fetched, [PJ_ROBO, 'https://www.slem.dk/a'], 'the other link on that host is left alone');
+  assert.strictEqual(d2.products[0].status, 'tracking'); assert.strictEqual(d2.products[0].extra_state['https://www.slem.dk/a'].why, 'err');
+  // a database without the columns: nothing is read, nothing is written; extra_urls without extra_state: read, state not written
+  const d3 = newDb(); d3.products.push(pjProduct('N1', { extra_urls: [MFR] })); delete d3.products[0].extra_urls; delete d3.products[0].extra_state;
+  const c3 = pjCtx(d3, saros(), { [MFR]: xHtml('Roborock Danmark', 4050, true) }, { now: at(H10) }); await R.run(c3);
+  assert.deepStrictEqual(c3.fetched, [PJ_ROBO]); assert(!('extra_state' in d3.products[0]) && !('extra_urls' in d3.products[0]));
+  const d4 = newDb(); d4.products.push(pjProduct('N2', { extra_urls: [MFR] })); delete d4.products[0].extra_state;
+  await pjRun(d4, saros(), { [MFR]: xHtml('Roborock Danmark', 4050, true) }, H10); assert.strictEqual(lastPrice(d4.products[0]), 4050); assert(!('extra_state' in d4.products[0]));
+});
+
+test('prisjagt extras: the first check is silent only when the cheapest price is from a shop read for the first time; a second extra shop that is not the cheapest changes nothing', async () => {
+  const db = newDb(); db.products.push(pjProduct('Z1', { extra_urls: [MFR], extra_state: { [MFR]: { seen: true, fails: 0, at: H10 } }, notified_price: 5500, notified_at: '2026-11-10T10:00:00Z' }));
+  const res = await pjRun(db, saros(), { [MFR]: xHtml('Roborock Danmark', 4050, true) }, H11);
+  assert.strictEqual(res.stats.hits, 1, 'a shop that was read before: a further drop is a deal'); assert.strictEqual(db.sent.length, 1);
+  // a new shop that is not the cheapest: the cheapest (an old shop) may still mail
+  const d2 = newDb(); d2.products.push(pjProduct('Z2', { extra_urls: [MFR, 'https://www.ny.dk/p'], extra_state: { [MFR]: { seen: true, fails: 0, at: H10 } } }));
+  const r2 = await pjRun(d2, saros(), { [MFR]: xHtml('Roborock Danmark', 4050, true), 'https://www.ny.dk/p': xHtml('Ny', 4900, true) }, H11);
+  assert.strictEqual(r2.stats.hits, 1); assert.deepStrictEqual([d2.products[0].extra_state['https://www.ny.dk/p'].seen, d2.products[0].extra_state[MFR].seen], [true, true]);
+});
+
+// ---- the automatic marking for Prisjagt products (rule 5 in job/run.js)
+
+test("prisjagt extras: autoCompare marks a tracked Prisjagt product once (null, or done with shop_url, no extras, tries below 4), sets compare_tries to 4; never otherwise", async () => {
+  const when = new Date(), t = { shop: false };
+  const row = (o) => Object.assign({ active: true, compare_state: null, shop_url: null, status: 'tracking', tracked_variants: ['1'], extra_urls: null, compare_tries: 0 }, o || {});
+  assert.strictEqual(R.autoCompare(row(), t, when), 'prisjagt');
+  assert.strictEqual(R.autoCompare(row({ compare_state: 'done', shop_url: 'https://o.dk/x', compare_tries: 3 }), t, when), 'prisjagt', 'switched before this feature');
+  assert.strictEqual(R.autoCompare(row({ compare_state: null, shop_url: 'https://o.dk/x' }), t, when), 'first', 'after a change of requirements: the older rule, which goes first');
+  [{ compare_tries: 4 }, { compare_tries: 5 }, { extra_urls: ['https://a.dk/x'] }, { status: 'choose' }, { status: 'pending' }, { status: 'error' }, { tracked_variants: [] }, { tracked_variants: null }, { bought_at: '2026-11-01T00:00:00Z' }, { active: false },
+    { compare_state: 'wanted' }, { compare_state: 'none' }, { compare_state: 'none', shop_url: 'https://o.dk/x' }, { compare_state: 'done' }].forEach((o) => assert.strictEqual(R.autoCompare(row(o), t, when), null, JSON.stringify(o)));
+  const noCol = row(); delete noCol.extra_urls; assert.strictEqual(R.autoCompare(noCol, t, when), null, 'no extra_urls column');
+  const noTries = row(); delete noTries.compare_tries; assert.strictEqual(R.autoCompare(noTries, t, when), null, 'no compare_tries column: the count could not be kept');
+  const noState = row(); delete noState.compare_state; assert.strictEqual(R.autoCompare(noState, t, when), null);
+  // the run: marked with compare_tries 4, the second run does not mark again, and the product is otherwise checked as always
+  const db = newDb(); db.products.push(pjProduct('M1', { target_value: 1 }), pjProduct('M2', { compare_state: 'done', shop_url: 'https://o.dk/x', compare_tries: 2, compare_at: '2026-10-01T00:00:00Z' }),
+    pjProduct('M3', { extra_urls: [MFR] }), pjProduct('M4', { status: 'choose', tracked_variants: null }));
+  const res = await pjRun(db, saros(), { [MFR]: xHtml('Roborock Danmark', 5300, true) }, H10);
+  const by = (id) => db.products.find((p) => p.id === id);
+  assert.deepStrictEqual(['M1', 'M2'].map((id) => [by(id).compare_state, by(id).compare_tries, by(id).compare_at]), [['wanted', 4, H10], ['wanted', 4, H10]]);
+  assert.strictEqual(by('M3').compare_state, null); assert.strictEqual(by('M4').compare_state, null); assert.strictEqual(res.stats.autoCompare, 2); assert.strictEqual(by('M1').status, 'tracking'); assert(by('M1').offers.length > 5);
+  await pjRun(db, saros(), {}, H11); assert.strictEqual(by('M1').compare_tries, 4); assert.strictEqual(by('M1').compare_at, H10, 'not marked again');
+  // the budget of 10 is shared, lowest priority: single-shop products go first
+  const d2 = newDb(), OK = shopHtml('shop-jsonld-single'), map = {};
+  for (let i = 1; i <= 8; i++) { const a = shopProduct('A' + i, 'u1', 'https://www.s' + i + '.dk/v'); d2.products.push(a); map[a.source_url] = OK; }
+  for (let i = 1; i <= 5; i++) d2.products.push(pjProduct('B' + i));
+  await pjRun(d2, saros(), map, H10);
+  assert.strictEqual(d2.products.filter((p) => p.compare_state === 'wanted').length, 10); assert(d2.products.slice(0, 8).every((p) => p.compare_state === 'wanted' && p.compare_tries === 1), 'the single-shop products first (tries 1)');
+  assert.strictEqual(d2.products.filter((p) => /^B/.test(p.id) && p.compare_state === 'wanted').length, 2, 'what is left of the budget');
+  assert(d2.products.filter((p) => /^B/.test(p.id) && p.compare_state === 'wanted').every((p) => p.compare_tries === 4));
+  await pjRun(d2, saros(), map, H11); assert.strictEqual(d2.products.filter((p) => /^B/.test(p.id) && p.compare_state === 'wanted').length, 5, 'the rest in the next run');
+  // a database without the columns: nothing is written
+  const d3 = newDb(); d3.products.push(pjProduct('X1')); delete d3.products[0].extra_urls; delete d3.products[0].extra_state; delete d3.products[0].compare_tries;
+  await pjRun(d3, saros(), {}, H10); assert.strictEqual(d3.products[0].compare_state, null);
+});
+
+test('prisjagt extras: 12 runs with an agent that always answers "none": one automatic marking per Prisjagt product, whatever its history; the most in all is 4', async () => {
+  const cases = [['never asked, person\'s own Prisjagt link', {}, 1, 'none'], ['switched by the agent, tries 1', { compare_state: 'done', shop_url: 'https://o.dk/x', compare_tries: 1, compare_at: '2026-10-01T00:00:00Z' }, 1, 'done'],
+    ['switched, tries 0 (from before compare_tries)', { compare_state: 'done', shop_url: 'https://o.dk/x', compare_at: '2026-10-01T00:00:00Z' }, 1, 'done'], ['switched, tries 3', { compare_state: 'done', shop_url: 'https://o.dk/x', compare_tries: 3, compare_at: '2026-10-01T00:00:00Z' }, 1, 'done'],
+    ['already answered none', { compare_state: 'none', shop_url: 'https://o.dk/x', compare_tries: 1, compare_at: '2026-10-01T00:00:00Z' }, 0, 'none']];
+  for (const [why, extra, expected, final] of cases) {
+    const db = newDb(); db.products.push(pjProduct('L1', extra));
+    let markings = 0, days = 0;
+    for (let i = 0; i < 12; i++) {
+      const ctx = pjCtx(db, saros(), {}, { now: () => new Date(Date.parse('2026-11-16T10:00:00Z') + (days++) * 3 * 24 * 3600 * 1000) });
+      await R.run(ctx);
+      const p = db.products[0];
+      if (p.compare_state === 'wanted') { markings++; Object.assign(p, { compare_state: p.shop_url ? 'done' : 'none', compare_at: '2026-01-01T00:00:00Z' }); }   // resolver_compare with p_url null and p_shops null
+    }
+    assert.strictEqual(markings, expected, why); assert.strictEqual(db.products[0].compare_state, final, why); assert(db.products[0].compare_tries <= 4, why);
+  }
+  // the whole life of a refusing single-shop product that the agent then switches to Prisjagt: 3 markings, then the one for extra shops
+  const db = newDb(), url = 'https://www.afviser.dk/v'; db.products.push(shopProduct('L2', 'u1', url)); let markings = 0, days = 0;
+  for (let i = 0; i < 12; i++) {
+    const ctx = pjCtx(db, saros(), { [url]: () => resp(403, 'Forbidden') }, { now: () => new Date(Date.parse('2026-11-16T10:00:00Z') + (days++) * 3 * 24 * 3600 * 1000) }); await R.run(ctx);
+    const p = db.products[0];
+    if (p.compare_state === 'wanted') {
+      markings++;
+      if (markings === 3) Object.assign(p, { source_url: PJ_ROBO, shop_url: url, compare_state: 'done', compare_at: '2026-01-01T00:00:00Z', status: 'tracking', tracked_variants: [SAROS_V], extra_urls: null, extra_state: null });   // the agent finds it on Prisjagt
+      else Object.assign(p, p.shop_url ? { compare_state: 'done' } : { compare_state: 'none', compare_at: '2026-01-01T00:00:00Z' });
+    }
+  }
+  assert.strictEqual(markings, 4, 'three as a single-shop product, one for extra shops'); assert.strictEqual(db.products[0].compare_tries, 4);
+});
+
+test('prisjagt extras: the person\'s hand-added link is read like the agent\'s, the list says why a link gives nothing, and extra_state stays small', async () => {
+  const db = newDb(); db.products.push(pjProduct('H1', { extra_urls: [MFR] }));
+  await pjRun(db, saros(), { [MFR]: () => resp(503, 'x') }, H10);
+  assert.deepStrictEqual(db.products[0].extra_state, { [MFR]: { seen: false, fails: 1, at: H10, why: 'err' } }, 'no offer to remember: the entry is four small fields');
+  await pjRun(db, saros(), { [MFR]: xHtml('Roborock Danmark', 4050, true) }, H11);
+  assert.deepStrictEqual(db.products[0].extra_state, { [MFR]: { seen: true, fails: 0, at: H11, offer: { store: 'Roborock Danmark', price: 4050, inStock: true, note: null, at: H11 } } });
+  assert(JSON.stringify(db.products[0].extra_state).length < 300, 'small');
+  // the same states for a single-shop product: a link that is another product, one without a price, one that cannot be read
+  const d5 = newDb(), EX_D = 'https://www.butik-d.dk/p/4'; d5.products.push(exProduct('W1', [EX_A, EX_B, EX_C, EX_D]));
+  await R.run(shopCtx(d5, exMap({ [EX_A]: xHtml('Butik A', 50, true), [EX_B]: xHtml('Butik B', 480, true), [EX_C]: shopHtml('shop-noprice'), [EX_D]: () => resp(404, '') })));
+  assert.deepStrictEqual([EX_A, EX_B, EX_C, EX_D].map((u) => d5.products[0].extra_state[u].why), ['outlier', undefined, 'noprice', 'err']);
+  // the person removes the link (the guard clears the state): back to the plain Prisjagt check
+  db.products[0].extra_urls = null; db.products[0].extra_state = null;
+  const ctx = pjCtx(db, saros(), {}, { now: at('2026-11-17T12:00:00Z') }); await R.run(ctx); assert.deepStrictEqual(ctx.fetched, [PJ_ROBO]); assert.strictEqual(lastPrice(db.products[0]), 5500, 'the next day: Prisjagt\'s price'); assert.strictEqual(db.products[0].extra_state, null);
 });
 
 async function live() {

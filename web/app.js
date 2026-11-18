@@ -196,6 +196,8 @@
       // extra shops: extraOk = the database has the column (an older one does not send it, and the feature stays hidden); extraRaw = the
       // stored array as it is (a removal sends it back minus one entry), shown through xList (checked again)
       extraOk: "extra_urls" in r, extraRaw: Array.isArray(r.extra_urls) ? r.extra_urls.filter(function (u) { return typeof u === "string"; }) : [],
+      // extraState = the job's note per link ("why" it gives no price: err, noprice, outlier, dup), read only to say it in a few words
+      extraState: r.extra_state && typeof r.extra_state === "object" && !Array.isArray(r.extra_state) ? r.extra_state : null,
       // details ("Detaljer", products.requirements): the person's own free words. reqOk = the database has the column (else everything about it stays hidden);
       // reqState = what the AI agent answered for them (only its "for" is read here)
       // "Mente du" (products.name_options, the AI agent's suggestions for a name-only product): optsOk = the database has the column (else all of it stays hidden)
@@ -786,7 +788,8 @@
     if (p.cmpOk && p.cmp === "wanted" && cmpSingle(p) && p.checkNote === CMP_REFUSED) return "Butikken afviser opslag. Leder efter andre butikker.";
     return p.checkNote;
   }
-  // ---- extra shops: other shops that sell the same product (found by the AI agent); the person may only drop one ----
+  // ---- extra shops: other shops that sell the same product (found by the AI agent or added by hand), on a single-shop product and on a
+  // Prisjagt product (the shops Prisjagt does not list). The person may add one link at a time ("Tilføj") and drop one ("Fjern"). ----
   // The links come from the database and are checked again: https, one shop each (not prisjagt.dk). Only the host is shown.
   function xList(p) {
     if (!p.extraOk) return [];
@@ -796,18 +799,32 @@
       if (!u || !isShopUrl(u) || out.length >= 5) return;
       var h = "";
       try { h = new URL(u).hostname.toLowerCase().replace(/^www\./, ""); } catch (e) { return; }
-      out.push({ i: i, url: u, host: h });
+      out.push({ i: i, url: u, host: h, raw: raw });
     });
     return out;
   }
+  // The short muted state of a link that gives no price now: what the job wrote (extra_state[link].why), or the marker of a stale offer.
+  var X_WHY = { err: "kunne ikke læses", noprice: "ingen pris", outlier: "anden vare?", dup: "allerede på listen" };
+  function xState(p, x) {
+    var st = p.extraState && typeof p.extraState[x.raw] === "object" && p.extraState[x.raw] ? p.extraState[x.raw] : null;
+    if (st && typeof st.why === "string" && Object.prototype.hasOwnProperty.call(X_WHY, st.why)) return X_WHY[st.why];
+    var o = (p.offers || []).filter(function (q) { return q && q.url === x.raw; })[0];
+    var n = o && typeof o.note === "string" ? o.note : "";
+    return /(^| · )pris fra i går$/.test(n) ? "pris fra i går" : /(^| · )pris fra tidligere i dag$/.test(n) ? "pris fra tidligere i dag" : "";
+  }
+  var X_MAX = 5, X_ERRORS = ["Den butik følges allerede.", "Du kan højst følge 5 ekstra butikker.", "Brug et link til varens egen side i butikken."];
+  function xHost(u) { try { return new URL(u).hostname.toLowerCase().replace(/^www\./, ""); } catch (e) { return ""; } }
   function xHtml(p) {
-    var l = xList(p);
-    if (!l.length) return "";
-    var id = p._id, ed = mayEdit(p);
+    var l = xList(p), ed = mayEdit(p) && p.extraOk && !!p.url;
+    if (!l.length && !ed) return "";
+    var id = p._id, msg = '<span class="meta" data-rowmsg="x-' + esc(id) + '">' + esc(state.rowMsg["x-" + id] || "") + '</span>';
     return '<div class="xshops"><div class="meta">Butikker, vi følger</div>' + l.map(function (x) {
-      return '<div class="foot"><span><a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer">' + esc(x.host) + '</a></span>' +
+      var why = xState(p, x);
+      return '<div class="foot"><span><a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer">' + esc(x.host) + '</a>' + (why ? ' <span class="meta xwhy">' + esc(why) + '</span>' : '') + '</span>' +
         (ed ? '<button type="button" class="link warn" data-act="x-rm" data-id="' + esc(id) + '" data-i="' + x.i + '">Fjern</button>' : '') + '</div>';
-    }).join("") + '<span class="meta" data-rowmsg="x-' + esc(id) + '">' + esc(state.rowMsg["x-" + id] || "") + '</span></div>';
+    }).join("") + (ed ? '<form class="edit xadd" data-xadd="' + esc(id) + '" novalidate><label class="vh" for="xa-' + esc(id) + '">Link til varen i en butik</label>' +
+      '<input class="wide" type="url" id="xa-' + esc(id) + '" maxlength="500" placeholder="Link til varen i en butik" autocomplete="off">' +
+      '<button class="link" type="submit">Tilføj</button>' + msg + '</form>' : msg) + '</div>';
   }
   function cmpHtml(p) {
     if (!p.cmpOk) return "";
@@ -818,11 +835,11 @@
       return '<p class="note cmp">Skiftet til Prisjagt for at sammenligne butikker. <a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">Oprindelig butik</a>' +
         (mayEdit(p) ? ' <button type="button" class="link" data-act="cmp-undo" data-id="' + esc(id) + '">Fortryd</button> ' + msg : '') + '</p>';
     }
-    if (!cmpSingle(p)) return "";
+    if (!cmpSingle(p)) return p.cmp === "wanted" && p.extraOk && p.status === "tracking" ? '<p class="note cmp">Leder efter flere butikker.</p>' : "";
     if (p.cmp === "done" && xList(p).length) return '<p class="note cmp">Følger ' + (1 + xList(p).length) + ' butikker.</p>';
     if (p.cmp === "wanted") return p.checkNote === CMP_REFUSED ? "" : '<p class="note cmp">Leder efter flere butikker.</p>';
     if (cmpMayAsk(p)) return '<p class="note cmp"><button type="button" class="link" data-act="cmp-find" data-id="' + esc(id) + '">Find flere butikker</button> ' + msg + '</p>';
-    if (p.cmp === "none") return '<p class="note cmp">Fandt ikke varen hos andre butikker.</p>';
+    if (p.cmp === "none") return xList(p).length ? '<p class="note cmp">Følger ' + (1 + xList(p).length) + ' butikker.</p>' : '<p class="note cmp">Fandt ikke varen hos andre butikker.</p>';
     return "";
   }
 
@@ -1771,6 +1788,31 @@
         if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
         render(); fetchProducts();
       }, function () { setRowMsg("rq-" + rid, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+      return;
+    }
+    var xaF = ev.target.closest("[data-xadd]");
+    if (xaF) {
+      ev.preventDefault();
+      var xid = xaF.dataset.xadd, xp = prod(xid);
+      if (!xp || !mayEdit(xp) || !xp.extraOk || !sb) return;
+      var xin = xaF.querySelector("input"), xl = parseLink(xin.value);
+      if (!xl || !isShopUrl(xl)) { setRowMsg("x-" + xid, X_ERRORS[2]); return; }
+      var xcur = xList(xp), xh = xHost(xl);
+      if (xcur.length >= X_MAX || xp.extraRaw.length >= X_MAX) { setRowMsg("x-" + xid, X_ERRORS[1]); return; }
+      if (xh === xHost(xp.url || "") || xcur.some(function (c) { return c.host === xh; })) { setRowMsg("x-" + xid, X_ERRORS[0]); return; }
+      var xnew = xp.extraRaw.concat([xl]);
+      setRowMsg("x-" + xid, "Gemmer …");
+      sb.from("products").update({ extra_urls: xnew }).eq("id", xid).then(function (r) {
+        if (r && r.error) {
+          var xm = String(r.error.message || "");
+          setRowMsg("x-" + xid, X_ERRORS.indexOf(xm) >= 0 ? xm : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
+          onWriteError(r.error); return;
+        }
+        // the database appends the link and changes nothing else (not compare_state, not the prices); the job reads it at the next check
+        xp.extraRaw = xnew; state.rowMsg["x-" + xid] = "";
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        render(); fetchProducts();
+      }, function () { setRowMsg("x-" + xid, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
       return;
     }
     var shF = ev.target.closest("[data-shops]");

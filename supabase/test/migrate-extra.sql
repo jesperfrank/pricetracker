@@ -65,8 +65,8 @@ reset role;
 
 set role authenticated;
 select t.asA();
-select t.chk('migrated: A can remove one entry, cannot add one',
-  t.err($$update public.products set extra_urls = '["https://a.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3"]' where name = 'mors-ting'$$) = 'ok1'
+select t.chk('migrated: A can add one link at the end (a later step) and remove one entry; a replacement of the list is ignored',
+  t.err($$update public.products set extra_urls = '["https://x.example.dk/1", "https://y.example.dk/2"]' where name = 'mors-ting'$$) = 'ok1'
   and t.q($$select extra_urls::text from public.products where name = 'mors-ting'$$) = '["https://a.example.dk/1", "https://b.example.dk/2"]'
   and t.err($$update public.products set extra_urls = '["https://b.example.dk/2"]' where name = 'mors-ting'$$) = 'ok1'
   and t.q($$select extra_urls::text from public.products where name = 'mors-ting'$$) = '["https://b.example.dk/2"]');

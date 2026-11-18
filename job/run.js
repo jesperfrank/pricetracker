@@ -190,10 +190,11 @@ function wantsCompareAgain(prod, target, error, now) {
   return noteWantsCompare(prod.check_note);
 }
 
-// The patch that asks the AI agent (compare_state 'wanted', now); compare_tries is counted when the database has the column.
-function wantedPatch(prod, now) {
+// The patch that asks the AI agent (compare_state 'wanted', now); compare_tries is counted when the database has the column. `tries`
+// (optional) is the value compare_tries is set to instead of counting up by one (the marking for extra shops on a Prisjagt product, rule 5).
+function wantedPatch(prod, now, tries) {
   const patch = { compare_state: 'wanted', compare_at: isoNow(now) };
-  if (Object.prototype.hasOwnProperty.call(prod, 'compare_tries')) patch.compare_tries = (Number(prod.compare_tries) || 0) + 1;
+  if (Object.prototype.hasOwnProperty.call(prod, 'compare_tries')) patch.compare_tries = tries !== undefined ? tries : (Number(prod.compare_tries) || 0) + 1;
   return patch;
 }
 
@@ -202,26 +203,50 @@ function wantedPatch(prod, now) {
 //  2. oldErrorWantsCompare / wantsCompareAgain: an error row (refusing shop) answered 'none' more than 24 hours ago, while tries < 3.
 //  3. autoCompare 'first' (rule A): EVERY active single-shop product that is not bought, compare_state null, gets 'wanted', whatever its status.
 //  4. autoCompare 'second' (rule B): compare_state 'none', no extra_urls, compare_tries < 2, compare_at at least 1 hour old: 'wanted' once more.
+//  5. autoCompare 'prisjagt' (rule C): a product that is on Prisjagt already (an active, not bought, tracking product with tracked variants and
+//     no extra_urls yet) is asked ONCE to look for the shops Prisjagt does not list (the manufacturer's own web shop and so on, the answer is
+//     extra_urls): compare_state null (never asked, a link the person added), or 'done' with shop_url (the agent switched it, before this rule
+//     existed or after a change of requirements). It sets compare_tries to COMPARE_EXTRAS_TRIES (4), and it needs compare_tries below that, so
+//     it can happen once per product and link, whatever the answer is (a 'done' stays 'done' for a switched product, the null answer).
 // Rules 1 to 3 start from null, which only exists before the first marking, after an import without a marking, and after a browser link
 // change (the guard resets compare_tries to 0 then). Every marking made here goes through wantedPatch and adds 1 to compare_tries, and rules 2
 // and 4 need compare_tries < 3 / < 2. So after the first marking (tries 1) a product can get at most two more: B at tries < 2 (1 -> 2, and
 // 0 -> 1 -> 2 for rows from before compare_tries existed), then the 24-hour error rule at tries < 3 (2 -> 3). From 3 on nothing marks it
-// again: the MAXIMUM is 3 automatic markings per product and link (a row that went through rule 4 twice from tries 0 still ends at 3),
-// plus the one an import writes at insert (not counted) and the person's own "Find flere butikker" (never counted, one click each).
-// A browser link change starts a new count. A database without compare_tries / compare_state never gets any of them.
-// To protect the agent's queue (10 rows per hourly run) rules 3 and 4 together mark at most AUTO_COMPARE_MAX products per run; markings
-// of rules 1 and 2 count against that budget but are never held back by it.
+// again: the MAXIMUM is 3 automatic markings per product and link while it follows one shop (a row that went through rule 4 twice from tries 0
+// still ends at 3). Rule 5 comes on top, once, after the product is on Prisjagt (the agent switched it, or the person gave a Prisjagt link):
+// so the MAXIMUM IN ALL is 4 automatic markings per product and link (3 as a single-shop product, then 1 for extra shops; a Prisjagt
+// product the person added itself gets 1). Plus the one an import writes at insert (not counted) and the person's own "Find flere
+// butikker" (never counted, one click each). A browser link change starts a new count, and so does a change of requirements on a product
+// the agent switched (the guard sets compare_tries to 0): each such start gets the same limits again. A database without compare_tries /
+// compare_state / extra_urls never gets any of them.
+// To protect the agent's queue (10 rows per hourly run) rules 3, 4 and 5 together mark at most AUTO_COMPARE_MAX products per run, in the
+// order 4, 3, 5 (single-shop products go before Prisjagt products); markings of rules 1 and 2 count against that budget but are never
+// held back by it.
 const AUTO_COMPARE_MAX = 10;
+const COMPARE_EXTRAS_TRIES = 4;
 const COMPARE_SECOND_AFTER_MS = 3600 * 1000;
 const COMPARE_SECOND_TRIES = 2;
 
-// 'first' | 'second' | null: which automatic marking (rules 3 and 4) applies to this product now.
+// Rule 5: a product on Prisjagt that should be looked for in the shops Prisjagt does not list.
+function prisjagtExtrasDue(prod) {
+  const has = (k) => Object.prototype.hasOwnProperty.call(prod, k);
+  if (!has('extra_urls') || !has('compare_tries') || prod.status !== 'tracking') return false;
+  if (prod.extra_urls !== null && prod.extra_urls !== undefined) return false;                      // shops are there already (the agent's or the person's)
+  if (!Array.isArray(prod.tracked_variants) || !prod.tracked_variants.length) return false;
+  if (!(Number(prod.compare_tries) < COMPARE_EXTRAS_TRIES)) return false;                          // asked before
+  return prod.compare_state === null || (prod.compare_state === 'done' && !!prod.shop_url);
+}
+
+// 'first' | 'second' | 'prisjagt' | null: which automatic marking (rules 3, 4 and 5) applies to this product now.
 function autoCompare(prod, target, now) {
   if (!target || prod.bought_at || prod.active === false) return null;
   if (!Object.prototype.hasOwnProperty.call(prod, 'compare_state')) return null;
   // A product the agent switched to Prisjagt earlier (shop_url keeps the original shop link) whose requirements the person changed has
   // compare_state null again (products_guard): the agent looks once more. A Prisjagt link the person added themself (no shop_url) never.
-  if (!target.shop) return prod.compare_state === null && !!prod.shop_url ? 'first' : null;
+  if (!target.shop) {
+    if (prod.compare_state === null && !!prod.shop_url) return 'first';
+    return prisjagtExtrasDue(prod) ? 'prisjagt' : null;
+  }
   if (prod.compare_state === null) return 'first';
   if (prod.compare_state !== 'none') return null;
   if (!Object.prototype.hasOwnProperty.call(prod, 'compare_tries') || !(Number(prod.compare_tries) < COMPARE_SECOND_TRIES)) return null;
@@ -397,10 +422,10 @@ async function run(ctx) {
   {
     const cands = [];
     products.forEach((prod) => {
-      const ls = X.links(prod);
-      if (!ls.length || !todoOf(prod)) return;
+      const ls = X.links(prod), td = todoOf(prod);
+      if (!ls.length || !td) return;
       const t = classify(prod.source_url);
-      if (!t || !t.shop) return;
+      if (!t || (!t.shop && td !== 'track')) return;       // a Prisjagt product gets its extras in the tracking check only
       ls.forEach((u) => {
         const stt = X.stateOf(prod)[u] || {};
         if (X.slow(stt, now)) return;
@@ -428,6 +453,47 @@ async function run(ctx) {
     if (error instanceof PJ.PageError && error.kind === 'blocked') { stats.blocked = true; if (stats.blockedHosts.indexOf(hostKey) === -1) stats.blockedHosts.push(hostKey); }
   };
 
+  // The extra pages of one product, each read at most once per run: {fresh, carried, keep}. fresh = [{url, hostKey, stt, page, row}] (the row
+  // carries extraNew: its price is new to us), carried = rows of shops that were not read this time and whose last offer (at most 24 hours
+  // old, X.lastOffer) stands in for them. prev = the product's extra_state; next and offerOf are filled in (the new state of each link that
+  // was tried or carried, see extra_state in extras.js); vid = the variant the rows are given. A shop that is not tried (over the per-run cap,
+  // out of time) or was refused earlier in this run (per host) keeps what it had; a transient failure (refused, timeout, network, 5xx) keeps
+  // its last offer, any other failure drops it.
+  const readExtras = async (prod, ls, vid, prev, next, offerOf, iso) => {
+    const fresh = [], carried = [];
+    // The last known offer of a shop that was not read this run (see above). It counts like a fresh offer for up to 24 hours after it
+    // was last READ (X.lastOffer); then it is gone. Marked stale with the time it was read; kept in extra_state[url].offer.
+    const keep = (url) => {
+      const o = X.lastOffer(prod, prev[url], url, now);
+      if (!o) return null;
+      offerOf[url] = { store: o.store, price: o.price, inStock: o.inStock, note: o.note, at: new Date(o.at).toISOString().replace(/\.\d+Z$/, 'Z') };
+      return { key: url, variant: vid, store: o.store, price: o.price, url, inStock: o.inStock, stock: o.inStock ? 'InStock' : 'OutOfStock', note: o.note, name: o.store, saleKnown: false, sale: false, carried: true, stale: true, readAt: o.at };
+    };
+    const carry = (url) => {
+      const row = keep(url);
+      if (row) carried.push(row);
+      if (prev[url]) next[url] = prev[url];
+    };
+    for (const url of ls) {
+      const stt = prev[url] || {}, hostKey = SHOP.registrableDomain(new URL(url).hostname);
+      if (!extraOK.has(prod.id + '|' + url)) { carry(url); continue; }
+      if (stats.blockedHosts.indexOf(hostKey) !== -1) { carry(url); continue; }     // refused earlier in this run: left alone, its last offer stands
+      if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; carry(url); continue; }
+      stats.extraPages++;
+      const got = await fetchCached(url);
+      const fail = (why, code) => { stats.extraFail++; log('  ' + (prod.name || prod.id) + ' (' + hostKey + '): ' + why); next[url] = { seen: !!stt.seen, fails: (Number(stt.fails) || 0) + 1, at: iso, why: code }; };
+      if (got.error) {
+        noteBlocked(got.error, hostKey); fail(errorNote(got.error), got.error.kind === 'noprice' ? 'noprice' : 'err');
+        if (X.transient(got.error)) { const row = keep(url); if (row) { carried.push(row); delete next[url].why; } }
+        continue;
+      }
+      const row = got.page && Array.isArray(got.page.rows) ? got.page.rows[0] : null;
+      if (!row || typeof row.price !== 'number') { fail('ingen pris', 'noprice'); continue; }
+      fresh.push({ url, hostKey, stt, page: got.page, row: Object.assign({}, row, { variant: vid, url, key: url, extraNew: X.isNew(prod, stt) }) });
+    }
+    return { fresh, carried, keep };
+  };
+
   // A single-shop product with extra shops: the main page as always plus each extra page; the result is ONE tracking check in the same
   // shape as a Prisjagt product (the rows of all shops, one variant "shop"). The main shop failing is not an error while an extra shop
   // answers. Extra offers whose price is far from the other shops' are another product and are dropped. Pushes to results (or not at
@@ -444,49 +510,19 @@ async function run(ctx) {
       if (got.error) { stats.pageFail++; noteBlocked(got.error, mainKey); mainErr = got.error; } else main = got.page;
     }
     const vid = main && main.variants && main.variants[0] ? main.variants[0].id : SHOP.SHOP_ID;
-    const fresh = [], carried = [];
-    // The last known offer of a shop that was not read this run: because it was not tried (capped, out of time), or because it failed for a
-    // transient reason (refused, timeout, network, 5xx; the per-host skip counts). It counts like a fresh offer for up to 24 hours after it
-    // was last READ (X.lastOffer); then it is gone. Marked stale with the time it was read; kept in extra_state[url].offer.
-    const keep = (url) => {
-      const o = X.lastOffer(prod, prev[url], url, now);
-      if (!o) return null;
-      offerOf[url] = { store: o.store, price: o.price, inStock: o.inStock, note: o.note, at: new Date(o.at).toISOString().replace(/\.\d+Z$/, 'Z') };
-      return { key: url, variant: vid, store: o.store, price: o.price, url, inStock: o.inStock, stock: o.inStock ? 'InStock' : 'OutOfStock', note: o.note, name: o.store, saleKnown: false, sale: false, carried: true, stale: true, readAt: o.at };
-    };
-    const carry = (url) => {
-      const row = keep(url);
-      if (row) carried.push(row);
-      if (prev[url]) next[url] = prev[url];
-    };
+    const rd = await readExtras(prod, ls, vid, prev, next, offerOf, iso);
+    const { fresh, carried, keep } = rd;
     // the main shop could not be read for a transient reason: its last offer stands in for it
     let mainStale = null;
     if (!main && X.transient(mainErr)) mainStale = keep(target.url);
     if (!main && mainStale) carried.push(mainStale);
-    for (const url of ls) {
-      const stt = prev[url] || {}, hostKey = SHOP.registrableDomain(new URL(url).hostname);
-      if (!extraOK.has(prod.id + '|' + url)) { carry(url); continue; }
-      if (stats.blockedHosts.indexOf(hostKey) !== -1) { carry(url); continue; }     // refused earlier in this run: left alone, its last offer stands
-      if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; carry(url); continue; }
-      stats.extraPages++;
-      const got = await fetchCached(url);
-      const fail = (why) => { stats.extraFail++; log('  ' + (prod.name || prod.id) + ' (' + hostKey + '): ' + why); next[url] = { seen: !!stt.seen, fails: (Number(stt.fails) || 0) + 1, at: iso }; };
-      if (got.error) {
-        noteBlocked(got.error, hostKey); fail(errorNote(got.error));
-        if (X.transient(got.error)) { const row = keep(url); if (row) carried.push(row); }
-        continue;
-      }
-      const row = got.page && Array.isArray(got.page.rows) ? got.page.rows[0] : null;
-      if (!row || typeof row.price !== 'number') { fail('ingen pris'); continue; }
-      fresh.push({ url, hostKey, stt, page: got.page, row: Object.assign({}, row, { variant: vid, url, key: url, extraNew: X.isNew(prod, stt) }) });
-    }
     // another product: far from the median of the other shops' prices of this run (the main shop and the carried offers count as others)
     const all = (main ? main.rows : []).concat(carried, fresh.map((f) => f.row));
     const kept = fresh.filter((f) => {
       if (!X.isOutlier(f.row.price, all.filter((r) => r !== f.row).map((r) => r.price))) return true;
       stats.extraDropped++;
       log('  ' + (prod.name || prod.id) + ' (' + f.hostKey + '): prisen ' + f.row.price + ' kr. ligner en anden vare og bruges ikke.');
-      next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso };
+      next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso, why: 'outlier' };
       return false;
     });
     // one offer per shop name: a second shop with the same name is called by its address instead
@@ -508,7 +544,7 @@ async function run(ctx) {
         if (extraRows.indexOf(f.row) !== -1) {
           next[f.url] = { seen: !!f.stt.seen || recorded, fails: 0, at: iso };
           offerOf[f.url] = { store: f.row.store, price: f.row.price, inStock: f.row.inStock !== false, note: f.row.note || null, at: iso };
-        } else next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso };
+        } else next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso, why: 'dup' };
       });
       const out = {};
       ls.forEach((u) => {
@@ -557,6 +593,74 @@ async function run(ctx) {
       results.push({ prod, patch: Object.assign({}, tp.patch, extraPatch(tp)), hit: tp.hit, base: prod, parsed, profile, shop: true });
     }
   };
+  // A product on prisjagt.dk with extra shops (the shops Prisjagt does not list): called by the tracking check right after the Prisjagt page
+  // was read successfully (a failing Prisjagt page is handled as always and the extras are not even tried, so stale extras alone never change
+  // the product). Returns {parsed, extraPatch} or null when there is nothing to add (no tracked variant on the page: trackingPatch sends the
+  // product back to "choose" then). `parsed` = the Prisjagt page with the extra offers added as rows of the first tracked variant on the page
+  // (the person or the agent is responsible for linking the page of the right colour); the Prisjagt variants and counts are left as they are.
+  //  * dedupe: an extra shop the Prisjagt offers of the tracked variants cover already (X.covered) is dropped in favour of the Prisjagt row;
+  //  * outlier: an extra price below 40 % or above 250 % of the median of the OTHER prices in this run (all Prisjagt offers of the tracked
+  //    variants, carried offers and the other extras) is another product (accessory, other model) and is dropped;
+  //  * the offers of a shop that could not be read stay for 24 hours (stale, "pris fra i går"), as for a single-shop product;
+  //  * a cheapest price from an extra shop that was never read before is silent (extraNew, see trackingPatch).
+  const withPrisjagtExtras = async (prod, parsed, ls) => {
+    const iso = isoNow(now), prev = X.stateOf(prod), next = {}, offerOf = {};
+    const tracked = new Set(prod.tracked_variants || []);
+    const variant = parsed.variants.find((v) => tracked.has(v.id));
+    const base = parsed.rows.filter((r) => tracked.has(r.variant));
+    if (!variant || !base.length) return null;
+    const { fresh, carried } = await readExtras(prod, ls, variant.id, prev, next, offerOf, iso);
+    // 1. a shop that Prisjagt lists already: the Prisjagt row stays
+    const drop = (f) => { next[f.url] = { seen: !!f.stt.seen, fails: 0, at: iso, why: 'dup' }; };
+    const fresh1 = fresh.filter((f) => {
+      if (!X.covered(base, { url: f.url, store: f.row.store })) return true;
+      log('  ' + (prod.name || prod.id) + ' (' + f.hostKey + '): butikken er med på Prisjagt, Prisjagts pris bruges.');
+      drop(f); return false;
+    });
+    const carried1 = carried.filter((c) => {
+      if (!X.covered(base, { url: c.url, store: c.store })) return true;
+      delete offerOf[c.url]; next[c.url] = Object.assign({}, prev[c.url], { why: 'dup' }); return false;
+    });
+    // 2. another product: far from the median of the other prices of this run
+    const all = base.concat(carried1, fresh1.map((f) => f.row));
+    const kept = fresh1.filter((f) => {
+      if (!X.isOutlier(f.row.price, all.filter((r) => r !== f.row).map((r) => r.price))) return true;
+      stats.extraDropped++;
+      log('  ' + (prod.name || prod.id) + ' (' + f.hostKey + '): prisen ' + f.row.price + ' kr. ligner en anden vare og bruges ikke.');
+      next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso, why: 'outlier' };
+      return false;
+    });
+    // 3. one offer per shop name among the extras (a second shop with the same name is called by its address)
+    const names = new Set(base.map((r) => P.normShop(r.store)));
+    const extraRows = [];
+    kept.concat(carried1.map((c) => ({ carriedRow: c, url: c.url, row: c }))).forEach((f) => {
+      const row = f.row;
+      let k = P.normShop(row.store);
+      if (names.has(k)) { row.store = X.hostOf(f.url); k = P.normShop(row.store); }
+      if (names.has(k)) { if (f.carriedRow) delete offerOf[f.url]; return; }
+      names.add(k); extraRows.push(row);
+    });
+    const extraPatch = (tp) => {     // the job's own bookkeeping, written along with the check
+      if (!Object.prototype.hasOwnProperty.call(prod, 'extra_state')) return {};
+      const recorded = !!tp && Object.prototype.hasOwnProperty.call(tp.patch, 'offers');
+      kept.forEach((f) => {
+        if (extraRows.indexOf(f.row) !== -1) {
+          next[f.url] = { seen: !!f.stt.seen || recorded, fails: 0, at: iso };
+          offerOf[f.url] = { store: f.row.store, price: f.row.price, inStock: f.row.inStock !== false, note: f.row.note || null, at: iso };
+        } else next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso, why: 'dup' };
+      });
+      const out = {};
+      ls.forEach((u) => {
+        if (!next[u]) return;
+        const e = Object.assign({}, next[u]); delete e.offer;
+        if (offerOf[u]) e.offer = offerOf[u];
+        out[u] = e;
+      });
+      const val = Object.keys(out).length ? out : null;
+      return JSON.stringify(val) === JSON.stringify(prod.extra_state === undefined ? null : prod.extra_state) ? {} : { extra_state: val };
+    };
+    return { parsed: Object.assign({}, parsed, { rows: parsed.rows.concat(extraRows) }), extraPatch };
+  };
   for (const prod of products) {
     const st = prod.status || 'pending';
     stats[st] = (stats[st] || 0) + 1;
@@ -576,8 +680,8 @@ async function run(ctx) {
       const note = SHOP.isPrisjagtHost(host) ? 'Linket er ikke et gyldigt produktlink fra prisjagt.dk.' : 'Linket kan ikke bruges. Brug en https-adresse til en produktside hos en butik eller på prisjagt.dk.';
       results.push({ prod, patch: { status: 'error', check_note: note, last_checked: isoNow(now) }, hit: null }); continue;
     }
-    const extraLinks = target.shop ? X.links(prod) : [];
-    if (extraLinks.length) {
+    const extraLinks = X.links(prod);
+    if (target.shop && extraLinks.length) {
       try { await runWithExtras(prod, todo, target, extraLinks); }
       catch (e) { stats.pageFail++; log('  ' + (prod.name || prod.id) + ': uventet fejl: ' + (e && e.stack || e)); }
       continue;
@@ -602,8 +706,12 @@ async function run(ctx) {
         else results.push({ prod, patch: Object.assign({ check_note: note }, want), hit: null });
         continue;
       }
-      const parsed = got.page;
+      let parsed = got.page, xp = null;
       const profile = profiles[prod.user_id] || null;
+      if (!target.shop && todo === 'track' && extraLinks.length) {
+        xp = await withPrisjagtExtras(prod, parsed, extraLinks);
+        if (xp) parsed = xp.parsed;
+      }
       if (todo === 'initial') {
         const ip = initialPatch(prod, parsed, now);
         if (ip.track) {
@@ -613,7 +721,7 @@ async function run(ctx) {
         } else results.push({ prod, patch: ip.patch, hit: null });
       } else {
         const tp = trackingPatch(prod, profile, parsed, now);
-        results.push({ prod, patch: tp.patch, hit: tp.hit, base: prod, parsed, profile, shop: target.shop });
+        results.push({ prod, patch: Object.assign({}, tp.patch, xp ? xp.extraPatch(tp) : {}), hit: tp.hit, base: prod, parsed, profile, shop: target.shop });
       }
     } catch (e) {
       stats.pageFail++;
@@ -621,22 +729,22 @@ async function run(ctx) {
     }
   }
 
-  // 3b. automatic compare markings (rules 3 and 4 above), at most AUTO_COMPARE_MAX new ones per run. A product that already got a marking in
+  // 3b. automatic compare markings (rules 3, 4 and 5 above), at most AUTO_COMPARE_MAX new ones per run. A product that already got a marking in
   // this run (rules 1 and 2) is not marked twice; its marking counts against the budget. The second chances go first (a hasty 'none'
   // is more likely wrong than a never-asked product is a problem), then the never-asked, each in the order of the list (oldest check first).
   {
     const resultOf0 = new Map(results.map((r) => [r.prod.id, r]));
     let budget = AUTO_COMPARE_MAX;
     results.forEach((r) => { if (r.patch.compare_state === 'wanted') budget--; });
-    const due = { second: [], first: [] };
+    const due = { second: [], first: [], prisjagt: [] };
     products.forEach((prod) => {
       const r = resultOf0.get(prod.id);
       if (r && r.patch.compare_state !== undefined) return;
       const kind = autoCompare(prod, classify(prod.source_url), now);
       if (kind) due[kind].push(prod);
     });
-    due.second.concat(due.first).slice(0, Math.max(0, budget)).forEach((prod) => {
-      const r = resultOf0.get(prod.id), patch = wantedPatch(prod, now);
+    due.second.concat(due.first, due.prisjagt).slice(0, Math.max(0, budget)).forEach((prod) => {
+      const r = resultOf0.get(prod.id), patch = wantedPatch(prod, now, due.prisjagt.indexOf(prod) !== -1 ? COMPARE_EXTRAS_TRIES : undefined);
       if (r) Object.assign(r.patch, patch); else results.push({ prod, patch, hit: null });
       stats.autoCompare = (stats.autoCompare || 0) + 1;
     });
@@ -767,7 +875,7 @@ async function run(ctx) {
   return { stats, summary, results };
 }
 
-module.exports = { autoCompare, AUTO_COMPARE_MAX, run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, wantsCompareAgain, oldErrorWantsCompare, MAX_BACKFILL };
+module.exports = { autoCompare, AUTO_COMPARE_MAX, COMPARE_EXTRAS_TRIES, run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, wantsCompareAgain, oldErrorWantsCompare, MAX_BACKFILL };
 
 if (require.main === module) {
   const e = process.env;

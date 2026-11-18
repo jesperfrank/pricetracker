@@ -39,11 +39,11 @@ select t.chk('old schema: no requirements columns, no resolver_variants, resolve
 \i :new
 \i :new
 \o
-select t.chk('migrated twice: the two columns (nullable), the two checks, one resolver_list (8 columns), resolver_variants, rows intact with no requirements',
+select t.chk('migrated twice: the two columns (nullable), the two checks, one resolver_list (9 columns, the last one is from a later step), resolver_variants, rows intact with no requirements',
   (select count(*) = 2 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name in ('requirements', 'req_state') and is_nullable = 'YES')
   and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_requirements_check')
   and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_req_state_check')
-  and (select count(*) = 1 and bool_and(array_length(proargnames, 1) = 8) from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace)
+  and (select count(*) = 1 and bool_and(array_length(proargnames, 1) = 9) from pg_proc where proname = 'resolver_list' and pronamespace = 'public'::regnamespace)
   and (select count(*) = 1 from pg_proc where proname = 'resolver_variants' and pronamespace = 'public'::regnamespace)
   and (select count(*) = 3 from public.products) and (select count(*) = 3 from public.products where requirements is null and req_state is null)
   and (select notified_price = 90 and compare_state = 'wanted' and list_id is not null from public.products where name = 'mors-ting'));
