@@ -296,6 +296,79 @@ alter table public.products add constraint products_extra_urls_check check (extr
 alter table public.products drop constraint if exists products_extra_state_check;
 alter table public.products add constraint products_extra_state_check check (extra_state is null or jsonb_typeof(extra_state) = 'object');
 
+-- "Mente du": suggestions for a name-only product whose typed name is not exact (see resolver_suggest in the resolver section).
+-- name_options = 2 to 4 objects {name (1-120), url, price (number > 0, optional), store (1-60, optional)}, the most likely first, written
+-- by the AI agent only: products_guard keeps the browser off it and clears it when the person sets a link or changes the name. url is a
+-- prisjagt.dk product page, exactly https://prisjagt.dk/product.php?p=<digits>, or an https shop product link (the source_url rule, not
+-- prisjagt.dk). Only a product without a link can hold options (the check below), and the row then waits for the person: it is not in the
+-- agent's queue (resolver_list) while name_options is set. One place for the rule: the check constraint and resolver_suggest use it.
+alter table public.products add column if not exists name_options jsonb;
+
+-- The reason why p is not a valid name_options value, or null when it is. Text rules are those of ai_alt_set: no control characters, no
+-- invisible direction marks, no < or >. Used on the cleaned copy that resolver_suggest stores, and on the stored value by the check below.
+create or replace function public.name_options_error(p jsonb)
+returns text
+language plpgsql
+immutable
+set search_path = public, pg_temp
+as $$
+declare
+  rx  constant text := '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$';
+  bad constant text := '[[:cntrl:]<>​-‏‪-‮⁦-⁩﻿  ]';
+  n integer;
+  i integer;
+  e jsonb;
+  k text;
+  s text;
+  pr numeric;
+  seen text[] := '{}';
+begin
+  if p is null then return null; end if;
+  if jsonb_typeof(p) <> 'array' then return 'options must be an array of 2 to 4 objects'; end if;
+  n := jsonb_array_length(p);
+  if n < 2 or n > 4 then return 'options must hold 2 to 4 objects, not ' || n; end if;
+  for i in 0 .. n - 1 loop
+    e := p -> i;
+    if jsonb_typeof(e) <> 'object' then return 'option ' || (i + 1) || ' is not an object'; end if;
+    for k in select jsonb_object_keys(e) loop
+      if k not in ('name', 'url', 'price', 'store') then return 'option ' || (i + 1) || ': unknown key ' || left(k, 40); end if;
+    end loop;
+    foreach k in array array['name', 'url'] loop
+      if not e ? k or jsonb_typeof(e -> k) = 'null' then return 'option ' || (i + 1) || ': ' || k || ' is missing'; end if;
+    end loop;
+    foreach k in array array['name', 'url', 'store'] loop
+      if e ? k and jsonb_typeof(e -> k) <> 'null' then
+        if jsonb_typeof(e -> k) <> 'string' then return 'option ' || (i + 1) || ': ' || k || ' must be a string'; end if;
+        s := btrim(e ->> k);
+        if s ~ bad then return 'option ' || (i + 1) || ': ' || k || ' has control characters or angle brackets'; end if;
+        if (k = 'name' and char_length(s) not between 1 and 120) or (k = 'store' and char_length(s) not between 1 and 60) then
+          return 'option ' || (i + 1) || ': ' || k || ' is not valid';
+        end if;
+        if k = 'url' then
+          s := regexp_replace(s, '^https://www\.prisjagt\.dk/', 'https://prisjagt.dk/');
+          if char_length(s) > 500 or s !~ rx then return 'option ' || (i + 1) || ': url is not a usable https link'; end if;
+          if s ~* '^https://(www\.)?prisjagt\.dk([/?#]|$)' and s !~ '^https://prisjagt\.dk/product\.php\?p=[0-9]{1,18}$' then
+            return 'option ' || (i + 1) || ': a prisjagt.dk link must be exactly https://prisjagt.dk/product.php?p=<digits>';
+          end if;
+          if lower(s) = any (seen) then return 'option ' || (i + 1) || ': the same url as another option'; end if;
+          seen := seen || lower(s);
+        end if;
+      end if;
+    end loop;
+    if e ? 'price' and jsonb_typeof(e -> 'price') <> 'null' then
+      if jsonb_typeof(e -> 'price') <> 'number' then return 'option ' || (i + 1) || ': price must be a number'; end if;
+      pr := (e ->> 'price')::numeric;
+      if not (pr > 0 and pr < 10000000) then return 'option ' || (i + 1) || ': price must be above 0 and below 10000000'; end if;
+    end if;
+  end loop;
+  return null;
+end;
+$$;
+
+alter table public.products drop constraint if exists products_name_options_check;
+alter table public.products add constraint products_name_options_check check (
+  name_options is null or (source_url is null and public.name_options_error(name_options) is null));
+
 grant select, insert, update, delete on public.profiles, public.products to authenticated;
 -- The price job signs in with the service key. Newer Supabase projects do not grant table rights by default, so state them.
 grant select, insert, update, delete on public.allowed_emails, public.profiles, public.products to service_role;
@@ -339,7 +412,7 @@ begin
     new.digest_price := null; new.digest_at := null; new.notify_silent_until := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
     new.compare_state := null; new.compare_at := null; new.shop_url := null; new.image_url := null; new.compare_tries := 0;
-    new.extra_urls := null; new.extra_state := null; new.req_state := null;
+    new.extra_urls := null; new.extra_state := null; new.req_state := null; new.name_options := null;
     -- bought_at / bought_price are the person's own, but the time is the server's and the person is who is signed in
     new.bought_by := null;
     if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; end if;
@@ -366,6 +439,9 @@ begin
     new.notified_price := null; new.notified_at := null;
   end if;
   new.image_url := old.image_url; new.compare_tries := old.compare_tries; new.req_state := old.req_state;
+  -- "Mente du": the options are the agent's. The browser never writes them (a list member changing them fails the whole-row check above);
+  -- a new link or a new name clears them (below).
+  new.name_options := old.name_options;
   -- extra shops: the agent's and the job's. The person (only their own product gets this far) may only remove ONE entry of extra_urls
   -- (the same array minus one element, same order; removing the only entry gives null, and the product then counts as "not found
   -- elsewhere"). Anything else the browser sends is ignored.
@@ -453,7 +529,14 @@ begin
     new.bought_at := old.bought_at; new.bought_by := old.bought_by;
   end if;
 
+  -- A new name for a product that still has no link (the person's "Ingen af dem", or any rename): the lookup starts again. The product is
+  -- waiting (status 'pending'), an earlier failure note is gone, and the options for the old words are dropped, so the agent's queue
+  -- (resolver_list kind 'name') has it again.
+  if new.name is distinct from old.name and old.source_url is null and new.source_url is null then
+    new.status := 'pending'; new.check_note := null; new.name_options := null;
+  end if;
   if new.source_url is distinct from old.source_url then
+    new.name_options := null;
     new.status := 'pending';
     new.tracked_variants := null;
     new.title := null; new.variants := null; new.offers := null; new.history := null;
@@ -827,7 +910,8 @@ $$;
 revoke all on function public.resolver_token_ok() from public, anon, authenticated;
 
 -- What the AI agent has to do, at most 10 rows, nothing about the person. Three kinds, in this order, each oldest first:
---  * 'name': a product with a name but no link yet (people are waiting).
+--  * 'name': a product with a name but no link yet (people are waiting). Not listed while it holds name_options (suggestions the person
+--    has to choose from, see resolver_suggest); a new name from the person puts it back.
 --  * 'variant': an active Prisjagt product with requirements and at least 2 variants that waits for a variant decision (see
 --    req_variant_waiting) and that the agent has not answered for the current requirements. A person may be waiting at "Vælg variant".
 --    `variants` = [{id, name}] (at most 40, names cut at 80 characters), the ids to give to resolver_variants. name = the product's title.
@@ -876,7 +960,7 @@ begin
       select p.id, p.name, p.created_at, 'name'::text as kind, null::text as host, null::numeric as price, p.requirements as req,
              null::jsonb as variants, 0 as grp, p.created_at as ord
         from public.products p
-       where p.active and p.source_url is null and p.status = 'pending'
+       where p.active and p.source_url is null and p.status = 'pending' and p.name_options is null
       union all
       select p.id, left(coalesce(nullif(btrim(p.title), ''), p.name), 200), p.created_at, 'variant'::text, null::text, null::numeric, p.requirements,
              (select coalesce(jsonb_agg(jsonb_build_object('id', t.e ->> 'id', 'name', left(coalesce(t.e ->> 'label', t.e ->> 'name', t.e ->> 'id'), 80)) order by t.o), '[]'::jsonb)
@@ -985,7 +1069,7 @@ begin
     raise exception 'resolver: not a usable https link' using errcode = '22023';
   end if;
   update public.products
-     set source_url = u, check_note = null
+     set source_url = u, check_note = null, name_options = null
    where id = p_id and active and source_url is null and status = 'pending';
   get diagnostics n = row_count;
   return n = 1;
@@ -1006,8 +1090,61 @@ begin
     raise exception 'resolver: invalid or missing token' using errcode = '42501';
   end if;
   update public.products
-     set status = 'error', check_note = nullif(left(btrim(coalesce(p_note, '')), 200), '')
+     set status = 'error', check_note = nullif(left(btrim(coalesce(p_note, '')), 200), ''), name_options = null
    where id = p_id and active and source_url is null and status = 'pending';
+  get diagnostics n = row_count;
+  return n = 1;
+end;
+$$;
+
+-- "Mente du": the answer to a 'name' row whose typed name is loose, misspelt or fits several products. p_options = a json array of 2 to
+-- 4 objects with exactly the keys name (1-120), url, and optionally price (a number above 0 and below 10 million, kr.) and store (1-60),
+-- most likely first. url is a prisjagt.dk product page, exactly https://prisjagt.dk/product.php?p=<digits> (a leading www. is dropped), or an
+-- https shop product page (the source_url rule); the urls must differ. Text has no control characters, no invisible direction marks and no
+-- < or > (same rules as ai_alt_set). A bad shape raises 22023 naming the option and the field, whether or not the product is waiting.
+-- For a product that is waiting (the condition resolver_set uses: active, no link, status 'pending') the cleaned options are stored
+-- (trimmed, price rounded to 2 decimals), source_url stays null, status stays 'pending', and the row is out of resolver_list's 'name' queue
+-- while name_options is set. The person then chooses (a link is set, see products_guard) or types a new name (the row is queued again).
+-- Returns true, or false when the product is not waiting (any more), also when it already holds options.
+create or replace function public.resolver_suggest(p_id uuid, p_options jsonb)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  err   text;
+  e     jsonb;
+  clean jsonb := '[]'::jsonb;
+  item  jsonb;
+  n     integer;
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  if p_options is not null and jsonb_typeof(p_options) = 'null' then p_options := null; end if;
+  if p_options is null then
+    raise exception 'resolver: options must be an array of 2 to 4 objects' using errcode = '22023';
+  end if;
+  err := public.name_options_error(p_options);
+  if err is not null then
+    raise exception 'resolver: %', err using errcode = '22023';
+  end if;
+  for e in select x from jsonb_array_elements(p_options) x loop
+    item := jsonb_build_object('name', btrim(e ->> 'name'),
+                               'url', regexp_replace(btrim(e ->> 'url'), '^https://www\.prisjagt\.dk/', 'https://prisjagt.dk/'));
+    if e ? 'price' and jsonb_typeof(e -> 'price') = 'number' then item := item || jsonb_build_object('price', round((e ->> 'price')::numeric, 2)); end if;
+    if e ? 'store' and jsonb_typeof(e -> 'store') = 'string' then item := item || jsonb_build_object('store', btrim(e ->> 'store')); end if;
+    clean := clean || jsonb_build_array(item);
+  end loop;
+  -- rounding can make a tiny price 0: checked again on the cleaned copy
+  err := public.name_options_error(clean);
+  if err is not null then
+    raise exception 'resolver: %', err using errcode = '22023';
+  end if;
+  update public.products
+     set name_options = clean, check_note = null
+   where id = p_id and active and source_url is null and status = 'pending' and name_options is null;
   get diagnostics n = row_count;
   return n = 1;
 end;
@@ -1104,10 +1241,12 @@ revoke all on function public.resolver_set(uuid, text) from public;
 revoke all on function public.resolver_fail(uuid, text) from public;
 revoke all on function public.resolver_compare(uuid, text, jsonb) from public;
 revoke all on function public.resolver_variants(uuid, jsonb) from public;
+revoke all on function public.resolver_suggest(uuid, jsonb) from public;
 grant execute on function public.resolver_list() to anon, authenticated;
 grant execute on function public.resolver_variants(uuid, jsonb) to anon, authenticated;
 grant execute on function public.resolver_set(uuid, text) to anon, authenticated;
 grant execute on function public.resolver_fail(uuid, text) to anon, authenticated;
+grant execute on function public.resolver_suggest(uuid, jsonb) to anon, authenticated;
 grant execute on function public.resolver_compare(uuid, text, jsonb) to anon, authenticated;
 
 -- ---------------------------------------------------------------- access requests

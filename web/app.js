@@ -28,7 +28,7 @@
     return window.supabase.createClient(url, key);
   }
 
-  var state = { goalOpen: {}, manage: {}, allShops: {}, pshops: {}, errOpen: false, ord: null, share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, questions: [], qOk: false, qOpen: false, qExp: {}, qAll: false, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
+  var state = { optNone: {}, goalOpen: {}, manage: {}, allShops: {}, pshops: {}, errOpen: false, ord: null, share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, questions: [], qOk: false, qOpen: false, qExp: {}, qAll: false, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
     prefs: { always: [], exclude: [], only: false, notify: false, digest: false, asked: true }, profileSound: null };
   var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
   var noacc = { on: false, state: "", timer: null, busy: false, msg: "" };
@@ -198,6 +198,8 @@
       extraOk: "extra_urls" in r, extraRaw: Array.isArray(r.extra_urls) ? r.extra_urls.filter(function (u) { return typeof u === "string"; }) : [],
       // details ("Detaljer", products.requirements): the person's own free words. reqOk = the database has the column (else everything about it stays hidden);
       // reqState = what the AI agent answered for them (only its "for" is read here)
+      // "Mente du" (products.name_options, the AI agent's suggestions for a name-only product): optsOk = the database has the column (else all of it stays hidden)
+      optsOk: "name_options" in r, optsRaw: Array.isArray(r.name_options) ? r.name_options : [],
       reqOk: "requirements" in r, req: typeof r.requirements === "string" ? r.requirements.slice(0, 120) : "",
       reqStateOk: "req_state" in r, reqState: r.req_state && typeof r.req_state === "object" ? r.req_state : null
     };
@@ -277,7 +279,25 @@
     try { var h = new URL(String(u || "")).hostname.toLowerCase(); return h !== "prisjagt.dk" && h !== "www.prisjagt.dk"; } catch (e) { return false; }
   }
   var LINK_HELP = "Linket skal være en https-adresse til en produktside, fra prisjagt.dk eller fra en enkelt butik.";
-  function isOpen(p) { return state.open[p._id] !== undefined ? !!state.open[p._id] : p.status === "choose"; }
+  // "Mente du": suggestions from the AI agent for a name-only product, shown to its own person. Everything in them is untrusted: the text is cut
+  // and escaped where it is shown, and a link counts only when it passes parseLink and is a Prisjagt product page or one shop's page (the rule
+  // of the database). At most 4; a product without a usable option shows as an ordinary waiting product.
+  var OPT_PJ = /^https:\/\/prisjagt\.dk\/product\.php\?p=\d{1,18}$/;
+  function optsOf(p) {
+    if (!p.optsOk || p.url || p.status !== "pending") return [];
+    var out = [];
+    p.optsRaw.forEach(function (o) {
+      if (!o || typeof o !== "object" || typeof o.name !== "string" || typeof o.url !== "string" || out.length >= 4) return;
+      var u = parseLink(o.url), nm = o.name.replace(/[\u0000-\u001f\u007f-\u009f<>]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+      if (!u || !nm || (!OPT_PJ.test(u) && !isShopUrl(u))) return;
+      var pr = typeof o.price === "number" && isFinite(o.price) && o.price > 0 ? o.price : null;
+      var st = typeof o.store === "string" ? o.store.replace(/[\u0000-\u001f\u007f-\u009f<>]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) : "";
+      out.push({ name: nm, url: u, price: pr, store: st });
+    });
+    return out;
+  }
+  function hasOpts(p) { return optsOf(p).length > 0; }
+  function isOpen(p) { return state.open[p._id] !== undefined ? !!state.open[p._id] : (p.status === "choose" || (isMine(p) && hasOpts(p))); }
   function awaitingFetch(p) { return p.status === "choose" && p.tracked && p.tracked.length && !state.change[p._id]; }
   function variantLabels(p) {
     var ids = p.tracked || [];
@@ -344,7 +364,7 @@
   function headHtml(p) {
     var b = bestOf(p), t = targetKr(p), os = offersOf(p), st;
     var anyStock = os.some(function (o) { return o.inStock !== false; });
-    if (p.status === "pending") st = p.url ? "Henter produktet …" : "Finder produktet …";
+    if (p.status === "pending") st = p.url ? "Henter produktet …" : hasOpts(p) ? '<span class="out">Vælg vare</span>' : "Finder produktet …";
     else if (p.status === "error") st = esc(cmpErrText(p) || "Produktet kunne ikke hentes");
     else if (awaitingFetch(p)) st = "Henter priser for den valgte variant …";
     else if (p.status === "choose") st = isMine(p) ? '<span class="out">Vælg variant</span>' : '<span class="out">Variant ikke valgt</span>';
@@ -408,7 +428,7 @@
   }
   function footHtml(p, fixLink) {
     var id = p._id, link = safeUrl(p.url), html = reqEditHtml(p) + listPickHtml(p) + boughtHtml(p);
-    html += '<div class="foot"><span>' + (link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">' + (isMine(p) ? "Dit link" : "Link") + '</a>' : '') + '</span>';
+    html += '<div class="foot"><span>' + (link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">' + (isMine(p) ? "Dit link" : "Link") + '</a>' + copyBtn(p) : '') + '</span>';
     if (mayEdit(p)) {
       if (state.confirmDel === id) {
         html += '<span class="edit"><span>Fjern produktet og dets historik?</span>' +
@@ -429,6 +449,27 @@
     return html + '</div>';
   }
 
+  // "Mente du": the agent's suggestions, most likely first, as tappable rows (own product) or plain lines (someone else's). "Ingen af dem" asks for a new name.
+  function optMeta(o) {
+    return (o.price != null ? "fra " + kr(o.price) : "") + (o.store ? (o.price != null ? " " : "") + "hos " + o.store : "");
+  }
+  function optsHtml(p) {
+    var id = p._id, ed = mayEdit(p), list = optsOf(p);
+    var rows = list.map(function (o, i) {
+      var meta = optMeta(o), inner = '<span class="opt-name">' + esc(o.name) + '</span>' + (meta ? '<span class="meta">' + esc(meta) + '</span>' : "");
+      return '<li>' + (ed ? '<button type="button" class="opt" data-act="opt-pick" data-id="' + esc(id) + '" data-i="' + i + '">' + inner + '</button>'
+        : '<div class="opt">' + inner + '</div>') + '</li>';
+    }).join("");
+    var html = '<div class="mente sect"><div class="sec-h"><h3>Mente du</h3></div><ul class="opt-list">' + rows + '</ul>';
+    if (ed) {
+      html += state.optNone[id]
+        ? '<form class="edit" data-newname="' + esc(id) + '" novalidate><label class="vh" for="nn-' + esc(id) + '">Nyt navn</label>' +
+          '<input class="wide" type="text" id="nn-' + esc(id) + '" maxlength="140" value="' + esc(p.name) + '">' +
+          '<button class="link" type="submit">Søg igen</button><span class="meta" data-rowmsg="o-' + esc(id) + '">' + esc(state.rowMsg["o-" + id] || "") + '</span></form>'
+        : '<p class="opt-none"><button type="button" class="link" data-act="opt-none" data-id="' + esc(id) + '">Ingen af dem</button> <span class="meta" data-rowmsg="o-' + esc(id) + '">' + esc(state.rowMsg["o-" + id] || "") + '</span></p>';
+    }
+    return html + '</div>';
+  }
   // Name-only product: link to prisjagt.dk's own search (opens in a new tab) and a form to paste the link found there.
   function findHtml(p, afterError) {
     var id = p._id, a = '<a href="https://prisjagt.dk/search?search=' + esc(encodeURIComponent(p.name)) + '" target="_blank" rel="noopener noreferrer">Søg selv på Prisjagt</a>';
@@ -459,9 +500,24 @@
   }
 
   // "Indstil vare": everything about managing a tracked product, in one collapsed section (the open state is kept between renders).
+  // A small "Kopiér" next to the product's link: the address on the clipboard (the link itself can be long-pressed on a phone as well)
+  function copyBtn(p) { return safeUrl(p.url) ? ' <button type="button" class="link" data-act="copy-link" data-id="' + esc(p._id) + '">Kopiér</button>' : ""; }
+  function copyText(t, done) {
+    var fallback = function () {
+      var ta = document.createElement("textarea"), ok = false;
+      ta.value = t; ta.setAttribute("readonly", ""); ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+      document.body.appendChild(ta); ta.select();
+      try { ok = document.execCommand("copy"); } catch (e) {}
+      document.body.removeChild(ta); done(ok);
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(function () { done(true); }, fallback);
+      else fallback();
+    } catch (e) { fallback(); }
+  }
   function linkHtml(p) {
     var link = safeUrl(p.url);
-    return link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">' + (isMine(p) ? "Dit link" : "Link") + '</a>' : "";
+    return link ? '<a href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">' + (isMine(p) ? "Dit link" : "Link") + '</a>' + copyBtn(p) : "";
   }
   function goalEditHtml(p) {
     var id = p._id, auto = p.targetType === "auto";
@@ -583,7 +639,7 @@
   function bodyHtml(p) { return goalHtml(p) + reqLineHtml(p) + reqFindingHtml(p) + bodyHtml0(p); }
   function bodyHtml0(p) {
     var id = p._id;
-    if (p.status === "pending" && !p.url) return findHtml(p) + looseManage(p);
+    if (p.status === "pending" && !p.url) return (hasOpts(p) ? optsHtml(p) : findHtml(p)) + looseManage(p);
     if (p.status === "pending") return cmpHtml(p) + looseManage(p);
     if (p.status === "error" && !p.url)
       return '<p class="verdict"><b>Produktet blev ikke fundet.</b> ' + esc(p.checkNote || "Find det selv på Prisjagt, og indsæt linket her.") + '</p>' + findHtml(p, true) + looseManage(p);
@@ -1008,7 +1064,7 @@
         return { id: x.id, status: x.status === "done" || x.status === "error" ? x.status : "pending", note: x.note || "", added: num(x.added), found: num(x.found), createdAt: x.created_at || "",
           title: x.title ? String(x.title) : "", syncedAt: x.synced_at || null, fails: num(x.sync_fails) || 0, listId: x.list_id || null };
       });
-      state.importsOk = true; render();
+      state.importsOk = true; renderSoft();
     }, function () {});
   }
   $("importBox").addEventListener("click", function (ev) {
@@ -1202,8 +1258,8 @@
     var by = groupProducts(ps, sel);
     var rowHtml = function (p) {
       var open = isOpen(p);
-      return '<article class="item' + (isHit(p) ? " hit" : "") + (open ? " open" : "") + (p.boughtAt ? " bought" : "") + '" data-status="' + esc(p.status) + '">' +
-        '<button type="button" class="head" data-act="toggle" data-id="' + esc(p._id) + '" aria-expanded="' + open + '">' + headHtml(p) + '</button>' +
+      return '<article class="item' + (isHit(p) ? " hit" : "") + (open ? " open" : "") + (hasOpts(p) ? " opts" : "") + (p.boughtAt ? " bought" : "") + '" data-status="' + esc(p.status) + '">' +
+        '<div class="head" data-act="toggle" data-id="' + esc(p._id) + '"><button type="button" class="tgl" data-act="toggle" data-id="' + esc(p._id) + '" aria-expanded="' + open + '" aria-label="' + esc(p.name) + '"></button>' + headHtml(p) + '</div>' +
         (open ? '<div class="body">' + bodyHtml(p) + '</div>' : '') + '</article>';
     };
     var html = "";
@@ -1219,6 +1275,10 @@
     ps.forEach(function (p) { if (isOpen(p) && p.status === "tracking") drawChart(p); });
   }
 
+  // A redraw that nobody asked for (a reload of the data): not while text is selected in the list, so that a selection being copied stays; it is
+  // drawn when the selection is gone (selectionchange, focusout).
+  function renderSoft() { if (selInList()) { renderStatus(); renderPending = true; } else render(); }
+
   // ---- order and groups ----
   // Groups: hit (a good deal now), choose (needs the person), wait (fetching), rest (the others, closest to the goal first), error
   // (cannot be fetched, collapsed), bought (dimmed, last). The order is kept between renders: a full sort only on load and when another
@@ -1230,6 +1290,7 @@
     if (p.status === "error") return "error";
     if (isHit(p)) return "hit";
     if (p.status === "choose" && !awaitingFetch(p)) return "choose";
+    if (hasOpts(p)) return "choose";
     if (p.status === "pending" || awaitingFetch(p)) return "wait";
     return "rest";
   }
@@ -1378,7 +1439,8 @@
       } else {
         state.products = (r.data || []).map(norm);
         state.loaded = true;
-        render(); checkSound(); fetchLists(); fetchImports(); fetchQuestions();
+        renderSoft();
+        checkSound(); fetchLists(); fetchImports(); fetchQuestions();
       }
       if (again) { again = false; fetchProducts(); }
     }, function () {
@@ -1392,9 +1454,9 @@
     var uid = user.id;
     sb.from("lists").select("*").order("name", { ascending: true }).then(function (r) {
       if (!user || user.id !== uid) return;
-      if (r.error) { if (!state.listsOk) { state.lists = []; render(); } return; }
+      if (r.error) { if (!state.listsOk) { state.lists = []; renderSoft(); } return; }
       state.lists = (r.data || []).map(function (l) { return { id: l.id, name: String(l.name || ""), own: !l.user_id || l.user_id === uid }; });
-      sortLists(); state.listsOk = true; render(); fetchMembers();
+      sortLists(); state.listsOk = true; renderSoft(); fetchMembers();
     }, function () {});
   }
   // Who is in the shared lists. The owner sees the memberships of their lists, a member sees the co-members of the list they are in.
@@ -1408,12 +1470,12 @@
       state.memCount = cnt;
       var shared = state.lists.filter(function (l) { return listShared(l.id); });
       Object.keys(state.people).forEach(function (k) { if (!shared.some(function (l) { return l.id === k; })) delete state.people[k]; });
-      render();
+      renderSoft();
       shared.forEach(function (l) {
         sb.rpc("list_members_named", { p_list: l.id }).then(function (x) {
           if (!user || user.id !== uid || !x || x.error || !Array.isArray(x.data)) return;
           state.people[l.id] = x.data.map(function (m) { return { id: m.user_id, name: String(m.name || ""), role: m.role, email: m.email ? String(m.email) : "" }; });
-          render();
+          renderSoft();
         }, function () {});
       });
     }, function () {});
@@ -1495,10 +1557,49 @@
     var f = gp.querySelector("[data-edit]"); if (!f) return;
     ev.preventDefault(); state.goalOpen[f.dataset.edit] = false; render(); focusGoal(f.dataset.edit, false);
   });
+  // The row head is a plain container, so its text (name, status, price) can be selected and copied. A click anywhere on it opens or closes
+  // the row, unless it ended a selection or a drag (pointer moved more than a few pixels, or text is selected now): then it is only a selection.
+  // The real control is the invisible button inside the head (keyboard and screen readers); its click has detail 0 when it comes from the keyboard.
+  var press = null;
+  $("list").addEventListener("pointerdown", function (ev) { press = { x: ev.clientX, y: ev.clientY }; }, true);
+  function selText() { try { var sl = window.getSelection(); return sl && !sl.isCollapsed ? sl.toString() : ""; } catch (e) { return ""; } }
+  function selInList() {
+    try {
+      var sl = window.getSelection(), n = sl && !sl.isCollapsed && sl.toString() ? sl.anchorNode : null;
+      return !!n && $("list").contains(n.nodeType === 1 ? n : n.parentNode);
+    } catch (e) { return false; }
+  }
+  function endedSelection(ev) {
+    if (ev.detail === 0) return false;                                   // from the keyboard (or a script): always a toggle
+    var moved = press && Math.abs(ev.clientX - press.x) + Math.abs(ev.clientY - press.y) > 6;
+    press = null;
+    return !!moved || selText() !== "";
+  }
   $("list").addEventListener("click", function (ev) {
     var b = ev.target.closest("[data-act]"); if (!b) return;
     var act = b.dataset.act, id = b.dataset.id, p = prod(id);
-    if (act === "toggle") { state.open[id] = !(p ? isOpen(p) : state.open[id]); state.confirmDel = null; render(); }
+    if (act === "toggle") {
+      if (endedSelection(ev)) return;
+      var viaKey = ev.detail === 0;
+      state.open[id] = !(p ? isOpen(p) : state.open[id]); state.confirmDel = null; render();
+      if (viaKey) { var tg = document.querySelector('.tgl[data-id="' + CSS.escape(id) + '"]'); if (tg) try { tg.focus(); } catch (e) {} }     // the row is drawn again: keep the keyboard on its control
+    }
+    else if (act === "opt-none") { state.optNone[id] = true; state.rowMsg["o-" + id] = ""; render(); var nn = $("nn-" + id); if (nn) try { nn.focus(); nn.select(); } catch (e) {} }
+    else if (act === "opt-pick" && sb && p && mayEdit(p)) {
+      var opt = optsOf(p)[+b.dataset.i];
+      if (!opt) return;
+      b.disabled = true; setRowMsg("o-" + id, "");
+      sb.from("products").update({ source_url: opt.url }).eq("id", id).then(function (r) {
+        if (r && r.error) { b.disabled = false; setRowMsg("o-" + id, "Kunne ikke gemme lige nu. Prøv igen om lidt."); onWriteError(r.error); return; }
+        // the database starts the product over on a new link (status 'pending') and drops the options; show that straight away
+        p.url = opt.url; p.status = "pending"; p.checkNote = ""; p.optsRaw = []; delete state.optNone[id]; state.rowMsg["o-" + id] = "";
+        render(); fetchProducts();
+      }, function () { b.disabled = false; setRowMsg("o-" + id, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+    }
+    else if (act === "copy-link" && p) {
+      var cl = safeUrl(p.url); if (!cl) return;
+      copyText(cl, function (ok) { var t0 = b.textContent; b.textContent = ok ? "Kopieret" : "Kunne ikke kopiere"; setTimeout(function () { if (b.isConnected) b.textContent = t0; }, 1600); });
+    }
     else if (act === "manage" || act === "allshops") {
       var xo = b.getAttribute("aria-expanded") !== "true", panel = b.nextElementSibling;
       b.setAttribute("aria-expanded", String(xo)); if (panel) panel.hidden = !xo;
@@ -1686,6 +1787,29 @@
       }, function () {});
       return;
     }
+    var nnF = ev.target.closest("[data-newname]");
+    if (nnF) {
+      ev.preventDefault();
+      var nid = nnF.dataset.newname, np = prod(nid);
+      if (!np || !mayEdit(np) || !sb) return;
+      var nraw = nnF.querySelector("input").value.trim().replace(/\s+/g, " "), npatch;
+      if (looksLikeLink(nraw)) { var nlk = parseLink(nraw); if (!nlk) { setRowMsg("o-" + nid, LINK_HELP); return; } npatch = { source_url: nlk }; }
+      else {
+        if (nraw.length < 2 || nraw.length > 140) { setRowMsg("o-" + nid, "Navnet skal være mellem 2 og 140 tegn."); return; }
+        if (nraw === np.name) { setRowMsg("o-" + nid, "Skriv et nyt navn."); return; }
+        npatch = { name: nraw };
+      }
+      setRowMsg("o-" + nid, "Gemmer …");
+      sb.from("products").update(npatch).eq("id", nid).then(function (r) {
+        if (r && r.error) { setRowMsg("o-" + nid, "Kunne ikke gemme lige nu. Prøv igen om lidt."); onWriteError(r.error); return; }
+        // the database drops the options and puts the product back in the agent's queue (a new name), or starts it over on a new link
+        if (npatch.name) np.name = npatch.name; else np.url = npatch.source_url;
+        np.status = "pending"; np.checkNote = ""; np.optsRaw = []; delete state.optNone[nid]; state.rowMsg["o-" + nid] = "";
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        render(); fetchProducts();
+      }, function () { setRowMsg("o-" + nid, "Kunne ikke gemme lige nu. Prøv igen om lidt."); });
+      return;
+    }
     var fxF = ev.target.closest("[data-fixurl]");
     if (fxF) {
       ev.preventDefault();
@@ -1716,7 +1840,8 @@
       p.targetType = ty; p.targetValue = v; render(); focusGoal(id, false); fetchProducts();
     }, function () {});
   });
-  $("list").addEventListener("focusout", function () { setTimeout(function () { if (renderPending) render(); }, 0); });
+  $("list").addEventListener("focusout", function () { setTimeout(function () { if (renderPending && !selInList()) render(); }, 0); });
+  document.addEventListener("selectionchange", function () { if (renderPending && user && state.loaded && !selInList()) render(); });
   // the open/closed state of the sections inside the list survives the next render (toggle does not bubble: captured)
   $("list").addEventListener("toggle", function (ev) {
     var d = ev.target; if (!d || !d.matches) return;

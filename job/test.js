@@ -2949,6 +2949,11 @@ test('digest helpers: copenhagenHour and the 07:00 window follow Copenhagen time
   assert(D.isDigestUser({ mail_digest: true }) && !D.isDigestUser({ mail_digest: true, notify_email: false }) && !D.isDigestUser({ mail_digest: false }) && !D.isDigestUser({}) && !D.isDigestUser(null));
 });
 
+test('name_options ("Mente du") is the AI agent\'s and the person\'s: nothing in the job reads or writes it', () => {
+  const files = ['run.js'].concat(fs.readdirSync(path.join(__dirname, 'lib')).filter((f) => /\.js$/.test(f)).map((f) => 'lib/' + f));
+  for (const f of files) assert(!/name_options/.test(fs.readFileSync(path.join(__dirname, f), 'utf8')), f + ' mentions name_options');
+});
+
 (async () => {
   let fail = 0;
   for (const t of tests) {

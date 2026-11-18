@@ -206,7 +206,11 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 .item.hit h2 { font-weight: 700 }
 .item.hit .price b { color: var(--good) }
 .off { color: var(--good); font-weight: 600 }
-.head { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 84px; background: none; border: 0; padding: 18px 0; text-align: left; cursor: pointer }
+.head { position: relative; display: flex; align-items: center; gap: 14px; width: 100%; min-height: 84px; padding: 18px 0; text-align: left; cursor: pointer }
+/* The head is a plain container, so its text can be selected and copied. The real control is this empty button laid over it (keyboard focus
+   ring, aria-expanded, the product name as its label); it lets the pointer through, and a click on the head toggles it unless it ended a selection. */
+.tgl { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; background: none; border: 0; pointer-events: none }
+.lchip, .chip { -webkit-user-select: none; user-select: none }
 .head h2 { font: 600 16px/1.3 var(--font); letter-spacing: -0.01em; margin: 0; overflow-wrap: anywhere }
 .info { flex: 1 1 auto; min-width: 0 }
 .thumb { flex: none; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 10px; overflow: hidden; background: var(--sunk); border: 1px solid var(--line); color: var(--muted); font: 600 18px/1 var(--font) }
@@ -216,7 +220,7 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 .head .meta .m1 { color: var(--ink); font-weight: 500 }
 .meta .ok { color: var(--good); font-weight: 600 }
 .meta .out { color: var(--ink2); font-weight: 500 }
-.item[data-status="pending"] .head .meta::before { content: ""; display: inline-block; width: 7px; height: 7px; margin: 0 7px 1px 0; border: 1.5px solid var(--muted); border-radius: 50% }
+.item[data-status="pending"]:not(.opts) .head .meta::before { content: ""; display: inline-block; width: 7px; height: 7px; margin: 0 7px 1px 0; border: 1.5px solid var(--muted); border-radius: 50% }
 /* the open product: one raised surface with its own boundary, space around it, and the detail inside */
 .item.open { --surface: var(--card); background: var(--card); border: 1px solid var(--edge); border-radius: 16px; box-shadow: var(--shadow);
   margin: 16px -16px 22px; padding: 0 16px 16px }
@@ -231,6 +235,18 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 .errs .head { min-height: 64px }
 .errs .thumb { opacity: .7 }
 .errs h2 { font-weight: 500; color: var(--ink2) }
+/* "Mente du": the agent's suggestions for a name-only product, as quiet tappable rows */
+.mente .sec-h { margin-bottom: 4px }
+.opt-list { list-style: none; margin: 0; padding: 0 }
+.opt-list li { border-top: 1px solid var(--soft) }
+.opt-list li:first-child { border-top: 0 }
+.opt { display: block; width: 100%; min-height: 44px; padding: 10px 0; background: none; border: 0; text-align: left; font: inherit; color: inherit }
+button.opt { cursor: pointer }
+button.opt:hover .opt-name { color: var(--accent) }
+.opt-name { display: block; font-weight: 500; overflow-wrap: anywhere }
+.opt .meta { display: block; margin-top: 1px }
+.opt-none { margin: 6px 0 0; font-size: 13.5px }
+.opt-none .link { font-weight: 500 }
 .spark { display: block; flex: none; width: 96px; height: 30px }
 .price { flex: none; min-width: 84px; text-align: right; white-space: nowrap }
 .price b { font: 600 19px/1.2 var(--font); letter-spacing: -0.015em; display: block }

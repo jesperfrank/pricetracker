@@ -1036,7 +1036,7 @@ grant select on t.donor, t.snap to public;
 select t.chk('forbidden columns: the donor row differs from the target in every column except the bought ones',
   (select count(*) = 0 from jsonb_each((select to_jsonb(p) from public.products p where name = 'a-gave')) e
      join jsonb_each((select to_jsonb(d) from t.donor d)) f using (key)
-    where e.value = f.value and key not in ('bought_at', 'bought_price', 'bought_by')));
+    where e.value = f.value and key not in ('bought_at', 'bought_price', 'bought_by', 'name_options')));   -- name_options needs a product without a link: tested on its own ("Mente du")
 -- t.forbid(product): try to change every column but the bought ones; returns the columns where it did NOT fail with check_violation
 create function t.forbid(pid uuid) returns text language plpgsql as $$
 declare c record; bad text := ''; n integer; same boolean;
@@ -2874,6 +2874,189 @@ select t.tok(null);
 delete from public.questions; delete from public.ask_attempts;
 delete from public.lists where id in ('00000000-0000-0000-0000-00000000aa0d', '00000000-0000-0000-0000-00000000aa0e');
 select set_config('request.jwt.claims', '', false);
+
+-- 11h. "Mente du": name_options, resolver_suggest, the queue, the guard (browser, member) and the re-queue after a new name
+delete from public.products;
+update public.resolver_secret set token = repeat('a', 64);
+select t.tok(repeat('a', 64));
+insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000aa0f', '00000000-0000-0000-0000-0000000000a1', 'Mente');
+insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa0f', '00000000-0000-0000-0000-0000000000b2') on conflict do nothing;
+create function t.sg(n text, o jsonb) returns text language plpgsql as $$
+begin return public.resolver_suggest(t.pid(n), o)::text; exception when others then return 'error ' || sqlstate || ' ' || sqlerrm; end $$;
+create function t.opt(n text) returns jsonb language sql security definer as $$ select name_options from public.products where name = n $$;
+create function t.queue() returns text language plpgsql as $$
+begin return (select coalesce(string_agg(name, ',' order by name), '') from public.resolver_list() where kind = 'name'); exception when others then return sqlerrm; end $$;
+create function t.pst(n text) returns text language sql security definer as $$ select status || '|' || coalesce(check_note, '-') || '|' || coalesce(source_url, '-') || '|' || (name_options is not null)::text from public.products where name = n $$;
+grant execute on function t.sg(text, jsonb), t.opt(text), t.queue(), t.pst(text) to public;
+select t.chk('mente: the column, the helper, the check and the function exist; grants as the other resolver functions',
+  (select count(*) = 1 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name = 'name_options' and data_type = 'jsonb')
+  and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_name_options_check')
+  and has_function_privilege('anon', 'public.resolver_suggest(uuid, jsonb)', 'execute') and has_function_privilege('authenticated', 'public.resolver_suggest(uuid, jsonb)', 'execute')
+  and not exists (select 1 from information_schema.routine_privileges where routine_name = 'resolver_suggest' and grantee = 'PUBLIC'));
+
+-- A adds three products by name (one in a list shared with B), and one with a link
+set role authenticated;
+select t.asA();
+insert into public.products (name, target_type, list_id) values ('airfryer fra philips', 'auto', '00000000-0000-0000-0000-00000000aa0f');
+insert into public.products (name, target_type) values ('sony hovedtelefoner', 'auto');
+insert into public.products (name, target_type) values ('tredje navn', 'auto');
+insert into public.products (name, source_url, target_type) values ('med link', 'https://shop.example.dk/a', 'auto');
+select t.chk('mente: a browser insert cannot preset name_options', t.try($$insert into public.products (name, target_type, name_options) values ('snyd', 'auto', '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]')$$) = 'ok'
+  and t.opt('snyd') is null);
+delete from public.products where name = 'snyd';
+reset role;
+set role anon;
+select t.chk('mente: the three name-only products are in the queue, the one with a link is not', t.queue() = 'airfryer fra philips,sony hovedtelefoner,tredje navn');
+-- validation: every bad call is an error naming the option, nothing is stored
+select t.tok('fel');
+select t.chk('mente: needs the token', t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') like '%invalid or missing token%'
+  and t.opt('airfryer fra philips') is null);
+select t.tok(null);
+select t.chk('mente: ... and without a token header', t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') like '%invalid or missing token%');
+select t.tok(repeat('a', 64));
+select t.chk('mente: not an array, null, json null, one option, five options are refused',
+  t.sg('airfryer fra philips', '{"name":"a"}') like 'error 22023%' and t.sg('airfryer fra philips', null) like 'error 22023%' and t.sg('airfryer fra philips', 'null'::jsonb) like 'error 22023%'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a"}]') like 'error 22023%options must hold 2 to 4%'
+  and t.sg('airfryer fra philips', '[]') like 'error 22023%'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://s.dk/1"},{"name":"b","url":"https://s.dk/2"},{"name":"c","url":"https://s.dk/3"},{"name":"d","url":"https://s.dk/4"},{"name":"e","url":"https://s.dk/5"}]') like 'error 22023%2 to 4%');
+select t.chk('mente: an entry that is not an object, an unknown key, a missing name or url are refused',
+  t.sg('airfryer fra philips', '["x", {"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%option 1 is not an object'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a","why":"fordi"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%option 1: unknown key why'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a"},{"url":"https://shop.example.dk/b"}]') like 'error 22023%option 2: name is missing'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b"}]') like 'error 22023%option 2: url is missing'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":null},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%option 1: url is missing');
+select t.chk('mente: text rules: empty, 121 characters, angle brackets, control characters, direction marks, a store over 60 or empty, not a string',
+  t.sg('airfryer fra philips', '[{"name":"  ","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%option 1: name is not valid'
+  and t.sg('airfryer fra philips', jsonb_build_array(jsonb_build_object('name', repeat('a', 121), 'url', 'https://shop.example.dk/a'), jsonb_build_object('name', 'b', 'url', 'https://shop.example.dk/b'))) like 'error 22023%option 1: name is not valid'
+  and t.sg('airfryer fra philips', '[{"name":"a<b>","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%option 1: name has control characters or angle brackets'
+  and t.sg('airfryer fra philips', jsonb_build_array(jsonb_build_object('name', 'a' || chr(10) || 'b', 'url', 'https://shop.example.dk/a'), jsonb_build_object('name', 'b', 'url', 'https://shop.example.dk/b'))) like 'error 22023%control characters%'
+  and t.sg('airfryer fra philips', jsonb_build_array(jsonb_build_object('name', 'a' || chr(8238) || 'b', 'url', 'https://shop.example.dk/a'), jsonb_build_object('name', 'b', 'url', 'https://shop.example.dk/b'))) like 'error 22023%control characters%'
+  and t.sg('airfryer fra philips', jsonb_build_array(jsonb_build_object('name', 'a', 'url', 'https://shop.example.dk/a', 'store', repeat('s', 61)), jsonb_build_object('name', 'b', 'url', 'https://shop.example.dk/b'))) like 'error 22023%option 1: store is not valid'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a","store":""},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%option 1: store is not valid'
+  and t.sg('airfryer fra philips', '[{"name":7,"url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%option 1: name must be a string');
+select t.chk('mente: prices: zero, negative, text, 10 million, boolean are refused',
+  t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a","price":0},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%option 1: price must be above 0%'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a","price":-5},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%price must be above 0%'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a","price":"12"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%price must be a number'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a","price":10000000},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%price must be above 0%'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a","price":true},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%price must be a number'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a","price":0.001},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%price must be above 0%');
+select t.chk('mente: urls: http, port, spaces, no dot, a prisjagt search or other prisjagt page, extra query, over 500, duplicates (also with www and case) are refused',
+  t.sg('airfryer fra philips', '[{"name":"a","url":"http://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%option 1: url is not a usable https link'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk:8443/a"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%url is not a usable https link'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/en vare"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%url is not a usable https link'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://localhost/a"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%url is not a usable https link'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://prisjagt.dk/search?search=airfryer"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%option 1: a prisjagt.dk link must be exactly%'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://www.prisjagt.dk/product.php?p=12&x=1"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%a prisjagt.dk link must be exactly%'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://prisjagt.dk/product.php?p=abc"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%a prisjagt.dk link must be exactly%'
+  and t.sg('airfryer fra philips', jsonb_build_array(jsonb_build_object('name', 'a', 'url', 'https://shop.example.dk/' || repeat('a', 480)), jsonb_build_object('name', 'b', 'url', 'https://shop.example.dk/b'))) like 'error 22023%url is not a usable https link'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://prisjagt.dk/product.php?p=12"},{"name":"b","url":"https://www.prisjagt.dk/product.php?p=12"}]') like 'error 22023%option 2: the same url as another option'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/A"},{"name":"b","url":"https://shop.example.dk/a"}]') like 'error 22023%the same url%'
+  and t.sg('airfryer fra philips', '[{"name":"a","url":"javascript:alert(1)"},{"name":"b","url":"https://shop.example.dk/b"}]') like 'error 22023%url is not a usable https link');
+select t.chk('mente: after all that nothing is stored and the product is still in the queue', t.opt('airfryer fra philips') is null and t.pst('airfryer fra philips') = 'pending|-|-|false' and t.queue() like 'airfryer fra philips%');
+
+-- a good call: cleaned copy, the product leaves the queue, source_url stays null
+select t.chk('mente: a good call returns true',
+  t.sg('airfryer fra philips', '[{"name":"  Philips Airfryer HD9270/90  ","url":"https://www.prisjagt.dk/product.php?p=1234567","price":1299.499,"store":" Proshop "},{"name":"Philips Airfryer 3000","url":"https://shop.example.dk/philips-3000","price":null},{"name":"Philips Airfryer XXL","url":"https://prisjagt.dk/product.php?p=777","store":null}]') = 'true');
+select t.chk('mente: ... stored cleaned (trimmed, www dropped, price rounded, null keys left out), in the given order',
+  t.opt('airfryer fra philips') = '[{"name":"Philips Airfryer HD9270/90","url":"https://prisjagt.dk/product.php?p=1234567","price":1299.50,"store":"Proshop"},{"name":"Philips Airfryer 3000","url":"https://shop.example.dk/philips-3000"},{"name":"Philips Airfryer XXL","url":"https://prisjagt.dk/product.php?p=777"}]'::jsonb);
+select t.chk('mente: ... source_url stays null, status pending, and the row is out of the queue', t.pst('airfryer fra philips') = 'pending|-|-|true' and t.queue() = 'sony hovedtelefoner,tredje navn');
+select t.chk('mente: a second call finds the product not waiting (false), also a good one', t.sg('airfryer fra philips', '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') = 'false'
+  and t.opt('airfryer fra philips') -> 0 ->> 'name' = 'Philips Airfryer HD9270/90');
+select t.chk('mente: a bad shape is an error even for a product that is not waiting', t.sg('airfryer fra philips', '[{"name":"a"}]') like 'error 22023%');
+select t.chk('mente: a product with a link, an unknown id: false', t.sg('med link', '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') = 'false'
+  and public.resolver_suggest('00000000-0000-0000-0000-00000000dead', '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') = false);
+reset role;
+update public.products set status = 'error', check_note = 'x' where name = 'tredje navn';
+set role anon;
+select t.chk('mente: a failed product is not waiting: false', t.sg('tredje navn', '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') = 'false');
+reset role;
+update public.products set status = 'pending', check_note = null where name = 'tredje navn';
+
+-- the browser: cannot write the options, choosing a link clears them, a new name clears and re-queues
+set role authenticated;
+select t.asA();
+select t.chk('mente: A sees the options of the own product', (select jsonb_array_length(name_options) = 3 from public.products where name = 'airfryer fra philips'));
+update public.products set name_options = null where name = 'airfryer fra philips';
+select t.chk('mente: A cannot clear the options (ignored)', t.opt('airfryer fra philips') is not null);
+update public.products set name_options = '[{"name":"x","url":"https://shop.example.dk/x"},{"name":"y","url":"https://shop.example.dk/y"}]' where name = 'airfryer fra philips';
+select t.chk('mente: ... nor replace them (ignored)', t.opt('airfryer fra philips') -> 0 ->> 'name' = 'Philips Airfryer HD9270/90');
+update public.products set target_value = null, shops_only = false where name = 'airfryer fra philips';
+select t.chk('mente: other edits leave the options and the status alone', t.pst('airfryer fra philips') = 'pending|-|-|true');
+reset role;
+-- B is a member of the shared list: reads, cannot touch
+set role authenticated;
+select t.asB();
+select t.chk('mente: B (a member) sees the options', (select jsonb_array_length(name_options) = 3 from public.products where name = 'airfryer fra philips'));
+select t.chk('mente: B cannot change the options, the name or the link of A''s product (check violation each)',
+  t.try($$update public.products set name_options = null where name = 'airfryer fra philips'$$) = 'check'
+  and t.try($$update public.products set name = 'andet navn' where name = 'airfryer fra philips'$$) = 'check'
+  and t.try($$update public.products set source_url = 'https://shop.example.dk/x' where name = 'airfryer fra philips'$$) = 'check'
+  and t.pst('airfryer fra philips') = 'pending|-|-|true');
+select t.chk('mente: B may still mark it bought (the options stay)',
+  t.try($$update public.products set bought_at = now() where name = 'airfryer fra philips'$$) = 'ok' and t.pst('airfryer fra philips') = 'pending|-|-|true');
+update public.products set bought_at = null, bought_price = null where name = 'airfryer fra philips';
+reset role;
+set role anon;
+select t.chk('mente: anon sees no products', t.denied('select * from public.products'));
+reset role;
+-- A chooses an option: the link is set through the ordinary path, the options are gone, the product starts as a new link
+set role authenticated;
+select t.asA();
+update public.products set source_url = 'https://prisjagt.dk/product.php?p=1234567' where name = 'airfryer fra philips';
+select t.chk('mente: A sets source_url to an option: options gone, status pending, name unchanged', t.pst('airfryer fra philips') = 'pending|-|https://prisjagt.dk/product.php?p=1234567|false'
+  and (select name = 'airfryer fra philips' from public.products where name = 'airfryer fra philips'));
+reset role;
+-- "Ingen af dem": a new name clears the options, the failure note and re-queues
+set role anon;
+select t.chk('mente: second product gets options', t.sg('sony hovedtelefoner', '[{"name":"Sony WH-1000XM5","url":"https://prisjagt.dk/product.php?p=11"},{"name":"Sony WH-CH720N","url":"https://prisjagt.dk/product.php?p=12","price":699,"store":"Elgiganten"}]') = 'true' and t.queue() = 'tredje navn');
+reset role;
+set role authenticated;
+select t.asA();
+update public.products set name = 'sony wh-1000xm4 sort' where name = 'sony hovedtelefoner';
+select t.chk('mente: A types a new name: options gone, pending, no note', t.pst('sony wh-1000xm4 sort') = 'pending|-|-|false');
+reset role;
+set role anon;
+select t.chk('mente: ... and the product is in the agent''s queue again', t.queue() = 'sony wh-1000xm4 sort,tredje navn');
+select t.chk('mente: resolver_fail on a waiting product marks it as failed', public.resolver_fail(t.pid('tredje navn'), 'Fandt ikke varen.') = true and t.pst('tredje navn') = 'error|Fandt ikke varen.|-|false');
+reset role;
+set role authenticated;
+select t.asA();
+update public.products set name = 'tredje navn igen' where name = 'tredje navn';
+select t.chk('mente: a new name on a failed name-only product: pending again, the note is gone, queued', t.pst('tredje navn igen') = 'pending|-|-|false');
+update public.products set name = 'tredje navn igen' where name = 'tredje navn igen';
+update public.products set name = 'tredje navn igen', target_value = null where name = 'tredje navn igen';
+select t.chk('mente: the same name again changes nothing', t.pst('tredje navn igen') = 'pending|-|-|false');
+reset role;
+set role anon;
+select t.chk('mente: queue has both', t.queue() = 'sony wh-1000xm4 sort,tredje navn igen');
+select t.chk('mente: resolver_set clears options too', t.sg('sony wh-1000xm4 sort', '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') = 'true'
+  and public.resolver_set(t.pid('sony wh-1000xm4 sort'), 'https://prisjagt.dk/product.php?p=55') = true and t.pst('sony wh-1000xm4 sort') = 'pending|-|https://prisjagt.dk/product.php?p=55|false');
+select t.chk('mente: resolver_fail clears options too', t.sg('tredje navn igen', '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]') = 'true'
+  and public.resolver_fail(t.pid('tredje navn igen'), 'Intet passer.') = true and t.pst('tredje navn igen') = 'error|Intet passer.|-|false');
+reset role;
+-- a rename of a product that has a link is just a rename (no re-queue, nothing reset)
+update public.products set status = 'tracking', title = 'T' where name = 'med link';
+set role authenticated;
+select t.asA();
+update public.products set name = 'med link 2' where name = 'med link';
+select t.chk('mente: a rename of a product with a link does not restart it', (select status = 'tracking' and title = 'T' from public.products where name = 'med link 2'));
+reset role;
+-- the safety net: a product with a link cannot hold options, and one option is not enough (even for the service role)
+select t.chk('mente: the check: options need a product without a link', t.try($$update public.products set name_options = '[{"name":"a","url":"https://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]' where name = 'med link 2'$$) = 'check');
+select t.chk('mente: the check: one option or a bad option is refused for the service role too',
+  t.try($$update public.products set source_url = null, status = 'pending', name_options = '[{"name":"a","url":"https://shop.example.dk/a"}]' where name = 'med link 2'$$) = 'check'
+  and t.try($$update public.products set source_url = null, status = 'pending', name_options = '[{"name":"a","url":"http://shop.example.dk/a"},{"name":"b","url":"https://shop.example.dk/b"}]' where name = 'med link 2'$$) = 'check');
+-- the whole file again on the data (twice)
+\o /dev/null
+\i :schema
+\i :schema
+\o
+select t.chk('mente: a re-run keeps the data', t.pst('sony wh-1000xm4 sort') = 'pending|-|https://prisjagt.dk/product.php?p=55|false');
+delete from public.products;
+delete from public.lists where id = '00000000-0000-0000-0000-00000000aa0f';
+select set_config('request.jwt.claims', '', false);
+select t.tok(null);
 
 -- 12. final whole-file run on the populated database
 \o /dev/null

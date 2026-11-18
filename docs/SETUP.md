@@ -107,6 +107,8 @@ Frontenden ligger i `web/` og udgives af workflowet `pages.yml`. Slå Pages til:
 
 Man kan skrive et produktnavn i stedet for et link. Produktet står så som "Finder produktet …", indtil et link er fundet: enten af brugeren selv ("Søg på Prisjagt" og indsæt linket) eller af navne-assistenten, en separat AI-agent der ikke hører til dette repo.
 
+Er navnet ikke præcist, kan assistenten foreslå 2 til 4 varer ("Mente du"), og man vælger selv; assistentens prompt skal kende `resolver_suggest` (se `docs/AI.md`).
+
 1. Kør hele `supabase/schema.sql` igen i **SQL Editor** (det er sikkert; der oprettes ikke et nyt token, hvis der allerede er et).
 2. Nederst i resultatet vises en kolonne `resolver_token_copy_this` med en lang tekst. Kopiér den. Den kan også ses senere ved at køre `select token from public.resolver_secret;` i SQL Editor.
 3. Teksten er værdien til hemmeligheden `x-resolver-token`, som navne-assistenten bruger (sendes som HTTP-headeren `x-resolver-token`). Assistenten bruger kun den offentlige anon/publishable-nøgle, aldrig service_role-nøglen. Del ikke tokenet andre steder, og læg det ikke i repoet.

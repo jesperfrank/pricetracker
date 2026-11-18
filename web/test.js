@@ -112,6 +112,11 @@ const FAKE = `
               delete q.payload.extra_urls;
             }
             if ("bought_price" in q.payload && q.payload.bought_price !== null && !(q.payload.bought_price > 0 && q.payload.bought_price <= 10000000)) return;   // check constraint (see below)
+            if (table === "products" && "name_options" in r) {   // products_guard: the options are the agent's; a new link or (without a link) a new name clears them, and a new name queues the product again
+              delete q.payload.name_options;
+              if (newLink) r.name_options = null;
+              else if ("name" in q.payload && q.payload.name !== r.name && !r.source_url) { r.name_options = null; r.status = "pending"; r.check_note = null; }
+            }
             Object.keys(q.payload).forEach(function (k) { if (JOB.indexOf(k) < 0) r[k] = clone(q.payload[k]); });
             if (q.payload.bought_at) r.bought_at = "2026-11-16T12:00:00Z";   // products_guard: the server stamps the time
             if (newLink) { r.status = "pending"; r.check_note = null; }   // what products_guard does on a new link
@@ -2482,7 +2487,7 @@ let base;
     await p.locator('.head[data-id="gb"]').click();
     await p.evaluate(() => { var r = window.__db.products.filter(x => x.id === "ga")[0]; r.target_value = 1000; });
     await tick(p);
-    check("order: an open row stays where it is", JSON.stringify(await names(p)) === '["Nær","Midt","Langt"]' && (await p.locator('.head[data-id="gb"]').getAttribute("aria-expanded")) === "true");
+    check("order: an open row stays where it is", JSON.stringify(await names(p)) === '["Nær","Midt","Langt"]' && (await p.locator('.head[data-id="gb"] .tgl').getAttribute("aria-expanded")) === "true");
     await p.locator('.head[data-id="gb"]').click();
     // a row that becomes a hit moves up under the label, nothing else moves
     await p.evaluate(() => { var r = window.__db.products.filter(x => x.id === "gb")[0]; r.target_value = 2100; });
@@ -3013,6 +3018,184 @@ let base;
       check("details: ... and the text is gone", (await finding("f1")) === null);
       await p.context().close();
     }
+  }
+
+  // "Mente du": suggestions for a name-only product whose typed name is not exact
+  {
+    const ago = h => new Date(Date.now() - h * 36e5).toISOString();
+    const HOST = '<img src=x onerror="window.__xss=1"> & "q"';
+    const nm = (id, over) => Object.assign({ id, user_id: "u1", name: "airfryer fra philips", source_url: null, target_type: "auto", target_value: null, status: "pending", check_note: null, created_at: ago(1), tracked_variants: null, active: true, name_options: null }, over || {});
+    const OPTS = [
+      { name: "Philips Airfryer HD9270/90", url: "https://prisjagt.dk/product.php?p=1234567", price: 1299, store: "Proshop" },
+      { name: "Philips Airfryer 3000", url: "https://shop.example.dk/philips-3000", price: 999.4 },
+      { name: "Philips Airfryer XXL", url: "https://prisjagt.dk/product.php?p=777" },
+      { name: "Ond", url: "javascript:alert(1)", price: 1 }                                // never shown (not a usable link)
+    ];
+    const HOSTILE = [{ name: HOST, url: "https://prisjagt.dk/product.php?p=5", store: HOST, price: 10 }, { name: "<b>fed</b>", url: "https://shop.example.dk/x?a=1&b=2", price: 20, store: "<script>1</script>" },
+      { name: "Ingen link", url: "http://shop.example.dk/a" }, { name: "Prisjagt søgning", url: "https://prisjagt.dk/search?search=x" }];
+    const item = (p, id) => p.locator('.item:has(.head[data-id="' + id + '"])');
+    {
+      const tracked = row("test-sony-xm5", { id: "t1" });
+      const p = await open({ products: [tracked, nm("o1", { name_options: OPTS }), nm("o3"), nm("o5", { name_options: HOSTILE, name: "hostile" }),
+        nm("o2", { user_id: "o9", list_id: "lx", name: "fars airfryer", name_options: OPTS })], lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], width: 400, label: "mente" });
+      await p.waitForSelector(".item");
+      const names = await p.$$eval("#list .item .head h2", e => e.map(x => x.textContent));
+      check("mente: a name-only product with options says 'Vælg vare' (quiet, like 'Vælg variant'); one without options still says 'Finder produktet'",
+        /Vælg vare/.test(await item(p, "o1").locator(".head .meta").textContent()) && /Finder produktet …/.test(await item(p, "o3").locator(".head .meta").textContent()) && (await item(p, "o1").locator(".head .meta .out").count()) === 1);
+      check("mente: the rows that need the person come above the ordinary ones", names.indexOf("airfryer fra philips") < names.indexOf(await item(p, "t1").locator("h2").textContent()) && names.indexOf("hostile") < names.indexOf(await item(p, "t1").locator("h2").textContent()), names.join("|"));
+      check("mente: the row has no 'waiting' dot and is open by default (own product)", (await item(p, "o1").locator(".head .tgl").getAttribute("aria-expanded")) === "true" && (await item(p, "o1").locator(".body").count()) === 1
+        && (await item(p, "o1").evaluate(e => getComputedStyle(e.querySelector(".head .meta"), "::before").content)) === "none");
+      const o1 = item(p, "o1");
+      check("mente: the card has the small heading 'Mente du' and three options (the unusable link is dropped), most likely first",
+        (await o1.locator(".mente h3").textContent()) === "Mente du" && (await o1.locator(".opt-list li").count()) === 3 && (await o1.locator(".opt-name").allTextContents()).join("|") === "Philips Airfryer HD9270/90|Philips Airfryer 3000|Philips Airfryer XXL");
+      check("mente: price and store are shown as 'fra 1.299 kr. hos Proshop'; price only as 'fra 999 kr.'; neither: nothing",
+        (await o1.locator(".opt-list li").nth(0).locator(".meta").textContent()) === "fra 1.299 kr. hos Proshop" && (await o1.locator(".opt-list li").nth(1).locator(".meta").textContent()) === "fra 999 kr." && (await o1.locator(".opt-list li").nth(2).locator(".meta").count()) === 0);
+      check("mente: options are tappable rows of at least 44 px; 'Ingen af dem' is a text action", (await o1.locator("button.opt").count()) === 3 && (await o1.locator("button.opt").evaluateAll(es => es.every(e => e.getBoundingClientRect().height >= 43.5))) && (await o1.locator(".opt-none .link").textContent()) === "Ingen af dem");
+      check("mente: no paste form while options are shown, and 'Indstil vare' is still there", (await o1.locator("[data-fixurl]").count()) === 0 && (await o1.locator(".manage .disc").count()) === 1);
+      const h5 = item(p, "o5");
+      check("mente: hostile text is shown as text only (angle brackets become spaces), links that are not usable are dropped", (await h5.locator("img, b, script").count()) === 0 && (await p.evaluate(() => window.__xss)) === undefined
+        && (await h5.locator(".opt-list li").count()) === 2 && /img src=x onerror=/.test(await h5.locator(".opt-name").first().textContent()) && !/[<>]/.test(await h5.locator(".opt-list").textContent()), (await h5.locator(".opt-name").allTextContents()).join("|"));
+      const o2 = item(p, "o2");
+      check("mente: someone else's product (shared list): the status, no actions", /Vælg vare/.test(await o2.locator(".head .meta").textContent()) && (await o2.locator(".head .tgl").getAttribute("aria-expanded")) === "false");
+      await o2.locator(".head").click();
+      check("mente: ... opened it shows the options as plain lines, no buttons, no 'Ingen af dem'", (await o2.locator(".mente h3").count()) === 1 && (await o2.locator(".opt-list li").count()) === 3 && (await o2.locator("button.opt, .opt-none").count()) === 0);
+      // choose an option: the ordinary write of source_url, nothing else
+      await o1.locator("button.opt").nth(0).click();
+      await p.waitForFunction(() => window.__db.ops.some(o => o.op === "update"));
+      const up = (await ops(p)).filter(o => o.op === "update");
+      check("mente: choosing writes only source_url (the option's own link) for that product", up.length === 1 && JSON.stringify(up[0].payload) === '{"source_url":"https://prisjagt.dk/product.php?p=1234567"}' && up[0].filters[0][1] === "o1", JSON.stringify(up));
+      await p.waitForFunction(() => /Henter produktet …/.test(document.querySelector('.item:has(.head[data-id="o1"]) .head').textContent));
+      check("mente: ... then the row is an ordinary fetching row: no options, no 'Vælg vare'", (await o1.locator(".mente").count()) === 0 && !/Vælg vare/.test(await o1.textContent()) && (await o1.locator(".head h2").textContent()) === "airfryer fra philips");
+      check("mente: no horizontal overflow at 400 px", (await p.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)));
+      await p.context().close();
+    }
+    {   // "Ingen af dem": a new name
+      const p = await open({ products: [nm("o1", { name_options: OPTS }), nm("o4", { name_options: OPTS, name: "to" })], label: "mente-none" });
+      await p.waitForSelector(".item");
+      const o1 = item(p, "o1");
+      check("mente: the one-line input is hidden until 'Ingen af dem' is pressed", (await o1.locator("[data-newname]").count()) === 0);
+      await o1.locator('[data-act="opt-none"]').click();
+      check("mente: ... then it shows a labelled input with the name and a 'Søg igen' action, the options stay", (await o1.locator("[data-newname] input").inputValue()) === "airfryer fra philips" && (await o1.locator("[data-newname] label").textContent()) === "Nyt navn"
+        && /Søg igen/.test(await o1.locator("[data-newname] button").textContent()) && (await o1.locator("button.opt").count()) === 3 && await o1.locator("[data-newname] input").evaluate(e => document.activeElement === e));
+      await o1.locator("[data-newname] button").click();
+      check("mente: the same name asks for a new one and writes nothing", /Skriv et nyt navn\./.test(await o1.locator("[data-newname] .meta").textContent()) && (await ops(p)).length === 0);
+      await o1.locator("[data-newname] input").fill("a");
+      await o1.locator("[data-newname] button").click();
+      check("mente: a name that is too short is refused, nothing is written", /mellem 2 og 140/.test(await o1.locator("[data-newname] .meta").textContent()) && (await ops(p)).length === 0);
+      await o1.locator("[data-newname] input").fill("  philips   airfryer hd9270 ");
+      await o1.locator("[data-newname] button").click();
+      await p.waitForFunction(() => window.__db.ops.some(o => o.op === "update"));
+      const up = (await ops(p)).filter(o => o.op === "update");
+      check("mente: 'Søg igen' writes only the new name (trimmed, one space), nothing about options or status", up.length === 1 && JSON.stringify(up[0].payload) === '{"name":"philips airfryer hd9270"}' && up[0].filters[0][1] === "o1", JSON.stringify(up));
+      await p.waitForFunction(() => /Finder produktet …/.test(document.querySelector('.item:has(.head[data-id="o1"]) .head').textContent));
+      check("mente: ... the row shows the new name and 'Finder produktet' again, the options are gone", (await o1.locator(".head h2").textContent()) === "philips airfryer hd9270" && (await o1.locator(".mente").count()) === 0 && (await p.evaluate(() => window.__db.products[0].name_options)) === null);
+      // a link typed instead of a name is a link
+      await item(p, "o4").locator('[data-act="opt-none"]').click();
+      await item(p, "o4").locator("[data-newname] input").fill("https://www.prisjagt.dk/product.php?p=4242");
+      await item(p, "o4").locator("[data-newname] button").click();
+      await p.waitForFunction(() => window.__db.ops.filter(o => o.op === "update").length === 2);
+      const up2 = (await ops(p)).filter(o => o.op === "update")[1];
+      check("mente: a link typed into the field is written as source_url (the ordinary path)", JSON.stringify(up2.payload) === '{"source_url":"https://prisjagt.dk/product.php?p=4242"}' && up2.filters[0][1] === "o4", JSON.stringify(up2));
+      await p.context().close();
+    }
+    {   // a failing save says so; a missing column hides everything quietly
+      const p = await open({ products: [nm("o1", { name_options: OPTS })], label: "mente-fail" });
+      await p.waitForSelector(".item");
+      await p.evaluate(() => { window.__db.netFail = true; });
+      await item(p, "o1").locator("button.opt").nth(1).click();
+      await p.waitForFunction(() => /Kunne ikke gemme lige nu/.test(document.body.innerText));
+      check("mente: a failing save says so and keeps the options", (await item(p, "o1").locator("button.opt").count()) === 3 && (await item(p, "o1").locator("button.opt").first().isEnabled()));
+      await p.context().close();
+      const q = await open({ products: [{ id: "n1", user_id: "u1", name: "gammel database", source_url: null, target_type: "auto", target_value: null, status: "pending", created_at: ago(1), tracked_variants: null, active: true }], label: "mente-nocol" });
+      await q.waitForSelector(".item");
+      check("mente: without the column (an older database) the row is an ordinary waiting row", /Finder produktet …/.test(await q.locator(".head .meta").textContent()) && !/Vælg vare|Mente du/.test(await q.textContent("#list")) && (await q.locator(".head .tgl").getAttribute("aria-expanded")) === "false");
+      await q.context().close();
+    }
+  }
+
+  // text can be selected and copied; the row is a container with a real control inside
+  {
+    const ago = h => new Date(Date.now() - h * 36e5).toISOString();
+    const rowOf = (id, over) => row("test-sony-xm5", Object.assign({ id, requirements: "sort, str. 43", source_url: "https://shop.example.dk/sony", alt_requested_at: ago(2), alt_done_at: ago(1),
+      alternatives: [{ kind: "similar", name: "Bose QC 45", url: "https://shop.example.dk/bose", store: "Shop A", price: 2199, why: "Samme klasse." }] }, over || {}));
+    const QS = [{ id: "q1", user_id: "u1", list_id: null, question: "Robotstøvsuger til hund", created_at: ago(3), status: "done", answered_at: ago(2), summary: "Roborock passer bedst til hundehår.", picks: [{ name: "Roborock Q Revo", url: "https://prisjagt.dk/product.php?p=1", store: "Elgiganten", price: 2999, why: "Børster godt." }], note: null }];
+    const p = await open({ products: [rowOf("s1"), rowOf("s2", { name: "Anden vare" })], questions: QS, label: "select" });
+    await p.waitForSelector(".item");
+    const head = id => p.locator('.head[data-id="' + id + '"]'), tgl = id => p.locator('.head[data-id="' + id + '"] .tgl');
+    const expanded = id => tgl(id).getAttribute("aria-expanded");
+    check("select: the row head is not a button; a real button with aria-expanded and the product name as label sits inside it",
+      (await head("s1").evaluate(e => e.tagName)) === "DIV" && (await tgl("s1").evaluate(e => e.tagName)) === "BUTTON" && (await tgl("s1").getAttribute("aria-label")) === (await head("s1").locator("h2").textContent()) && (await expanded("s1")) === "false");
+    check("select: no button wraps the name, the status or the price", (await p.locator(".head button").count()) === (await p.locator(".head").count()) && (await p.locator(".head button *").count()) === 0);
+    const sel = (selector) => p.evaluate(s => { const el = document.querySelector(s), r = document.createRange(); r.selectNodeContents(el); const g = document.getSelection(); g.removeAllRanges(); g.addRange(r); return g.toString(); }, selector);
+    const nameTxt = await head("s1").locator("h2").textContent();
+    check("select: the product name in the row can be selected (selection text = the name)", (await sel('.head[data-id="s1"] h2')) === nameTxt && nameTxt.length > 3);
+    check("select: ... the status line and the price too", (await sel('.head[data-id="s1"] .meta')).length > 3 && /kr\./.test(await sel('.head[data-id="s1"] .price b')));
+    await head("s1").click();
+    check("select: a plain click opens the row (aria-expanded true) and a second one closes it", (await expanded("s1")) === "true" && (await p.locator('.item:has(.head[data-id="s1"]) .body').count()) === 1);
+    check("select: the open card keeps its text selectable: name, verdict, goal line, details, shop name, price, alternative", await p.evaluate(() => {
+      const q = ['.item.open .head h2', '.item.open .verdict', '.item.open .goalline .gt', '.item.open .req', '.item.open .shops td', '.item.open .stats dd', '.item.open .alt-name', '.item.open .alt-price', '.item.open .head .price b', '.item.open .head .meta'];
+      return q.map(s => { const e = document.querySelector(s); return e ? getComputedStyle(e).userSelect + "|" + getComputedStyle(e).webkitUserSelect : s + " missing"; }).filter(v => /none|missing/.test(v));
+    }).then(a => a.length === 0 ? true : a.join(" ; ")) === true);
+    await head("s1").click();
+    check("select: a second click closes it", (await expanded("s1")) === "false");
+    // an account menu, a question answer
+    await p.click("#acctBtn");
+    check("select: the e-mail in the account menu, the question's answer and the picks are selectable", await p.evaluate(() => {
+      const bad = ['#who', '#qList .q-head .q-text'].filter(s => { const e = document.querySelector(s); return !e || getComputedStyle(e).userSelect === "none"; });
+      return bad.length === 0;
+    }) && (await p.textContent("#who")).indexOf("@") > 0);
+    await p.click("#acctBtn");
+    await p.click('#qList [data-qact="toggle"]');
+    check("select: ... (answer, summary, pick, price, shop)", await p.evaluate(() => ['#qList .q-sum', '#qList .alt-name', '#qList .alt-price', '#qList .q-body .meta'].every(s => { const e = document.querySelector(s); return !!e && getComputedStyle(e).userSelect !== "none" && e.textContent.length > 1; })));
+    // a drag over the text selects it and does NOT toggle the row
+    const hb = await head("s2").locator("h2").boundingBox();
+    await p.mouse.move(hb.x + 1, hb.y + hb.height / 2); await p.mouse.down(); await p.mouse.move(hb.x + Math.min(hb.width - 2, 60), hb.y + hb.height / 2, { steps: 6 }); await p.mouse.up();
+    const dragged = await p.evaluate(() => document.getSelection().toString());
+    check("select: dragging over the name selects text with the mouse and does not toggle the row", dragged.length > 0 && "Anden vare".indexOf(dragged.trim()) >= 0 && (await expanded("s2")) === "false", JSON.stringify(dragged));
+    // a click that ends a selection does not toggle; the same click without a selection does
+    await sel('.head[data-id="s2"] h2');
+    await head("s2").evaluate(e => e.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, clientX: 5, clientY: 5 })));
+    check("select: a click while text is selected (the end of a selection) does not toggle", (await expanded("s2")) === "false");
+    await p.evaluate(() => document.getSelection().removeAllRanges());
+    await head("s2").evaluate(e => e.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1, clientX: 5, clientY: 5 })));
+    check("select: ... without a selection the same click toggles", (await expanded("s2")) === "true");
+    await head("s2").click();
+    check("select: a real click closes it again", (await expanded("s2")) === "false");
+    // keyboard
+    await tgl("s2").focus();
+    await p.keyboard.press("Enter");
+    check("select: keyboard: Enter on the row control opens the row, aria-expanded is true, focus stays on the control", (await expanded("s2")) === "true" && (await p.evaluate(() => document.activeElement.classList.contains("tgl") && document.activeElement.getAttribute("data-id") === "s2")));
+    await p.keyboard.press("Space");
+    check("select: ... Space closes it", (await expanded("s2")) === "false" && (await p.evaluate(() => document.activeElement.classList.contains("tgl"))));
+    check("select: ... a text selection elsewhere does not stop a keyboard toggle", await (async () => { await sel('.head[data-id="s1"] h2'); await p.keyboard.press("Enter"); return (await expanded("s2")) === "true"; })());
+    await p.keyboard.press("Enter");
+    check("select: the control has a focus ring (outline) and covers the row", await tgl("s2").focus().then(() => tgl("s2").evaluate(e => { const r = e.getBoundingClientRect(), h = e.parentNode.getBoundingClientRect(); return Math.abs(r.width - h.width) < 1 && Math.abs(r.height - h.height) < 1 && getComputedStyle(e).outlineStyle !== "none"; })));
+    check("select: the row is at least 44 px high", (await head("s2").evaluate(e => e.getBoundingClientRect().height)) >= 44);
+    // a background reload does not take a selection away
+    await sel('.head[data-id="s2"] h2');
+    await p.evaluate(() => { window.__db.products.push({ id: "s9", user_id: "u1", name: "Ny vare fra en anden fane", source_url: "https://shop.example.dk/ny", target_type: "auto", target_value: null, status: "pending", created_at: new Date().toISOString(), tracked_variants: null, active: true }); window.__tick(); });
+    await p.waitForTimeout(250);
+    const keep = await p.evaluate(() => ({ s: document.getSelection().toString(), n: document.querySelectorAll('.head[data-id="s9"]').length }));
+    check("select: a poll while text is selected waits (the selection stays), and draws the new row when it is gone", keep.s === "Anden vare" && keep.n === 0, JSON.stringify(keep));
+    await p.evaluate(() => document.getSelection().removeAllRanges());
+    await p.waitForSelector('.head[data-id="s9"]');
+    check("select: ... now it is drawn", (await p.locator('.head[data-id="s9"]').count()) === 1);
+    // "Kopiér" next to the link in "Indstil vare"
+    await p.evaluate(() => { window.__copied = null; Object.defineProperty(navigator, "clipboard", { value: { writeText: t => { window.__copied = t; return Promise.resolve(); } }, configurable: true }); });
+    await head("s1").click();
+    const cp = p.locator('.item:has(.head[data-id="s1"]) [data-act="copy-link"]');
+    check("select: 'Kopiér' sits next to the product's link in 'Indstil vare'", (await cp.count()) === 1 && (await cp.textContent()) === "Kopiér" && (await p.locator('.item:has(.head[data-id="s1"]) .manage a').first().textContent()) === "Dit link");
+    await cp.click();
+    await p.waitForFunction(() => window.__copied);
+    check("select: ... it copies the address and says 'Kopieret' for a moment", (await p.evaluate(() => window.__copied)) === "https://shop.example.dk/sony" && (await cp.textContent()) === "Kopieret");
+    await p.context().close();
+    // no horizontal overflow at 360 px, rows open
+    const m = await open({ products: [rowOf("s1"), rowOf("s2", { name: "Anden vare med et rigtig langt navn der skal ombrydes pænt på en smal skærm" })], width: 360, height: 800, label: "select-360" });
+    await m.waitForSelector(".item");
+    for (const id of ["s1", "s2"]) await m.locator('.head[data-id="' + id + '"]').click();
+    const w = await m.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    check("select: no horizontal overflow at 360 px with the rows open", w.sw <= w.cw, JSON.stringify(w));
+    await m.context().close();
   }
 
   check("no page errors", pageErrors.length === 0, pageErrors.join(" | "));
