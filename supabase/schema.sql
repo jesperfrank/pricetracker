@@ -1103,6 +1103,8 @@ revoke all on public.access_requests from public, anon, authenticated;
 grant select, insert, update, delete on public.access_requests to service_role;
 
 -- Returns 'requested' | 'pending' | 'allowed' | 'rejected' | 'full' | 'invalid'. Never raises on bad input.
+-- A signed-in caller (a JWT with an e-mail claim) always asks for their OWN address: p_email is ignored, so nobody can file requests
+-- for others. Anonymous callers (the login screen, no e-mail claim) and the service role use p_email.
 create or replace function public.request_access(p_email text, p_name text)
 returns text
 language plpgsql
@@ -1115,6 +1117,9 @@ declare
   st text;
   k  integer;
 begin
+  if coalesce(auth.jwt() ->> 'email', '') <> '' then
+    e := lower(btrim(auth.jwt() ->> 'email'));
+  end if;
   if char_length(e) > 200 or e !~ '^[^[:space:][:cntrl:]@]+@[^[:space:][:cntrl:]@]+\.[^[:space:][:cntrl:]@]+$' then
     return 'invalid';
   end if;
@@ -1145,6 +1150,26 @@ end;
 $$;
 revoke all on function public.request_access(text, text) from public;
 grant execute on function public.request_access(text, text) to anon, authenticated, service_role;
+
+-- The signed-in caller's own access state, by the JWT e-mail: 'allowed' | 'pending' | 'rejected' | 'none'. The site shows its
+-- no-access screen from this. Reveals nothing about other addresses.
+create or replace function public.my_access()
+returns text
+language sql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+  select case
+    when exists (select 1 from public.allowed_emails a where a.email = lower(coalesce(auth.jwt() ->> 'email', ''))) then 'allowed'
+    else coalesce(
+      (select r.status from public.access_requests r
+        where r.email = lower(coalesce(auth.jwt() ->> 'email', '')) and r.status in ('pending', 'rejected')),
+      'none')
+  end;
+$$;
+revoke all on function public.my_access() from public, anon;
+grant execute on function public.my_access() to authenticated, service_role;
 
 -- Admin-only functions: anyone else gets SQLSTATE 42501.
 create or replace function public.admin_list_requests()

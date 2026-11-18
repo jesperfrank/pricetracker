@@ -290,8 +290,7 @@ async function accessMails(ctx, sb, fetchImpl, stats, log, canMail, now) {
       else {
         const admins = Array.from(new Set((await sb.select('allowed_emails', 'select=email&is_admin=eq.true'))
           .map((a) => String(a.email || '').trim().toLowerCase()).filter(Boolean)));
-        if (!admins.length) log('Adgangsanmodninger: ingen administrator i allowed_emails, ingen e-mail.');
-        else {
+        if (admins.length) {   // no administrator: step 3 logs that, once per run
           await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, admins, composeOwnerMail(pending, ctx.siteUrl));
           stats.sent++; stats.accessOwner++;
           for (const r of pending) { try { await mark(r.email, 'owner_notified_at'); } catch (e) { log('  Kunne ikke markere anmodning som meldt: ' + (e && e.message || e)); } }
@@ -320,6 +319,13 @@ async function accessMails(ctx, sb, fetchImpl, stats, log, canMail, now) {
       }
     }
   } catch (e) { log('Godkendelsesmails fejlede: ' + (e && e.message || e)); }
+
+  // 3. counts for the run summary (never addresses). A read error leaves them null: the summary then leaves them out.
+  try {
+    stats.accessPending = (await sb.select('access_requests', 'select=email&status=eq.pending&limit=1000')).length;
+    stats.accessAdmins = (await sb.select('allowed_emails', 'select=email&is_admin=eq.true&limit=1000')).length;
+    if (stats.accessAdmins === 0) log('Ingen administrator i allowed_emails.');
+  } catch (e) { /* quiet, as above */ }
 }
 
 // ---------------------------------------------------------------- the run
@@ -333,7 +339,7 @@ async function run(ctx) {
   const fetchImpl = ctx.fetch || fetch;
   const sb = makeClient(ctx.supabaseUrl, ctx.serviceKey, fetchImpl);
   const started = Date.now();
-  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, written: 0, writeFail: 0, deadline: false, extraPages: 0, extraFail: 0, extraDropped: 0, digests: 0, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null };
+  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, accessPending: null, accessAdmins: null, written: 0, writeFail: 0, deadline: false, extraPages: 0, extraFail: 0, extraDropped: 0, digests: 0, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null };
 
   // 0. wish-list imports (Ønskeskyen): before the price checks, so that the new products get their first price in this run.
   // Own step: it never fails the run, and it is skipped quietly when the imports table does not exist yet.
@@ -722,7 +728,7 @@ async function run(ctx) {
     'Produkter: ' + stats.total + ' aktive (nye: ' + stats.pending + ', følges: ' + stats.tracking + ', venter på valg: ' + stats.choose + ', fejl: ' + stats.error + ').',
     'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.extraPages ? ' (ekstra butikker: ' + stats.extraPages + ', uden pris: ' + stats.extraFail + ', forkastet som anden vare: ' + stats.extraDropped + ')' : '') + (stats.blockedHosts.length ? ' (afvist af ' + stats.blockedHosts.join(', ') + ': resten derfra sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
     'Nye hits: ' + stats.hits + '.' + (stats.backfilled ? ' Ældre priser fra Internet Archive: ' + stats.backfillPoints + ' for ' + stats.backfilled + ' produkt(er).' : ''),
-    'E-mails sendt: ' + stats.sent + (stats.digests ? ' (heraf morgenmails: ' + stats.digests + ')' : '') + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte.',
+    'E-mails sendt: ' + stats.sent + (stats.digests ? ' (heraf morgenmails: ' + stats.digests + ')' : '') + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte' + (stats.accessPending == null ? '' : ', ' + stats.accessPending + ' venter') + (stats.accessAdmins == null ? '' : ', ' + stats.accessAdmins + (stats.accessAdmins === 1 ? ' administrator' : ' administratorer')) + '.',
     'Skrevet til databasen: ' + stats.written + ', skrivefejl: ' + stats.writeFail + '. Tid: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s.',
   ];
   summary.forEach((l) => log(l));

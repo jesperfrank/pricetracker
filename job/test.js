@@ -955,6 +955,43 @@ test('access requests: one e-mail to the admins, one to each approved person, sa
   assert.strictEqual(rm.summary.length, 5); assert.strictEqual(dbm.sent.length, 2);
 });
 
+test('access summary: pending total and administrators counted (never addresses), no administrator is logged, read errors are quiet', async () => {
+  const row = (e, st, n) => ({ email: e, name: null, status: st, owner_notified_at: n || null, requester_notified_at: null });
+  // two waiting (one of them already reported to the owner), one admin (anna), nothing sent to approved people
+  const db = newDb();
+  db.access_requests.push(row('a@example.dk', 'pending'), row('b@example.dk', 'pending', '2026-11-15T10:00:00Z'), row('c@example.dk', 'rejected'));
+  const logs = [];
+  const r = await R.run(ctxFor(db, {}, { log: (l) => logs.push(l) }));
+  assert.strictEqual(r.summary.length, 5);
+  assert(/Adgang: 1 til ejer, 0 godkendte, 2 venter, 1 administrator\./.test(r.summary[3]), r.summary[3]);
+  assert(!/@example/.test(r.summary.join('\n')), 'counts only');
+  assert(!logs.some((l) => /Ingen administrator/.test(l)));
+  // already reported ones still count as waiting on a later run
+  const r2 = await R.run(ctxFor(db, {}));
+  assert(/0 til ejer, 0 godkendte, 2 venter, 1 administrator\./.test(r2.summary[3]), r2.summary[3]);
+  // plural, and nothing pending
+  const dbp = newDb(); dbp.allowed_emails.push({ email: 'far@example.dk', is_admin: true });
+  const r3 = await R.run(ctxFor(dbp, {}));
+  assert(/0 venter, 2 administratorer\./.test(r3.summary[3]), r3.summary[3]);
+  // no administrator at all: one clear line, even with nothing pending; pending ones are not mailed
+  const dbn = newDb(); dbn.allowed_emails = [{ email: 'bo@example.dk' }];
+  const l4 = []; const r4 = await R.run(ctxFor(dbn, {}, { log: (l) => l4.push(l) }));
+  assert.strictEqual(l4.filter((l) => /^Ingen administrator i allowed_emails\.$/.test(l)).length, 1, l4.join('\n'));
+  assert(/0 venter, 0 administratorer\./.test(r4.summary[3]) && r4.summary.length === 5);
+  const dbq = newDb(); dbq.allowed_emails = []; dbq.access_requests.push(row('x@example.dk', 'pending'));
+  const l5 = []; const r5 = await R.run(ctxFor(dbq, {}, { log: (l) => l5.push(l) }));
+  assert.strictEqual(l5.filter((l) => /Ingen administrator i allowed_emails/.test(l)).length, 1);
+  assert.strictEqual(dbq.sent.length, 0); assert(/1 venter, 0 administratorer\./.test(r5.summary[3]));
+  // a read error for the counts: left out of the line, nothing thrown, nothing logged about it
+  const dbe = newDb(); dbe.access_requests.push(row('a@example.dk', 'pending', '2026-11-15T10:00:00Z'));
+  const ctxE = ctxFor(dbe, {}); const f0 = ctxE.fetch;
+  ctxE.fetch = async (u, o) => { if (/limit=1000/.test(String(u)) && /access_requests|allowed_emails/.test(String(u))) return { ok: false, status: 500, text: async () => 'boom', json: async () => ({}) }; return f0(u, o); };
+  const l6 = []; ctxE.log = (l) => l6.push(l);
+  const r6 = await R.run(ctxE);
+  assert.strictEqual(r6.summary.length, 5); assert(/Adgang: 0 til ejer, 0 godkendte\./.test(r6.summary[3]), r6.summary[3]);
+  assert(!l6.some((l) => /Ingen administrator/.test(l)));
+});
+
 // ---------------------------------------------------------------- Internet Archive backfill (hand-written fixtures: web.archive.org was not reachable when this was written)
 
 const CDX_FIX = fs.readFileSync(path.join(FIX, 'wayback-cdx.json'), 'utf8');

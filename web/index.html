@@ -64,7 +64,7 @@
       <button type="button" class="link" id="sentResend">Send igen</button>
       <button type="button" class="link" id="sentBack">Brug en anden adresse</button>
     </div>
-    <p class="fine ask-row"><button type="button" class="link" id="askToggle" aria-expanded="false" aria-controls="askBox">Ingen adgang endnu? Bed om adgang</button></p>
+    <p class="ask-row"><button type="button" class="link" id="askToggle" aria-expanded="false" aria-controls="askBox">Ingen adgang endnu? Bed om adgang</button></p>
     <div id="askBox" hidden>
       <form class="login ask" id="askForm" novalidate>
         <label class="vh" for="aEmail">E-mailadresse</label>
@@ -75,6 +75,19 @@
       </form>
       <p class="info" id="aMsg" role="status" hidden></p>
     </div>
+  </section>
+
+  <!-- signed in, but not allowed (yet) -->
+  <section id="noAccessView" hidden>
+    <p class="na-who" id="naWho"></p>
+    <p class="lead" id="naLine"></p>
+    <form class="login ask" id="naForm" novalidate>
+      <label class="vh" for="naName">Dit navn</label>
+      <input class="inp" type="text" id="naName" autocomplete="name" maxlength="80" placeholder="Dit navn">
+      <button class="btn" id="naSubmit" type="submit">Bed om adgang</button>
+    </form>
+    <p class="info" id="naMsg" role="status" hidden></p>
+    <p class="na-act"><button type="button" class="link" id="naCheck" hidden>Tjek igen</button> <button type="button" class="link" id="naLogout">Log ud</button></p>
   </section>
 
   <!-- signed in -->

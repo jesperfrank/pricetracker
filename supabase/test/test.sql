@@ -77,9 +77,55 @@ select t.chk('name cut to 80 / null', (select char_length(name) = 80 from public
 update public.access_requests set status = 'rejected', decided_at = now() where email = 'tom@navn.dk';
 set role authenticated;
 select set_config('request.jwt.claims', '{"email":"someone@x.dk"}', false);
-select t.chk('rejected (no change), also for authenticated', public.request_access('tom@navn.dk', 'igen') = 'rejected');
+select t.chk('authenticated: p_email is ignored, the JWT address is used (no request for others)',
+  public.request_access('tom@navn.dk', 'igen') = 'requested');
 reset role;
+select t.chk('authenticated: request filed for the JWT address only', (select status = 'pending' and name = 'igen' from public.access_requests where email = 'someone@x.dk')
+  and (select status = 'pending' from public.access_requests where email = 'tom@navn.dk') is not true);
+delete from public.access_requests where email = 'someone@x.dk';
+update public.access_requests set status = 'rejected', decided_at = now() where email = 'tom@navn.dk';
+set role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-0000000000a1","email":"Tom@Navn.dk"}', false);
+select t.chk('authenticated: rejected for the own address, via the JWT', public.request_access('whatever@x.dk', 'igen') = 'rejected');
+reset role;
+select t.chk('authenticated: nothing created for the ignored p_email', not exists (select 1 from public.access_requests where email = 'whatever@x.dk'));
 select t.chk('rejected row unchanged', (select status = 'rejected' and name is null from public.access_requests where email = 'tom@navn.dk'));
+
+-- 5a. a request filed by a signed-in person shows up for the admin exactly like an anonymous one
+set role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-0000000000a3","email":"Via.Skaerm@x.dk"}', false);
+select t.chk('signed-in request: requested for the JWT address', public.request_access('hvem-som-helst@x.dk', 'Via Skærm') = 'requested');
+select t.chk('signed-in request: now pending in my_access', public.my_access() = 'pending');
+select set_config('request.jwt.claims', '{"email":"Mor@Familie.dk"}', false);
+select t.chk('signed-in request: listed for the admin like any other', exists (select 1 from public.admin_list_requests() where email = 'via.skaerm@x.dk' and name = 'Via Skærm'));
+reset role;
+delete from public.access_requests where email = 'via.skaerm@x.dk';
+
+-- 5b. my_access(): the signed-in caller's own state
+set role authenticated;
+select set_config('request.jwt.claims', '{"email":"Far@Familie.dk"}', false);
+select t.chk('my_access: allowed (case-insensitive)', public.my_access() = 'allowed');
+select set_config('request.jwt.claims', '{"email":"Ny@Person.dk"}', false);
+select t.chk('my_access: pending', public.my_access() = 'pending');
+select set_config('request.jwt.claims', '{"email":"tom@navn.dk"}', false);
+select t.chk('my_access: rejected', public.my_access() = 'rejected');
+select set_config('request.jwt.claims', '{"email":"aldrig@set.dk"}', false);
+select t.chk('my_access: none for an unknown address', public.my_access() = 'none');
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-0000-0000-0000000000a2"}', false);
+select t.chk('my_access: none without an e-mail claim', public.my_access() = 'none');
+reset role;
+update public.access_requests set status = 'approved', decided_at = now() where email = 'ny@person.dk';
+set role authenticated;
+select set_config('request.jwt.claims', '{"email":"ny@person.dk"}', false);
+select t.chk('my_access: approved request but address no longer allowed: none', public.my_access() = 'none');
+reset role;
+update public.access_requests set status = 'pending', decided_at = null where email = 'ny@person.dk';
+select t.chk('my_access: anon has no execute', (select not has_function_privilege('anon', 'public.my_access()', 'execute')
+  and has_function_privilege('authenticated', 'public.my_access()', 'execute')));
+set role anon;
+select set_config('request.jwt.claims', '', false);
+select t.chk('my_access: anon call denied', t.denied('select public.my_access()'));
+reset role;
 
 -- 6. the cap of 30 pending
 delete from public.access_requests;
@@ -156,6 +202,7 @@ reset role;
 -- 9. removed after approval: asking again starts a fresh request
 delete from public.access_requests where status = 'pending';
 set role anon;
+select set_config('request.jwt.claims', '', false);
 select t.chk('approved-then-removed can ask again', public.request_access('p1@x.dk', 'Ny') = 'requested');
 reset role;
 select t.chk('request reset to pending, notifications cleared', (select status = 'pending' and decided_at is null and requester_notified_at is null and owner_notified_at is null from public.access_requests where email = 'p1@x.dk'));

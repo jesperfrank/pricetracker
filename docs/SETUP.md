@@ -46,14 +46,27 @@ Siden accepterer en kode på 6 til 8 cifre, så den passer, uanset hvor lang en 
 
 Jeg er usikker på de præcise navne i dashboardet: i nogle versioner hedder menuen **Authentication** > **Email Templates**, i andre ligger skabelonerne under **Authentication** > **Emails** > **Templates**, og skabelonerne hedder "Magic Link" og "Confirm signup" (i nye versioner kan "Confirm signup" hedde "Confirm sign up"). Jeg har ikke afprøvet det mod et rigtigt projekt. Mangler koden i mailen, er det skabelonen, der ikke er ændret.
 
-## 3. Afvis ikke-inviterede ved tilmelding (hook)
+## 3. Afvis ikke-inviterede ved tilmelding (hook, valgfri)
 
-Funktionen `public.hook_before_user_created` er allerede oprettet af `schema.sql`.
+**Hvad det gør.** Hooket "Before User Created" kører, lige før Supabase opretter en ny konto ved første login. Står adressen ikke i `allowed_emails`, afvises den, og der oprettes ingen konto og sendes ingen mail. Funktionen `public.hook_before_user_created` er allerede oprettet af `schema.sql`. Den svarer med fejlen "Denne e-mailadresse er ikke inviteret."
 
-1. **Authentication** > **Hooks** (nogle gange under *Auth Hooks*) > **Before User Created**.
-2. Vælg type **Postgres function**, schema `public`, funktion `hook_before_user_created`, og gem/bekræft.
+**Siden er sikker uden hooket.** Databasereglerne (Row Level Security) lader kun adresser i `allowed_emails` læse eller skrive noget. En person uden adgang kan uden hooket højst logge ind og lande på skærmen "Du har ikke adgang endnu", hvor vedkommende kan bede om adgang. Hooket er kun en ekstra lås, der holder fremmede helt ude af brugerlisten.
 
-Jeg har ikke kunnet afprøve hooket mod et rigtigt Supabase-projekt, og dashboardets menunavne og hook-formatet (input `event.user.email`, svar `{}` = tillad, `{"error": {...}}` = afvis) kan have ændret sig. Det gør ikke noget for sikkerheden: **den egentlige beskyttelse er Row Level Security**. Står en e-mail ikke i `allowed_emails`, kan personen højst logge ind, men hverken læse eller skrive noget. Virker hooket ikke, så slå det fra og lad RLS gøre arbejdet.
+**Sådan slår du det til** (fra min viden om dashboardet, ikke afprøvet):
+
+1. Åbn Supabase-projektet > **Authentication** > **Hooks** (i nogle versioner **Auth Hooks**).
+2. Vælg **Before User Created**, og tryk på knappen til at tilføje/oprette hook.
+3. Vælg type **Postgres function**, schema `public`, funktion `hook_before_user_created`.
+4. Slå hooket til (*Enable*), og tryk **Create** eller **Save**.
+
+Jeg er usikker på de præcise knap- og menunavne i det nuværende dashboard (på nogle planer og versioner ligger hooks et andet sted, eller kræver at man først vælger *Postgres* som type). Jeg har ikke kunnet afprøve hooket mod et rigtigt projekt. Finder du det ikke, så spring trinnet over: siden virker fuldt ud uden.
+
+**Det skal du vide, når hooket er slået til:**
+
+- En person, der endnu ikke er godkendt, kan slet ikke logge ind første gang. Skærmen "Du har ikke adgang endnu" ses derfor aldrig for nye adresser. Den eneste vej er "Ingen adgang endnu? Bed om adgang" på login-skærmen. Skriver personen sin adresse i login-feltet, afvises den af hooket, og siden viser "Adressen har ikke adgang endnu. Bed om adgang herunder, så får ejeren besked." med anmodningsformularen åben og adressen udfyldt. Siden genkender afvisningen på teksten "ikke inviteret" eller på en afvisning/hook-fejl fra login (status 403 eller 422). Er fejlens ordlyd en anden i dit projekt, ser personen i stedet en generel fejl, og formularen åbner ikke af sig selv; linket "Bed om adgang" virker stadig.
+- Efter godkendelse kan personen logge ind som normalt, fordi adressen nu står i `allowed_emails`.
+- Hooket gælder kun oprettelse af nye konti. Har en adresse allerede en konto (fordi den loggede ind, før hooket blev slået til, eller før adgangen blev fjernet), rammes den ikke af hooket og lander på skærmen "Du har ikke adgang endnu" i stedet.
+- Slår du hooket fra igen, virker alt som før.
 
 Fjerner du en e-mail fra `allowed_emails`, mister personen straks adgang til sine produkter (de slettes ikke).
 
@@ -121,8 +134,8 @@ Man kan indsætte to slags links. Et link fra prisjagt.dk giver priser fra mange
 
 Kør hele `supabase/schema.sql` igen i **SQL Editor** (det er sikkert og kan gentages), så tabellen `access_requests` og funktionerne bag oprettes.
 
-- Den, der ikke har adgang, kan på login-skærmen trykke "Har du ikke adgang endnu? Bed om adgang" og skrive sin e-mail og sit navn. Prøver nogen at logge ind med en adresse, der ikke er godkendt, får de samme formular med adressen udfyldt. Der kan højst vente 30 anmodninger ad gangen.
-- Prisjobbet (hvert 15. minut) sender dig, og alle andre administratorer, én mail med de nye anmodninger. Det kræver **Resend** (`RESEND_API_KEY`, `MAIL_FROM` og `SITE_URL`, trin 5 og 6). Uden Resend sendes ingen mails; anmodningerne ligger stadig i siden.
+- Den, der ikke har adgang, kan på login-skærmen trykke "Har du ikke adgang endnu? Bed om adgang" og skrive sin e-mail og sit navn. Logger en person ind med en adresse, der ikke er godkendt, havner vedkommende på skærmen "Du har ikke adgang endnu" med en knap til at bede om adgang (anmodningen vises hos dig på samme måde). Afviser hooket i trin 3 adressen, får personen i stedet den samme formular på login-skærmen med adressen udfyldt. Der kan højst vente 30 anmodninger ad gangen.
+- Prisjobbet (hvert 15. minut) sender dig, og alle andre administratorer, én mail med de nye anmodninger. Det kræver **Resend** (`RESEND_API_KEY`, `MAIL_FROM` og `SITE_URL`, trin 5 og 6). Uden Resend sendes ingen mails; anmodningerne ligger stadig i siden. Jobbets log slutter med fx "Adgang: 0 til ejer, 0 godkendte, 2 venter, 1 administrator." (kun tal). Står der 0 administratorer, logger jobbet "Ingen administrator i allowed_emails.", og ingen får besked om nye anmodninger.
 - Log ind på siden som administrator. Nederst findes afsnittet **Adgang**, og et tal ved siden af navnet viser, hvor mange der venter. Tryk **Godkend** eller **Afvis** (Afvis spørger først). Godkender du, kommer adressen i `allowed_emails`, og personen kan logge ind med det samme.
 - Næste gang jobbet kører, får den godkendte en mail: "Du har fået adgang til Prisvagten" med link til siden og en linje om, hvordan man logger ind.
 - Under **Hvem har adgang** kan du trykke **Fjern adgang** (med bekræftelse). Administratorer kan ikke fjernes her. Personens produkter bliver liggende. Kommer personen tilbage, skal vedkommende bede om adgang igen.

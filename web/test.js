@@ -20,7 +20,7 @@ const FAKE = `
 (function () {
   var init = window.__INIT || {};
   var db = window.__db = { products: init.products || [], lists: init.lists || [], noLists: !!init.noLists, profiles: init.profiles || [], imports: init.imports || [], noImports: !!init.noImports, members: init.members || [], people: init.people || {}, noMembers: !!init.noMembers, shareAnswer: "ok", ops: [], deny: false, otpError: null,
-    session: init.session || null, seq: 100, admin: !!init.admin, requests: init.requests || [], allowedList: init.allowed || [], rpcs: [], askReply: "requested" };
+    session: init.session || null, seq: 100, admin: !!init.admin, requests: init.requests || [], allowedList: init.allowed || [], rpcs: [], askReply: "requested", access: init.access || "allowed", accessErr: !!init.accessErr };
   var authCb = null, rt = [];
   // the 60-second poll: remember its callback so a test can run it at once
   var ticks = [], realSetInterval = window.setInterval;
@@ -155,6 +155,10 @@ const FAKE = `
         db.lists = db.lists.filter(function (l) { return l.id !== args.p_list; });
         return resolve({ data: true, error: null });
       }
+      if (name === "my_access") return resolve(db.accessErr ? { data: null, error: { code: "PGRST202", message: "Could not find the function public.my_access" } } : { data: db.access, error: null });
+      if (name === "request_access" && db.session && !db.askError && db.askReply === "requested" && db.access === "none") {   // the database files it for the signed-in address
+        db.access = "pending"; db.requests.push({ email: db.session.user.email, name: args.p_name || null, created_at: new Date().toISOString() });
+      }
       if (name === "request_access") return resolve(db.askError ? { data: null, error: { message: "boom" } } : { data: db.askReply, error: null });
       if (name === "admin_list_requests") return resolve({ data: clone(db.requests), error: null });
       if (name === "admin_list_allowed") return resolve({ data: clone(db.allowedList), error: null });
@@ -232,7 +236,7 @@ async function open(opts = {}) {
   await page.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
   // config.js in the repo holds the real project's values, so both cases are served from the test, never from the file.
   await page.route(/\/config\.js$/, r => r.fulfill({ contentType: "text/javascript", body: opts.config === false ? "window.PV_CONFIG={supabaseUrl:\"\",supabaseAnonKey:\"\"};" : 'window.PV_CONFIG={supabaseUrl:"https://x.supabase.test",supabaseAnonKey:"anon"};' }));
-  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, imports: opts.imports || [], noImports: !!opts.noImports, members: opts.members || [], people: opts.people || {}, noMembers: !!opts.noMembers, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [] };
+  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, imports: opts.imports || [], noImports: !!opts.noImports, members: opts.members || [], people: opts.people || {}, noMembers: !!opts.noMembers, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [], access: opts.access, accessErr: !!opts.accessErr };
   await page.addInitScript("window.__INIT = " + JSON.stringify(init) + ";");
   if (opts.fake !== false) await page.addInitScript(FAKE);
   // The behaviour tests below work with the sections "Indstil vare", "Vis alle butikker" and the group of products that cannot be fetched opened (they are collapsed by default; the tests
@@ -803,6 +807,128 @@ let base;
     const ow = await w.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
     check("ask: no horizontal overflow at 400 px (form open, message shown)", ow.sw <= ow.cw, JSON.stringify(ow));
     await w.context().close();
+  }
+
+  // 13b. signed in without access: the dedicated screen
+  {
+    const na = async (access, extra) => open(Object.assign({ access, label: "noaccess-" + access }, extra || {}));
+    const p = await na("none");
+    await p.waitForSelector("#noAccessView:not([hidden])");
+    check("noaccess: own screen instead of the app (app, add form and menu hidden)", !(await p.isVisible("#appView")) && !(await p.isVisible("#addForm")) && !(await p.isVisible("#acts")) && !(await p.isVisible("#authView")));
+    check("noaccess: shows the signed-in address and the short line", (await p.textContent("#naWho")) === "mor@familie.dk" && (await p.textContent("#naLine")) === "Du har ikke adgang endnu.");
+    check("noaccess: 'none' has name field, one primary button 'Bed om adgang', 'Log ud', no 'Tjek igen'", await p.isVisible("#naName") && (await p.textContent("#naSubmit")) === "Bed om adgang" && (await p.isVisible("#naLogout")) && !(await p.isVisible("#naCheck")) && (await p.inputValue("#naName")) === "");
+    const rp = await p.evaluate(() => window.__db.rpcs.map(r => r.name));
+    check("noaccess: decided by the my_access rpc, before anything else", rp[0] === "my_access" && !rp.some(n => /admin_/.test(n)), JSON.stringify(rp));
+    const ow0 = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    check("noaccess: no horizontal overflow", ow0.sw <= ow0.cw);
+    await p.evaluate(() => { window.__db.rpcs.length = 0; });
+    await p.fill("#naName", "  Mor   Hansen "); await p.click("#naSubmit");
+    await p.waitForFunction(() => document.getElementById("naLine").textContent === "Din anmodning venter på godkendelse.");
+    const call = await p.evaluate(() => window.__db.rpcs.filter(r => r.name === "request_access"));
+    check("noaccess: request_access gets exactly the session's own address and the name", call.length === 1 && call[0].args.p_email === "mor@familie.dk" && call[0].args.p_name === "Mor Hansen", JSON.stringify(call));
+    check("noaccess: after asking: 'venter', quiet 'Tjek igen', no form, still no app", !(await p.isVisible("#naForm")) && (await p.isVisible("#naCheck")) && !(await p.isVisible("#appView")));
+    // still pending: Tjek igen changes nothing
+    await p.evaluate(() => { window.__db.rpcs.length = 0; });
+    await p.click("#naCheck");
+    await p.waitForFunction(() => window.__db.rpcs.some(r => r.name === "my_access"));
+    await p.waitForFunction(() => document.getElementById("naMsg").hidden);
+    check("noaccess: 'Tjek igen' while pending stays on the screen", await p.isVisible("#noAccessView") && !(await p.isVisible("#appView")));
+    // approved: 60-second poll switches to the app
+    await p.evaluate(() => { window.__db.access = "allowed"; window.__tick(); });
+    await p.waitForSelector("#appView:not([hidden])");
+    check("noaccess: the 60 s poll switches to the app when access is granted", !(await p.isVisible("#noAccessView")) && await p.isVisible("#acts") && await p.isVisible("#addForm"));
+    check("noaccess: the app session started (menu shows the address)", (await p.textContent("#who")) === "mor@familie.dk");
+    await p.context().close();
+
+    // Tjek igen switches at once; focus switches too
+    const q = await na("pending");
+    await q.waitForSelector("#noAccessView:not([hidden])");
+    check("noaccess: 'pending' on arrival: line, 'Tjek igen', no form", (await q.textContent("#naLine")) === "Din anmodning venter på godkendelse." && await q.isVisible("#naCheck") && !(await q.isVisible("#naForm")));
+    await q.evaluate(() => { window.__db.access = "allowed"; }); await q.click("#naCheck");
+    await q.waitForSelector("#appView:not([hidden])");
+    check("noaccess: 'Tjek igen' switches to the app", !(await q.isVisible("#noAccessView")));
+    await q.context().close();
+    const f = await na("pending");
+    await f.waitForSelector("#noAccessView:not([hidden])");
+    await f.evaluate(() => { window.__db.access = "allowed"; window.dispatchEvent(new Event("focus")); });
+    await f.waitForSelector("#appView:not([hidden])");
+    check("noaccess: window focus rechecks and switches", !(await f.isVisible("#noAccessView")));
+    await f.context().close();
+
+    // rejected, log out
+    const r = await na("rejected");
+    await r.waitForSelector("#noAccessView:not([hidden])");
+    check("noaccess: 'rejected' uses the existing wording, no form", (await r.textContent("#naLine")) === "Adressen fik ikke adgang. Spørg ejeren direkte." && !(await r.isVisible("#naForm")));
+    await r.click("#naLogout");
+    await r.waitForSelector("#authView:not([hidden])");
+    check("noaccess: 'Log ud' signs out and shows the login screen", !(await r.isVisible("#noAccessView")) && (await ops(r)).some(o => o.op === "signout"));
+    const ticksAfter = await r.evaluate(() => { window.__db.rpcs.length = 0; window.__tick(); return null; });
+    await r.waitForTimeout(100);
+    check("noaccess: no polling after logging out", (await r.evaluate(() => window.__db.rpcs.length)) === 0);
+    await r.context().close();
+
+    // request answers
+    for (const [reply, re, stays] of [["full", /mange anmodninger/, true], ["invalid", /gyldig/, true]]) {
+      const x = await na("none"); await x.waitForSelector("#naForm:not([hidden])");
+      await x.evaluate(v => { window.__db.askReply = v; }, reply); await x.click("#naSubmit");
+      await x.waitForFunction(() => !document.getElementById("naMsg").hidden && !/Sender/.test(document.getElementById("naMsg").textContent));
+      check("noaccess: answer '" + reply + "' -> message, form stays", re.test(await x.textContent("#naMsg")) && await x.isVisible("#naForm") && !(await x.isDisabled("#naSubmit")));
+      await x.context().close();
+    }
+    {
+      const x = await na("none"); await x.waitForSelector("#naForm:not([hidden])");
+      await x.evaluate(() => { window.__db.askError = true; }); await x.click("#naSubmit");
+      await x.waitForFunction(() => /Kunne ikke/.test(document.getElementById("naMsg").textContent));
+      check("noaccess: rpc failure -> honest message, form stays", await x.isVisible("#naForm"));
+      await x.context().close();
+      const y = await na("none"); await y.waitForSelector("#naForm:not([hidden])");
+      await y.evaluate(() => { window.__db.askReply = "rejected"; }); await y.click("#naSubmit");
+      await y.waitForFunction(() => document.getElementById("naLine").textContent === "Adressen fik ikke adgang. Spørg ejeren direkte.");
+      check("noaccess: answer 'rejected' shows the rejected wording", !(await y.isVisible("#naForm")));
+      await y.context().close();
+    }
+    // my_access fails (old schema, network): the app opens as before
+    const m = await open({ label: "noaccess-rpcerr", access: "none", accessErr: true });
+    await m.waitForSelector("#appView:not([hidden])");
+    check("noaccess: if my_access cannot be read the app opens as before (RLS still protects)", !(await m.isVisible("#noAccessView")));
+    await m.evaluate(() => { window.__db.deny = true; });
+    await m.context().close();
+    const w = await open({ label: "noaccess-400", width: 400, access: "none" });
+    await w.waitForSelector("#noAccessView:not([hidden])");
+    await w.evaluate(() => { document.getElementById("naWho").textContent = "en.meget.lang.adresse.der.fylder.en.del@et-langt-domaenenavn-til-test.example.dk"; });
+    const ow = await w.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    check("noaccess: no horizontal overflow at 400 px with a long address", ow.sw <= ow.cw, JSON.stringify(ow));
+    await w.context().close();
+  }
+
+  // 13c. login screen: the hook's rejection, and the visible link
+  {
+    const shapes = [
+      ["403 with the hook message", { status: 403, code: "unexpected_failure", message: "Denne e-mailadresse er ikke inviteret." }],
+      ["the hook message alone", { message: "Denne e-mailadresse er ikke inviteret." }],
+      ["400 with the hook message", { status: 400, message: "Denne e-mailadresse er ikke inviteret." }],
+      ["hook failure wording", { status: 500, code: "hook_payload_invalid_content_type", message: "Error in Before User Created hook" }]
+    ];
+    for (const [nm, err] of shapes) {
+      const p = await open({ session: false, label: "hook" });
+      await p.evaluate(e => { window.__db.otpError = e; }, err);
+      await p.fill("#lEmail", "Ny@Familie.dk"); await p.click("#lSubmit");
+      await p.waitForSelector("#askForm:not([hidden])");
+      const t = await p.textContent("#lMsg");
+      check("hook: " + nm + " -> clear message, request form open and prefilled", /Bed om adgang herunder/.test(t) && (await p.inputValue("#aEmail")) === "Ny@Familie.dk" && await p.isVisible("#aName") && !(await p.isVisible("#sentBox")), t);
+      await p.context().close();
+    }
+    const p = await open({ session: false, label: "hook-flow" });
+    await p.evaluate(() => { window.__db.otpError = { status: 403, message: "Denne e-mailadresse er ikke inviteret." }; });
+    await p.fill("#lEmail", "ny@familie.dk"); await p.click("#lSubmit");
+    await p.waitForSelector("#askForm:not([hidden])");
+    await p.fill("#aName", "Ny"); await p.click("#aSubmit");
+    await p.waitForFunction(() => /Tak\./.test(document.getElementById("aMsg").textContent));
+    const c = await p.evaluate(() => window.__db.rpcs.filter(r => r.name === "request_access"));
+    check("hook: from there the anonymous request is sent with the typed address", c.length === 1 && c[0].args.p_email === "ny@familie.dk" && c[0].args.p_name === "Ny", JSON.stringify(c));
+    const fs = await p.evaluate(() => parseFloat(getComputedStyle(document.getElementById("askToggle")).fontSize));
+    check("login: the 'Bed om adgang' link is a little larger than fine print", fs >= 14, String(fs));
+    await p.context().close();
   }
 
   // 14. owner (admin): requests and who has access

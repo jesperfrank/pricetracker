@@ -137,7 +137,10 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 @media (max-width: 560px) { .login { grid-template-columns: minmax(0, 1fr) } }
 
 /* ask for access (signed out) and the owner's access section */
-.ask-row { margin: 6px 0 12px }
+.ask-row { margin: 10px 0 14px; font-size: 14.5px; color: var(--ink2) }
+.ask-row .link { font-weight: 600 }
+.na-who { margin: 0 0 4px; font-size: 14px; color: var(--muted); overflow-wrap: anywhere; max-width: 52ch }
+.na-act { margin: 14px 0 0; display: flex; gap: 18px; font-size: 14px }
 #askBox { margin-bottom: 8px }
 .ask { grid-template-columns: minmax(0, 1fr); }
 .info { color: var(--ink2); font-size: 13.5px; margin: 0 0 8px; max-width: 520px; overflow-wrap: anywhere }

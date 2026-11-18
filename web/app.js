@@ -31,6 +31,7 @@
   var state = { goalOpen: {}, manage: {}, allShops: {}, pshops: {}, errOpen: false, ord: null, share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
     prefs: { always: [], exclude: [], only: false, notify: true, digest: false }, profileSound: null };
   var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
+  var noacc = { on: false, state: "", timer: null, busy: false, msg: "" };
   var sb = null, user = null, channel = null, pollTimer = null, fetching = false, again = false, lastFetch = 0, fetchSeq = 0;
 
   // ---- sound: recorded clips (public domain / CC0, Wikimedia Commons), confetti and a price count-down ----
@@ -1212,7 +1213,7 @@
   }
   function onWriteError(e) { if (isDenied(e)) { state.canWrite = false; applyAccess(); } }
   function fetchProducts() {
-    if (!sb || !user) return;
+    if (!sb || !user || noacc.on) return;
     if (fetching) { again = true; return; }
     fetching = true; lastFetch = Date.now();
     var uid = user.id;
@@ -1304,8 +1305,8 @@
     channel = null; state.products = []; state.loaded = false; state.ord = null; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.share = null; state.confirmMember = null; state.confirmLeave = null; state.memCount = {}; state.people = {}; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null; renderImports();
     access.admin = false; access.requests = []; access.allowed = []; access.confirm = null; access.seq++; accMsg(""); renderAccess();
   }
-  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && user) fetchProducts(); });
-  window.addEventListener("focus", function () { if (user && Date.now() - lastFetch > 3000) fetchProducts(); });
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && user) { if (noacc.on) recheckAccess(); else fetchProducts(); } });
+  window.addEventListener("focus", function () { if (user && noacc.on) recheckAccess(); else if (user && Date.now() - lastFetch > 3000) fetchProducts(); });
 
   // ---- list interactions ----
   function prod(id) { return state.products.filter(function (x) { return x._id === id; })[0]; }
@@ -1823,14 +1824,14 @@
     var m = String(e && e.message || "").toLowerCase(), c = e && e.status, code = String(e && e.code || "").toLowerCase(), all = m + " " + code;
     if (c === 429 || /rate.?limit|too many|only request this after/.test(all)) return false;
     if (/invalid.*e-?mail|e-?mail.*invalid|validation_failed|unable to validate email/.test(all)) return false;
-    return /not allowed|signups? (are |is )?(not allowed|disabled)|hook|database error|not (on|in) the|forbidden|unauthori[sz]ed|otp_disabled|user_not_found|not_allowed/.test(all) || c === 422 || c === 403;
+    return /not allowed|signups? (are |is )?(not allowed|disabled)|hook|database error|not (on|in) the|forbidden|unauthori[sz]ed|otp_disabled|user_not_found|not_allowed|ikke inviteret/.test(all) || c === 422 || c === 403;
   }
   function otpMessage(e) {
     var m = String(e && e.message || "").toLowerCase(), c = e && e.status, code = String(e && e.code || "").toLowerCase(), all = m + " " + code;
     if (c === 429 || /rate.?limit|too many|only request this after/.test(all)) return "Der er sendt for mange login-links lige nu. Vent et par minutter, og prøv igen.";
     if (/invalid.*e-?mail|e-?mail.*invalid|validation_failed|unable to validate email/.test(all)) return "Det ligner ikke en gyldig e-mailadresse.";
-    if (/not allowed|signups? (are |is )?(not allowed|disabled)|hook|database error|not (on|in) the|forbidden|unauthori[sz]ed|otp_disabled|user_not_found|not_allowed/.test(all) || c === 422 || c === 403)
-      return "Den adresse er ikke på listen endnu. Ejeren skal tilføje den, før du kan logge ind.";
+    if (/not allowed|signups? (are |is )?(not allowed|disabled)|hook|database error|not (on|in) the|forbidden|unauthori[sz]ed|otp_disabled|user_not_found|not_allowed|ikke inviteret/.test(all) || c === 422 || c === 403)
+      return "Adressen har ikke adgang endnu. Bed om adgang herunder, så får ejeren besked.";
     if (/failed to fetch|network|retryablefetch/.test(all + " " + String(e && e.name || "").toLowerCase())) return "Kunne ikke nå serveren. Tjek din forbindelse, og prøv igen.";
     return "Kunne ikke sende login-linket lige nu. Prøv igen om lidt.";
   }
@@ -1919,14 +1920,73 @@
     sb.auth.signOut().then(function () { handleSession(null); }, function () { handleSession(null); });
   });
 
+  // ---- signed in without access: a dedicated screen (state from the my_access() rpc: allowed | pending | rejected | none) ----
+  var NA_LINE = { none: "Du har ikke adgang endnu.", pending: "Din anmodning venter på godkendelse.", rejected: "Adressen fik ikke adgang. Spørg ejeren direkte." };
+  var NA_TEXT = { full: "Der er for mange anmodninger lige nu. Prøv igen om nogle dage.", invalid: "Det ligner ikke en gyldig e-mailadresse.", fail: "Kunne ikke sende anmodningen lige nu. Prøv igen om lidt." };
+  // Anything but a clear 'none' | 'pending' | 'rejected' counts as allowed: an old schema without my_access() or a failed call must not lock anyone out (RLS still protects the data).
+  function myAccess() {
+    return sb.rpc("my_access").then(function (r) {
+      var d = r && !r.error && typeof r.data === "string" ? r.data : "";
+      return d === "none" || d === "pending" || d === "rejected" ? d : "allowed";
+    }, function () { return "allowed"; });
+  }
+  function naMsg(t) { noacc.msg = t || ""; var el = $("naMsg"); el.textContent = noacc.msg; el.hidden = !noacc.msg; }
+  function renderNoAccess() {
+    var st = noacc.state;
+    $("naWho").textContent = user && user.email ? user.email : "";
+    $("naLine").textContent = NA_LINE[st] || NA_LINE.none;
+    $("naForm").hidden = st !== "none"; $("naCheck").hidden = st === "none";
+  }
+  function stopNoAccess() {
+    clearInterval(noacc.timer); noacc.timer = null; noacc.on = false; noacc.state = ""; noacc.busy = false;
+    $("noAccessView").hidden = true; naMsg(""); $("naName").value = "";
+  }
+  function showNoAccess(st) {
+    var first = !noacc.on || noacc.state !== st;
+    noacc.on = true; noacc.state = st;
+    $("authView").hidden = true; $("appView").hidden = true; $("acts").hidden = true; $("reqBadge").hidden = true; $("status").textContent = "";
+    $("noAccessView").hidden = false;
+    if (first) { naMsg(""); renderNoAccess(); }
+    if (!noacc.timer) noacc.timer = setInterval(function () { if (document.visibilityState === "visible") recheckAccess(); }, 60000);
+  }
+  function enterApp() { stopNoAccess(); showApp(); startSession(); }
+  function recheckAccess() {
+    if (!sb || !user || !noacc.on || noacc.busy) return;
+    var uid = user.id; noacc.busy = true;
+    myAccess().then(function (st) {
+      noacc.busy = false;
+      if (!user || user.id !== uid || !noacc.on) return;
+      if (noacc.msg === "Tjekker …") naMsg("");
+      if (st === "allowed") enterApp(); else showNoAccess(st);
+    });
+  }
+  $("naCheck").addEventListener("click", function () { if (noacc.busy) return; naMsg("Tjekker …"); recheckAccess(); });
+  $("naLogout").addEventListener("click", function () { sb.auth.signOut().then(function () { handleSession(null); }, function () { handleSession(null); }); });
+  $("naForm").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    if (!sb || !user || !user.email) return;
+    var name = $("naName").value.trim().replace(/\s+/g, " "), btn = $("naSubmit"), uid = user.id;
+    btn.disabled = true; naMsg("Sender …");
+    sb.rpc("request_access", { p_email: user.email, p_name: name }).then(function (r) {
+      btn.disabled = false;
+      if (!user || user.id !== uid || !noacc.on) return;
+      var res = r && !r.error && typeof r.data === "string" ? r.data : null;
+      if (res === "requested" || res === "pending") { naMsg(""); showNoAccess("pending"); }
+      else if (res === "rejected") { naMsg(""); showNoAccess("rejected"); }
+      else if (res === "allowed") { noacc.busy = false; recheckAccess(); }
+      else naMsg(res && NA_TEXT[res] ? NA_TEXT[res] : NA_TEXT.fail);
+    }, function () { btn.disabled = false; naMsg(NA_TEXT.fail); });
+  });
+
   function showAuth(errText) {
+    stopNoAccess();
     $("authView").hidden = false; $("appView").hidden = true; $("acts").hidden = true; $("reqBadge").hidden = true; closeMenu(false);
     $("status").textContent = "";
     if (errText) { $("lMsg").textContent = errText; $("lMsg").hidden = false; }
     var kept = loginStored(); if (kept && $("sentBox").hidden) showSent(kept, false);
   }
   function showApp() {
-    $("authView").hidden = true; $("appView").hidden = false; $("acts").hidden = false;
+    $("authView").hidden = true; $("noAccessView").hidden = true; $("appView").hidden = false; $("acts").hidden = false;
     $("who").textContent = user.email || ""; $("acctInitial").textContent = initialOf(user.email || "");
     syncSound(); syncType();
   }
@@ -1939,7 +1999,15 @@
     loginStore("");
     if (user && user.id === session.user.id) return;
     if (user) stopSession();
-    user = session.user; showApp(); startSession();
+    stopNoAccess();
+    user = session.user;
+    // find out first whether this person is allowed: the list is only fetched for them, others land on the no-access screen
+    var uid = user.id;
+    $("authView").hidden = true; $("appView").hidden = true; $("acts").hidden = true; $("status").textContent = "Henter …";
+    myAccess().then(function (st) {
+      if (!user || user.id !== uid) return;
+      if (st === "allowed") enterApp(); else showNoAccess(st);
+    });
   }
   function hashError() {
     var raw = (location.hash || "").replace(/^#/, "") + "&" + (location.search || "").replace(/^\?/, "");
