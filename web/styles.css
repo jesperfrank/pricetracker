@@ -1,24 +1,34 @@
 
-/* Layout: a quiet single column on a plain page. No cards: products are rows divided by
-   hairlines, each with name, a small price trace and the price. A row unfolds in place. */
+/* Calm and typographic: neutrals carry the page, one cobalt accent marks what can be tapped, green is a deal, red a warning.
+   An open product is a card (raised from the page); closed products are rows divided by hairlines. */
 :root {
-  --bg: #ffffff; --sunk: #f5f5f4; --hover: #fafaf9;
-  --ink: #111214; --ink2: #44484f; --muted: #7c8088; --line: #e9e9e7;
-  --good: #0b7a3b; --good-wash: #f1f8f3; --danger: #b3302d;
-  --series: #2a78d6; --series-fill: rgba(42,120,214,.09); --grid: #efefed;
+  --bg: #f6f6f3; --card: #ffffff; --sunk: #ecece8; --hover: #fafaf8;
+  --ink: #111214; --ink2: #3a3e45; --muted: #62666e;
+  --line: #dcdbd5; --soft: #ebeae6; --edge: #c9c7c0;
+  --good: #0b6b34; --good-wash: #e6f2ea; --good-edge: #a9d2b8; --danger: #a82b28;
+  --accent: #3342c4; --on-accent: #ffffff; --accent-wash: #e8eafb; --accent-edge: #aab2ec;
+  --series: var(--accent); --series-fill: rgba(51,66,196,.08); --grid: #ecebe7;
+  --shadow: 0 1px 2px rgba(20,22,30,.06), 0 10px 24px -12px rgba(20,22,30,.20);
+  --surface: var(--bg);
   --font: "Schibsted Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
-  --bg: #111315; --sunk: #1a1d20; --hover: #15181a;
-  --ink: #f2f2f1; --ink2: #b9bcc2; --muted: #878b93; --line: #26292d;
-  --good: #4ccb7c; --good-wash: #14231a; --danger: #ef7b77;
-  --series: #3987e5; --series-fill: rgba(57,135,229,.13); --grid: #1f2225;
+  --bg: #0f1113; --card: #1a1d21; --sunk: #262a2f; --hover: #14171a;
+  --ink: #f2f2f1; --ink2: #c4c7cc; --muted: #9a9ea6;
+  --line: #2b2f34; --soft: #262a2f; --edge: #3b4148;
+  --good: #4ccb7c; --good-wash: #17281d; --good-edge: #2a5a3c; --danger: #f08a86;
+  --accent: #9ba8ff; --on-accent: #10122a; --accent-wash: #232845; --accent-edge: #4a5391;
+  --series-fill: rgba(155,168,255,.12); --grid: #1f2327;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 28px -12px rgba(0,0,0,.6);
   color-scheme: dark } }
 :root[data-theme="dark"] {
-  --bg: #111315; --sunk: #1a1d20; --hover: #15181a;
-  --ink: #f2f2f1; --ink2: #b9bcc2; --muted: #878b93; --line: #26292d;
-  --good: #4ccb7c; --good-wash: #14231a; --danger: #ef7b77;
-  --series: #3987e5; --series-fill: rgba(57,135,229,.13); --grid: #1f2225;
+  --bg: #0f1113; --card: #1a1d21; --sunk: #262a2f; --hover: #14171a;
+  --ink: #f2f2f1; --ink2: #c4c7cc; --muted: #9a9ea6;
+  --line: #2b2f34; --soft: #262a2f; --edge: #3b4148;
+  --good: #4ccb7c; --good-wash: #17281d; --good-edge: #2a5a3c; --danger: #f08a86;
+  --accent: #9ba8ff; --on-accent: #10122a; --accent-wash: #232845; --accent-edge: #4a5391;
+  --series-fill: rgba(155,168,255,.12); --grid: #1f2327;
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 28px -12px rgba(0,0,0,.6);
   color-scheme: dark }
 
 * { box-sizing: border-box }
@@ -29,9 +39,9 @@ body { background: var(--bg); color: var(--ink); font: 400 15px/1.5 var(--font);
   padding-right: max(20px, env(safe-area-inset-right, 0px)); }
 .wrap { max-width: 720px; margin: 0 auto }
 button, input { font: inherit; color: inherit }
-:focus-visible { outline: 2px solid var(--series); outline-offset: 2px; border-radius: 4px }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px }
 .n { font-variant-numeric: normal }
-a { color: inherit; text-decoration: underline; text-decoration-color: var(--muted); text-underline-offset: 3px }
+a { color: var(--accent); text-decoration: underline; text-decoration-color: var(--accent-edge); text-underline-offset: 3px }
 a:hover { text-decoration-color: currentColor }
 
 header { margin-bottom: 28px }
@@ -40,9 +50,9 @@ header { margin-bottom: 28px }
 /* account menu: the initial in a circle, a small menu below it */
 .acct { position: relative; flex: none; margin-right: -5px }
 .avatar { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; background: none; border: 0; border-radius: 50%; cursor: pointer }
-.avatar span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--ink); color: var(--bg); font: 600 14px/1 var(--font) }
+.avatar span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--ink); color: var(--card); font: 600 14px/1 var(--font) }
 .avatar[aria-expanded="true"] span { box-shadow: 0 0 0 2px var(--bg), 0 0 0 3.5px var(--ink) }
-.pop { position: absolute; right: 5px; top: calc(100% + 4px); z-index: 30; width: 232px; max-width: calc(100vw - 40px); background: var(--bg); border: 1px solid var(--line); border-radius: 14px; padding: 6px; box-shadow: 0 8px 28px rgba(0,0,0,.10) }
+.pop { position: absolute; right: 5px; top: calc(100% + 4px); z-index: 30; width: 232px; max-width: calc(100vw - 40px); background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 6px; box-shadow: 0 8px 28px rgba(0,0,0,.10) }
 .pop .who { margin: 0; padding: 8px 10px 8px; font-size: 13px; color: var(--muted); border-bottom: 1px solid var(--line); margin-bottom: 4px }
 .pop [role="menuitem"] { display: flex; align-items: center; width: 100%; min-height: 44px; padding: 0 10px; background: none; border: 0; border-radius: 8px; text-align: left; font-size: 15px; cursor: pointer }
 .pop [role="menuitem"]:hover, .pop [role="menuitem"]:focus-visible { background: var(--sunk) }
@@ -55,43 +65,48 @@ h1 { font: 700 30px/1.1 var(--font); letter-spacing: -0.025em; margin: 0 }
 
 /* add: one line, the goal choices appear below while the field is in use */
 .add { margin-bottom: 8px }
-.addrow { display: flex; align-items: center; gap: 6px; min-height: 54px; padding: 4px 4px 4px 16px; background: var(--sunk); border: 1px solid transparent; border-radius: 14px }
-.addrow:focus-within { border-color: var(--ink); background: var(--bg); box-shadow: 0 0 0 1px var(--ink) }
+.addrow { display: flex; align-items: center; gap: 6px; min-height: 54px; padding: 4px 4px 4px 16px; background: var(--card); border: 1px solid var(--edge); border-radius: 14px }
+.addrow:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) }
 .addrow input { flex: 1 1 auto; min-width: 0; height: 44px; padding: 0; background: none; border: 0; outline: none; font-size: 16px }
 .addrow input::placeholder { color: var(--muted); opacity: 1; text-overflow: ellipsis }
 .addrow .btn { flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 44px; border-radius: 10px; padding: 0 18px }
 .bi { display: none }
-.addmore { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; animation: rise .16s ease-out }
+.addmore { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; animation: rise .16s ease-out }
+.addgoal { margin-top: 10px; animation: rise .16s ease-out }
+.goalbtn { flex: none; display: none; align-items: center; min-height: 44px; padding: 0 9px; background: none; border: 0; border-radius: 10px; color: var(--accent); font-weight: 600; font-size: 15px; cursor: pointer }
+.goalbtn[aria-expanded="true"] { background: var(--accent-wash) }
+@media (max-width: 699px) { .goalbtn { display: inline-flex } }
 @keyframes rise { from { opacity: 0; transform: translateY(-4px) } to { opacity: 1; transform: none } }
-.inp { background: var(--sunk); border: 1px solid transparent; border-radius: 10px; padding: 0 14px; height: 46px; width: 100%; min-width: 0 }
+.inp { background: var(--card); border: 1px solid var(--edge); border-radius: 10px; padding: 0 14px; height: 46px; width: 100%; min-width: 0 }
 .inp::placeholder { color: var(--muted) }
-.inp:focus { outline: none; border-color: var(--ink); background: var(--bg) }
-.addmore .req { flex: 1 1 100%; min-width: 0 }
+.inp:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) }
+.addmore .req { flex: 1 1 220px; min-width: 0 }
 .addmore .req .inp { height: 44px; width: 100% }
 .note.req { margin: 0 0 6px }
 .amount { position: relative; min-width: 0; flex: 0 1 150px }
+.amount[hidden] + .req { flex-basis: 100% }
 .amount .inp { height: 44px }
 .goal { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto }
-.goal label { position: relative; display: inline-flex; align-items: center; min-height: 44px; padding: 0 16px; border-radius: 999px; background: var(--sunk); cursor: pointer; font-size: 14px; color: var(--ink2) }
+.goal label { position: relative; display: inline-flex; align-items: center; min-height: 44px; padding: 0 16px; border-radius: 999px; background: var(--sunk); border: 1px solid transparent; cursor: pointer; font-size: 14px; color: var(--ink2) }
 .goal input { position: absolute; opacity: 0; pointer-events: none }
-.goal label:has(input:checked) { background: var(--ink); color: var(--bg); font-weight: 600 }
-.goal label:has(input:focus-visible) { outline: 2px solid var(--series); outline-offset: 2px }
+.goal label:has(input:checked) { background: var(--accent-wash); border-color: var(--accent); color: var(--accent); font-weight: 600 }
+.goal label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px }
 @media (max-width: 480px) {
   .addrow .btn { width: 44px; padding: 0 }
   .addrow .bl { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap }
   .bi { display: block }
 }
 .sugg { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 8px }
-.chip { background: var(--sunk); border: 1px solid var(--line); border-radius: 999px; padding: 0 14px; min-height: 44px; font-size: 13px; cursor: pointer }
-.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink) }
+.chip { background: var(--card); border: 1px solid var(--edge); border-radius: 999px; padding: 0 14px; min-height: 44px; font-size: 13px; color: var(--ink2); cursor: pointer }
+.chip[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent); border-color: var(--accent); font-weight: 600 }
 .chip:disabled { opacity: .5; cursor: default }
-.edit select { height: 44px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0 8px; font: inherit }
-.btn { background: var(--ink); color: var(--bg); border: 0; border-radius: 10px; height: 46px; padding: 0 20px; font-weight: 600; cursor: pointer; white-space: nowrap }
+.edit select { height: 44px; background: var(--surface); border: 1px solid var(--edge); border-radius: 8px; padding: 0 8px; font: inherit }
+.btn { background: var(--accent); color: var(--on-accent); border: 0; border-radius: 10px; height: 46px; padding: 0 20px; font-weight: 600; cursor: pointer; white-space: nowrap }
 .btn:disabled { opacity: .5; cursor: default }
 .hint { color: var(--muted); font-size: 13px; margin: 0 0 14px }
 .pshops summary { margin-top: 0 }
 .pshop { display: grid; gap: 6px; margin-top: 10px; max-width: 460px; font-size: 13.5px; color: var(--ink2) }
-.pshop input[type=text] { height: 44px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; font-size: 14px; color: var(--ink); margin-bottom: 6px }
+.pshop input[type=text] { height: 44px; background: var(--surface); border: 1px solid var(--edge); border-radius: 8px; padding: 0 10px; font-size: 14px; color: var(--ink); margin-bottom: 6px }
 .pshop .chk { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px }
 .link:disabled { color: var(--muted); text-decoration: none; cursor: default }
 .msg { color: var(--danger); font-size: 13px; margin: 0 0 8px }
@@ -127,8 +142,8 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 .ask { grid-template-columns: minmax(0, 1fr); }
 .info { color: var(--ink2); font-size: 13.5px; margin: 0 0 8px; max-width: 520px; overflow-wrap: anywhere }
 .info[hidden] { display: none }
-.badge { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; padding: 0 4px; background: none; border: 0; color: var(--ink); font-size: 13.5px; font-weight: 600; cursor: pointer; text-decoration: underline; text-decoration-color: var(--muted); text-underline-offset: 3px }
-.badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ink) }
+.badge { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; padding: 0 4px; background: none; border: 0; color: var(--accent); font-size: 13.5px; font-weight: 600; cursor: pointer; text-decoration: underline; text-decoration-color: var(--accent-edge); text-underline-offset: 3px }
+.badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent) }
 .access h3 { font: 600 15px/1.3 var(--font); color: var(--ink); margin: 0 0 8px }
 .access .req { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: center; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--line) }
 .access .req:first-child { border-top: 0 }
@@ -141,43 +156,46 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 /* lists: a quiet row of chips above the products */
 .lists { margin: 18px 0 14px }
 .chips { display: flex; flex-wrap: wrap; gap: 6px }
-.lchip { position: relative; background: var(--sunk); border: 1px solid transparent; border-radius: 999px; padding: 7px 14px; font-size: 13.5px; color: var(--ink2); cursor: pointer; max-width: 100%; text-align: left; overflow-wrap: anywhere }
+.lchip { position: relative; background: var(--sunk); border: 1.5px solid transparent; border-radius: 999px; padding: 7px 14px; font-size: 13.5px; color: var(--ink2); cursor: pointer; max-width: 100%; text-align: left; overflow-wrap: anywhere }
 .lchip .cnt { color: var(--muted); margin-left: 3px }
 .lchip .shr { color: var(--muted); font-size: 11.5px; margin-left: 4px }
-.lchip[aria-pressed="true"] .shr { color: var(--bg); opacity: .7 }
-.lchip[aria-pressed="true"] { background: var(--ink); color: var(--bg); font-weight: 600 }
-.lchip[aria-pressed="true"] .cnt { color: var(--bg); opacity: .7; font-weight: 400 }
-.lchip.plus { background: none; border: 1px dashed var(--line); color: var(--muted) }
-.lchip.plus:hover, .lchip.plus[aria-expanded="true"] { color: var(--ink); border-color: var(--muted) }
+.lchip[aria-pressed="true"] .shr, .lchip[aria-pressed="true"] .cnt { color: var(--accent); font-weight: 400 }
+.lchip[aria-pressed="true"] { background: var(--accent-wash); border-color: var(--accent); color: var(--accent); font-weight: 600 }
+.lchip.plus { background: none; border: 1.5px dashed var(--edge); color: var(--ink2) }
+.lchip.plus:hover, .lchip.plus[aria-expanded="true"] { color: var(--accent); border-color: var(--accent) }
 .listform { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; margin-top: 10px; max-width: 460px }
 .listform .inp { height: 44px }
 .listform .btn { height: 44px }
 .listact { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; margin: 10px 0 0; font-size: 13px; color: var(--muted) }
-.listact .link { font-size: 13px; font-weight: 400; color: var(--ink2) }
+.listact .link { font-size: 13px; font-weight: 500; color: var(--accent) }
 .listact .link.warn { color: var(--danger) }
 .listact .edit { gap: 4px 14px }
 .people { list-style: none; margin: 10px 0 0; padding: 0; font-size: 13px; color: var(--ink2) }
 .people li { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline; margin-bottom: 4px }
 .people .meta { color: var(--muted) }
-.people .link { font-size: 13px; font-weight: 400; color: var(--ink2) }
+.people .link { font-size: 13px; font-weight: 500; color: var(--accent) }
 .people .link.warn { color: var(--danger) }
 .lists .msg { margin: 8px 0 0 }
 .imports { margin: 0 0 14px }
 .imports[hidden] { display: none }
 .impl { margin: 0 0 4px; font-size: 13px; color: var(--muted) }
 .impl.bad { color: var(--ink2) }
-.impl .link { font-size: 13px; font-weight: 400; color: var(--ink2); margin-left: 8px }
+.impl .link { font-size: 13px; font-weight: 500; color: var(--accent); margin-left: 8px }
 .imports .msg { margin: 4px 0 0 }
 .listpick { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13.5px; color: var(--muted); margin-bottom: 14px }
-.listpick select { height: 44px; max-width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0 8px; font: inherit; color: var(--ink) }
+.listpick select { height: 44px; max-width: 100%; background: var(--surface); border: 1px solid var(--edge); border-radius: 8px; padding: 0 8px; font: inherit; color: var(--ink) }
 
-/* list */
+/* list: closed products are rows with a hairline between; the open one is a card */
 .list { }
 .list > .item:first-child, .list > .errs:first-child { border-top: 1px solid var(--line) }
 .empty { padding: 40px 0; color: var(--muted); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line) }
 .empty b { display: block; color: var(--ink); font-weight: 600; font-size: 16px; margin-bottom: 2px }
 .item { border-bottom: 1px solid var(--line) }
-.item.bought { opacity: .6 }
+.item:has(+ .item.open), .item.open + .item { border-top-color: transparent }
+.item:has(+ .item.open) { border-bottom-color: transparent }
+.item.bought .head h2 { color: var(--ink2); font-weight: 500 }
+.item.bought .thumb { opacity: .6 }
+.item.bought .price b { color: var(--ink2); font-weight: 500 }
 .grp { margin-bottom: 18px }
 .grp-h { margin: 4px 0 8px; font: 600 13px/1.3 var(--font); color: var(--ink2); letter-spacing: .01em }
 .item.hit { background: var(--good-wash); margin-inline: -14px; padding-inline: 14px; border-radius: 14px; border-bottom-color: transparent; margin-bottom: 6px }
@@ -185,18 +203,27 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 .item.hit h2 { font-weight: 700 }
 .item.hit .price b { color: var(--good) }
 .off { color: var(--good); font-weight: 600 }
-.head { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 76px; background: none; border: 0; padding: 14px 0; text-align: left; cursor: pointer }
+.head { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 84px; background: none; border: 0; padding: 18px 0; text-align: left; cursor: pointer }
 .head h2 { font: 600 16px/1.3 var(--font); letter-spacing: -0.01em; margin: 0; overflow-wrap: anywhere }
 .info { flex: 1 1 auto; min-width: 0 }
-.thumb { flex: none; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 10px; overflow: hidden; background: var(--sunk); color: var(--muted); font: 600 18px/1 var(--font) }
+.thumb { flex: none; display: grid; place-items: center; width: 48px; height: 48px; border-radius: 10px; overflow: hidden; background: var(--sunk); border: 1px solid var(--line); color: var(--muted); font: 600 18px/1 var(--font) }
 .thumb img { display: block; width: 100%; height: 100%; object-fit: cover }
-.item.hit .thumb { background: var(--bg) }
+.item.hit .thumb { background: var(--card); border-color: var(--good-edge) }
 .meta { color: var(--muted); font-size: 13.5px; margin-top: 2px; overflow-wrap: anywhere }
+.head .meta .m1 { color: var(--ink); font-weight: 500 }
 .meta .ok { color: var(--good); font-weight: 600 }
 .meta .out { color: var(--ink2); font-weight: 500 }
+.item[data-status="pending"] .head .meta::before { content: ""; display: inline-block; width: 7px; height: 7px; margin: 0 7px 1px 0; border: 1.5px solid var(--muted); border-radius: 50% }
+/* the open product: one raised surface with its own boundary, space around it, and the detail inside */
+.item.open { --surface: var(--card); background: var(--card); border: 1px solid var(--edge); border-radius: 16px; box-shadow: var(--shadow);
+  margin: 16px -16px 22px; padding: 0 16px 16px }
+.item.open .head { min-height: 80px; padding-block: 16px }
+.item.open.hit { --surface: var(--good-wash); background: var(--good-wash); border-color: var(--good-edge); margin-inline: -16px; padding-inline: 16px }
+.item.open.hit .head { padding-block: 16px }
+.grp .item.open:last-child { margin-bottom: 6px }
 /* products that cannot be fetched: quiet, collapsed, after the live ones */
 .errs { border-bottom: 1px solid var(--line) }
-.errs > summary { display: flex; align-items: center; min-height: 52px; margin: 0; font-size: 13.5px; color: var(--muted); cursor: pointer }
+.errs > summary { display: flex; align-items: center; min-height: 52px; margin: 0; font-size: 13.5px; color: var(--ink2); cursor: pointer }
 .errs .item { border-top: 1px solid var(--line); border-bottom: 0 }
 .errs .head { min-height: 64px }
 .errs .thumb { opacity: .7 }
@@ -205,7 +232,9 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 .price { flex: none; min-width: 84px; text-align: right; white-space: nowrap }
 .price b { font: 600 19px/1.2 var(--font); letter-spacing: -0.015em; display: block }
 .price span { color: var(--muted); font-size: 13px }
-.body { padding: 4px 0 20px; display: flex; flex-direction: column; gap: 26px }
+.price span.off { color: var(--good) }
+.body { padding: 4px 0 4px; display: flex; flex-direction: column; gap: 22px; border-top: 1px solid var(--soft); padding-top: 18px }
+.body > .sect { border-top: 1px solid var(--soft); padding-top: 18px }
 .verdict { margin: 0; color: var(--ink2); max-width: 62ch; font-size: 16px }
 .verdict b { color: var(--ink); font-weight: 600 }
 .verdict.good b { color: var(--good) } .verdict.warn b { color: var(--danger) }
@@ -213,53 +242,68 @@ code { font: 13px ui-monospace, monospace; background: var(--sunk); padding: 1px
 .stats dt { font-size: 13px; color: var(--muted) }
 .stats dd { margin: 1px 0 0; font-weight: 600; font-size: 17px; letter-spacing: -0.01em }
 .sec-h { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 10px }
-.sec-h h3 { font: 600 14px var(--font); margin: 0 }
+.sec-h h3 { font: 650 14.5px/1.3 var(--font); letter-spacing: .005em; color: var(--ink); margin: 0 }
 .ranges { display: flex; gap: 14px }
-.ranges button { background: none; border: 0; padding: 0 0 2px; font-size: 13px; color: var(--muted); cursor: pointer; border-bottom: 1.5px solid transparent }
-.ranges button[aria-pressed=true] { color: var(--ink); border-bottom-color: var(--ink) }
+.ranges button { background: none; border: 0; padding: 0 0 2px; font-size: 13px; color: var(--ink2); cursor: pointer; border-bottom: 1.5px solid transparent }
+.ranges button[aria-pressed=true] { color: var(--accent); font-weight: 600; border-bottom-color: var(--accent) }
 .chart { position: relative; width: 100% }
 .chart svg { display: block; width: 100%; height: auto; overflow: visible }
 .chart text { font: 400 11.5px var(--font); fill: var(--muted) }
-.chart .lbl, .chart .now { paint-order: stroke; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round }
-.item.hit .chart .lbl, .item.hit .chart .now { stroke: var(--good-wash) }
+.chart .lbl, .chart .now { paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round }
 .chart .lbl { fill: var(--ink2) }
 .chart .now { fill: var(--ink); font-weight: 600; font-size: 12.5px }
 .tip { position: absolute; top: -6px; pointer-events: none; background: var(--ink); color: var(--bg); border-radius: 8px;
   padding: 6px 10px; font-size: 12.5px; line-height: 1.35; white-space: nowrap; transform: translateX(-50%) }
 .note { color: var(--muted); font-size: 13px; margin: 8px 0 0 }
+.note.cmp { color: var(--ink2); background: var(--sunk); border-radius: 10px; padding: 8px 12px; margin: 0 }
 .tablewrap { overflow-x: auto }
 table { border-collapse: collapse; width: 100%; font-size: 14.5px }
-td { padding: 10px 16px 10px 0; border-top: 1px solid var(--line); vertical-align: baseline }
+td { padding: 10px 16px 10px 0; border-top: 1px solid var(--soft); vertical-align: baseline }
 td:last-child { padding-right: 0; text-align: right }
 td.num { text-align: right; white-space: nowrap; font-weight: 500 }
 tr.best td.num, tr.best td:first-child { font-weight: 600 }
 td .meta { font-size: 13px }
 .soldout td { color: var(--muted) }
-details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 8px }
-.allshops > summary { display: flex; align-items: center; min-height: 44px; margin: 0; color: var(--ink2); font-size: 14px }
-.manage { border-top: 1px solid var(--line); margin-top: -6px }
-.manage > summary { display: flex; align-items: center; min-height: 48px; margin: 0; color: var(--ink); font-size: 14.5px; font-weight: 500 }
-.manage-in { padding-bottom: 4px }
-.mrow { padding: 14px 0; border-top: 1px solid var(--line) }
-.mrow:first-child { border-top: 0; padding-top: 4px }
+details summary { cursor: pointer; color: var(--ink2); font-size: 13px; margin-top: 8px }
+/* "Indstil vare" and "Vis alle butikker": real secondary buttons with a chevron that turns when open */
+.disc { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 48px; padding: 0 16px; margin: 0; background: var(--card); border: 1.5px solid var(--edge); border-radius: 12px;
+  color: var(--ink); font-size: 15px; font-weight: 600; text-align: left; cursor: pointer }
+.disc:hover { border-color: var(--accent); background: var(--accent-wash) }
+.disc::after { content: ""; flex: none; width: 8px; height: 8px; margin: -3px 2px 0 12px; border-right: 2px solid var(--accent); border-bottom: 2px solid var(--accent); transform: rotate(45deg); transition: transform .15s ease }
+.disc[aria-expanded="true"]::after { transform: rotate(225deg); margin-top: 3px }
+.allshops { margin-top: 10px }
+.allshops .disc { min-height: 44px; font-size: 14px; font-weight: 500; color: var(--accent) }
+.allshops-in { margin-top: 4px }
+.manage { margin-top: 2px }
+.manage-in { margin-top: 10px; background: var(--card); border: 1px solid var(--soft); border-radius: 12px; padding: 4px 16px }
+.mrow { padding: 14px 0; border-top: 1px solid var(--soft) }
+.mrow:first-child { border-top: 0 }
 .mrow .listpick, .mrow .foot, .mrow .edit.bought-row { margin-bottom: 0 }
+.mrow .edit > label:first-child, .mrow .listpick > label, .xshops > .meta, .mrow .choose legend { flex: 1 1 100%; font-size: 12.5px; font-weight: 600; color: var(--ink2); letter-spacing: .01em; margin: 0 }
+.mrow .listpick { gap: 6px 8px }
+.mrow .listpick > label { color: var(--ink2); font-size: 12.5px }
+.xshops > .meta { margin-bottom: 2px }
+.mrow.end { border-top-color: var(--line); margin-top: 6px; padding-bottom: 12px }
+.mrow.end .foot { gap: 8px 16px }
+.mrow .link.warn, .mrow .edit .link.warn { min-height: 44px; padding: 0 16px; display: inline-flex; align-items: center; border: 1.5px solid var(--danger); border-radius: 10px; color: var(--danger); text-decoration: none; font-weight: 600 }
+.mrow .xshops .link.warn { border: 0; padding: 0 6px; font-weight: 500; text-decoration: underline; text-decoration-color: var(--danger) }
 .manage .pshops { margin: 0 }
-.manage .pshops summary { display: flex; align-items: center; min-height: 44px; margin: 0; color: var(--ink2); font-size: 14px }
+.manage .pshops summary { display: flex; align-items: center; min-height: 44px; margin: 0; color: var(--ink2); font-size: 12.5px; font-weight: 600 }
 details table { margin-top: 8px }
 .foot { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; justify-content: space-between; font-size: 13.5px; color: var(--muted) }
 .edit.bought-row { margin-bottom: 8px }
 .edit { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
-.edit input { width: 96px; height: 44px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px }
-.edit input:focus { outline: none; border-color: var(--ink); background: var(--bg) }
-.link { background: none; border: 0; padding: 0; cursor: pointer; color: var(--ink); font-weight: 500; text-decoration: underline; text-decoration-color: var(--muted); text-underline-offset: 3px }
-.link.warn { color: var(--danger) }
+.edit input { width: 96px; height: 44px; background: var(--surface); border: 1px solid var(--edge); border-radius: 8px; padding: 0 10px }
+.edit input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) }
+.link { background: none; border: 0; padding: 0; cursor: pointer; color: var(--accent); font-weight: 500; text-decoration: underline; text-decoration-color: var(--accent-edge); text-underline-offset: 3px }
+.link.warn { color: var(--danger); text-decoration-color: var(--danger) }
 .fine { color: var(--muted); font-size: 13px; margin: 28px 0 0; max-width: 62ch }
 .fine + .fine { margin-top: 10px }
 details.fine summary { margin-top: 0; color: var(--ink2) }
 #shopForm { display: grid; gap: 6px; margin-top: 10px; max-width: 460px }
-#shopForm input[type=text] { height: 44px; background: var(--sunk); border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; font-size: 14px; color: var(--ink); margin-bottom: 6px }
+#shopForm input[type=text] { height: 44px; background: var(--card); border: 1px solid var(--edge); border-radius: 8px; padding: 0 10px; font-size: 14px; color: var(--ink); margin-bottom: 6px }
 #shopForm .chk { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px }
-.fine .link { font-weight: 400; color: var(--ink2) }
+.fine .link { font-weight: 500; color: var(--accent) }
 #trackSel { font: inherit; font-size: 13px; color: var(--ink); background: var(--sunk); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; margin-bottom: 4px }
 @media (max-width: 560px) {
   body { padding-block: 28px 64px }
@@ -280,6 +324,9 @@ details.fine summary { margin-top: 0; color: var(--ink2) }
   td { padding-block: 6px }
   .chips { gap: 8px 6px }
   .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px }
+  .item.open, .item.open.hit { margin: 12px -12px 18px; padding: 0 12px 14px; border-radius: 14px }
+  .manage-in { padding: 2px 12px }
+  .head { min-height: 80px }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; scroll-behavior: auto !important } }
 [hidden] { display: none !important }
@@ -291,7 +338,7 @@ body { padding-top: calc(48px + env(safe-area-inset-top, 0px)); padding-bottom: 
 /* alternatives */
 .alts { margin: 0 }
 .alt-list { list-style: none; margin: 0; padding: 0 }
-.alt-list li { padding: 10px 0; border-top: 1px solid var(--line) }
+.alt-list li { padding: 10px 0; border-top: 1px solid var(--soft) }
 .alt-list li:first-child { border-top: 0; padding-top: 0 }
 .alt-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px }
 .alt-name { font-weight: 500; overflow-wrap: anywhere; min-width: 0 }
@@ -299,14 +346,27 @@ body { padding-top: calc(48px + env(safe-area-inset-top, 0px)); padding-bottom: 
 .alt-tag { color: var(--good); font-weight: 600 }
 .alt-why { margin-top: 0 }
 .alt-act { margin-top: 4px; font-size: 13.5px }
-.alts > .link { font-size: 13.5px; font-weight: 400; color: var(--ink2) }
-.alts .sec-h .link, .alts .note .link { font-size: 13px; font-weight: 400; color: var(--ink2) }
+.alts > .link { font-size: 13.5px; font-weight: 500; color: var(--accent) }
+.alts .sec-h .link, .alts .note .link { font-size: 13px; font-weight: 500; color: var(--accent) }
 
-/* a small chevron on the sections that open in place */
-.manage > summary, .allshops > summary, .errs > summary, .manage .pshops > summary { list-style: none; justify-content: space-between }
-.manage > summary::-webkit-details-marker, .allshops > summary::-webkit-details-marker, .errs > summary::-webkit-details-marker, .manage .pshops > summary::-webkit-details-marker { display: none }
-.manage > summary::after, .allshops > summary::after, .errs > summary::after, .manage .pshops > summary::after { content: ""; flex: none; width: 7px; height: 7px; margin: 0 4px 3px 12px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); transition: transform .15s ease }
-.manage[open] > summary::after, .allshops[open] > summary::after, .errs[open] > summary::after, .manage .pshops[open] > summary::after { transform: rotate(225deg); margin-bottom: -2px }
+/* a small chevron on the quiet group of products that cannot be fetched and on "Butiksvalg" */
+.errs > summary, .manage .pshops > summary { list-style: none; justify-content: space-between }
+.errs > summary::-webkit-details-marker, .manage .pshops > summary::-webkit-details-marker { display: none }
+.errs > summary::after, .manage .pshops > summary::after { content: ""; flex: none; width: 7px; height: 7px; margin: 0 4px 3px 12px; border-right: 1.5px solid var(--ink2); border-bottom: 1.5px solid var(--ink2); transform: rotate(45deg); transition: transform .15s ease }
+.errs[open] > summary::after, .manage .pshops[open] > summary::after { transform: rotate(225deg); margin-bottom: -2px }
+
+/* goal line at the top of the open card, with its editor right below */
+.goalline { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 }
+.goalline .gt { min-width: 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 600; color: var(--ink) }
+.goalline .gact { flex: none; min-height: 44px; min-width: 64px; padding: 0 16px; background: var(--card); border: 1.5px solid var(--accent); border-radius: 10px; color: var(--accent); font-size: 14.5px; font-weight: 600; cursor: pointer }
+.goalline .gact:hover, .goalline .gact[aria-expanded="true"] { background: var(--accent-wash) }
+.goalpanel { margin: 10px 0 0; padding: 12px; background: var(--sunk); border-radius: 12px; display: grid; gap: 10px }
+.goalpanel .sugg { margin: 0 }
+.goalpanel .edit { gap: 8px }
+.goalpanel .edit input { width: 110px }
+.goalpanel .edit .gsave { min-height: 44px; padding: 0 18px; background: var(--accent); color: var(--on-accent); border-radius: 10px; text-decoration: none; font-weight: 600; display: inline-flex; align-items: center }
+.goalpanel .edit .gclose { margin-left: auto }
+.body > .goalwrap { margin-top: -4px }
 
 /* settings (opened from the account menu) */
 .settings { margin: 0 0 28px; padding: 6px 18px 18px; background: var(--sunk); border-radius: 14px }
@@ -314,6 +374,6 @@ body { padding-top: calc(48px + env(safe-area-inset-top, 0px)); padding-bottom: 
 .set-h h3 { font: 600 15px/1.3 var(--font); margin: 0 }
 .settings #shopForm { margin-top: 4px; max-width: none }
 .settings #shopForm label:not(.chk) { font-size: 13.5px; color: var(--ink2) }
-.settings #shopForm input[type=text] { background: var(--bg) }
+.settings #shopForm input[type=text] { background: var(--card) }
 .settings #shopForm .chk { align-items: center; min-height: 44px; margin: 0; font-size: 14.5px; color: var(--ink) }
-.settings .link { font-weight: 500; color: var(--ink) }
+.settings .link { font-weight: 500; color: var(--accent) }

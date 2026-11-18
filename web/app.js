@@ -28,7 +28,7 @@
     return window.supabase.createClient(url, key);
   }
 
-  var state = { manage: {}, allShops: {}, pshops: {}, errOpen: false, ord: null, share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
+  var state = { goalOpen: {}, manage: {}, allShops: {}, pshops: {}, errOpen: false, ord: null, share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
     prefs: { always: [], exclude: [], only: false, notify: true, digest: false }, profileSound: null };
   var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
   var sb = null, user = null, channel = null, pollTimer = null, fetching = false, again = false, lastFetch = 0, fetchSeq = 0;
@@ -356,7 +356,7 @@
     else if (!p.lastChecked) st = "Venter på første tjek";
     else if (!b) st = esc(p.checkNote || "Ingen pris fundet");
     else if (!anyStock) st = '<span class="out">Udsolgt alle steder</span> · senest hos ' + esc(b.store || "en butik");
-    else st = (t != null ? esc(kr(b.price - t)) + " over målet · " : "") + "billigst hos " + esc(b.store || "en butik");
+    else st = t != null ? '<span class="m1">' + esc(kr(b.price - t)) + " over målet</span> · billigst hos " + esc(b.store || "en butik") : '<span class="m1">billigst hos ' + esc(b.store || "en butik") + '</span>';
     if (p.status === "tracking" && p.warning && !p.boughtAt) st += ' · <span class="warn">Oppustet førpris</span>';
     var ab = addedBy(p);
     if (ab) st += " · af " + esc(ab);
@@ -470,7 +470,34 @@
         return '<option value="' + o[0] + '"' + (p.targetType === o[0] ? " selected" : "") + '>' + o[1] + '</option>';
       }).join("") + '</select>' +
       '<input class="n" type="number" id="e-' + esc(id) + '" min="1" step="1" value="' + esc(auto ? "" : p.targetValue) + '" aria-label="Målets værdi"' + (auto ? " hidden" : " required") + '>' +
-      '<button class="link" type="submit">Gem</button></form>';
+      '<button class="link gsave" type="submit">Gem</button><button type="button" class="link gclose" data-act="goal-close" data-id="' + esc(id) + '">Luk</button></form>';
+  }
+  // The goal, in one line at the top of the open card. "Ændr" (own products only) opens the editor and the suggestions right below it.
+  function goalLabel(p) {
+    if (p.targetType === "price") return "Mål: under " + kr(p.targetValue);
+    if (p.targetType === "pct") return "Mål: " + nf.format(p.targetValue) + " % rabat";
+    return "Mål: godt tilbud";
+  }
+  function lowsOf(p) {
+    var h = histOf(p), now = Date.now(), last30 = h.filter(function (x) { return x.t >= now - 30 * DAY; });
+    return { h: h, low30: last30.length ? Math.min.apply(null, last30.map(function (x) { return x.p; })) : null,
+      lowAll: h.length ? Math.min.apply(null, h.map(function (x) { return x.p; })) : null };
+  }
+  function goalHtml(p) {
+    if (p.status !== "tracking" || p.boughtAt) return "";
+    var id = p._id, ed = mayEdit(p), open = ed && !!state.goalOpen[id];
+    var html = '<div class="goalwrap"><div class="goalline"><span class="gt">' + esc(goalLabel(p)) + '</span>' +
+      (ed ? '<button type="button" class="gact" data-act="goal-open" data-id="' + esc(id) + '" aria-expanded="' + open + '"' + (open ? ' aria-controls="gp-' + esc(id) + '"' : '') + '>Ændr</button>' : '') + '</div>';
+    if (open) {
+      var l = lowsOf(p);
+      html += '<div class="goalpanel" id="gp-' + esc(id) + '">' + suggestHtml(p, bestOf(p), l.h, l.low30, l.lowAll) + goalEditHtml(p) + '</div>';
+    }
+    return html + '</div>';
+  }
+  // "Indstil vare" and "Vis alle butikker": a real button (aria-expanded) and a panel; the state is kept between renders
+  function discHtml(cls, act, id, label, open, inner) {
+    return '<div class="' + cls + '" data-' + cls + '="' + esc(id) + '"><button type="button" class="disc" data-act="' + act + '" data-id="' + esc(id) + '" aria-expanded="' + open + '">' + label + '</button>' +
+      '<div class="' + cls + '-in"' + (open ? "" : " hidden") + '>' + inner + '</div></div>';
   }
   function removeHtml(p) {
     var id = p._id;
@@ -491,10 +518,8 @@
       '<label class="chk"><input type="checkbox" id="so-' + esc(id) + '"' + (p.shopsOnly ? ' checked' : '') + '> Kun butikker fra “tjek altid”</label>' +
       '<span><button class="link" type="submit">Gem</button></span></form></details>';
   }
-  function manageHtml(p, h, b, low30, lowAll, single) {
+  function manageHtml(p, single) {
     var id = p._id, parts = [];
-    var sg = suggestHtml(p, b, h, low30, lowAll);
-    if (mayEdit(p)) parts.push(sg + goalEditHtml(p));
     var rq = reqEditHtml(p);
     if (rq) parts.push(rq);
     var lp = listPickHtml(p);
@@ -511,11 +536,11 @@
     if (xs) parts.push(xs);
     var bo = boughtHtml(p);
     if (bo) parts.push(bo);
-    var lk = linkHtml(p), rm = removeHtml(p);
-    if (lk || rm) parts.push('<div class="foot"><span>' + lk + '</span>' + rm + '</div>');
-    if (!parts.length) return "";
-    return '<details class="manage" data-manage="' + esc(id) + '"' + (state.manage[id] || state.change[id] || state.confirmDel === id ? " open" : "") + '><summary>Indstil vare</summary><div class="manage-in">' +
-      parts.map(function (x) { return '<div class="mrow">' + x + '</div>'; }).join("") + '</div></details>';
+    var lk = linkHtml(p), rm = removeHtml(p), end = "";
+    if (lk || rm) end = '<div class="foot"><span>' + lk + '</span>' + rm + '</div>';
+    if (!parts.length && !end) return "";
+    return discHtml("manage", "manage", id, "Indstil vare", !!(state.manage[id] || state.change[id] || state.confirmDel === id),
+      parts.map(function (x) { return '<div class="mrow">' + x + '</div>'; }).join("") + (end ? '<div class="mrow end">' + end + '</div>' : ""));
   }
   function shopTable(list, best) {
     return '<div class="tablewrap"><table><tbody>' + list.map(function (o) {
@@ -531,7 +556,7 @@
   function looseManage(p) {
     var f = footHtml(p);
     if (!f) return "";
-    return '<details class="manage" data-manage="' + esc(p._id) + '"' + (state.manage[p._id] || state.confirmDel === p._id ? " open" : "") + '><summary>Indstil vare</summary><div class="manage-in"><div class="mrow">' + f + '</div></div></details>';
+    return discHtml("manage", "manage", p._id, "Indstil vare", !!(state.manage[p._id] || state.confirmDel === p._id), '<div class="mrow">' + f + '</div>');
   }
 
   // Details: the person's own words (escaped like every user string). One quiet line at the top; the input is in "Indstil vare" (own products only).
@@ -554,7 +579,7 @@
       '<input type="text" id="rq-' + esc(id) + '" maxlength="120" value="' + esc(p.req) + '" placeholder="Farve, størrelse m.m.">' +
       '<button class="link" type="submit">Gem</button><span class="meta" data-rowmsg="rq-' + esc(id) + '">' + esc(state.rowMsg["rq-" + id] || "") + '</span></form>';
   }
-  function bodyHtml(p) { return reqLineHtml(p) + reqFindingHtml(p) + bodyHtml0(p); }
+  function bodyHtml(p) { return goalHtml(p) + reqLineHtml(p) + reqFindingHtml(p) + bodyHtml0(p); }
   function bodyHtml0(p) {
     var id = p._id;
     if (p.status === "pending" && !p.url) return findHtml(p) + looseManage(p);
@@ -583,9 +608,7 @@
     if (p.targetType === "auto" && autoReason(p) && !(v && v.text === autoReason(p))) html += '<p class="note">' + esc(autoReason(p)) + '</p>';
     if (p.warning) html += '<p class="verdict warn"><b>Pas på førprisen.</b> ' + esc(p.warning) + '</p>';
 
-    var last30 = h.filter(function (x) { return x.t >= now - 30 * DAY; });
-    var low30 = last30.length ? Math.min.apply(null, last30.map(function (x) { return x.p; })) : null;
-    var lowAll = h.length ? Math.min.apply(null, h.map(function (x) { return x.p; })) : null;
+    var lw = lowsOf(p), low30 = lw.low30, lowAll = lw.lowAll;
     html += '<dl class="stats n">' +
       '<div><dt>Laveste 30 dage</dt><dd>' + esc(kr(low30)) + '</dd></div>' +
       '<div><dt>Laveste set</dt><dd>' + esc(kr(lowAll)) + '</dd></div>' +
@@ -593,7 +616,7 @@
 
     if (h.length) {
       var r = state.range[id] || 365;
-      html += '<div><div class="sec-h"><h3>Prisen dag for dag</h3><div class="ranges" role="group" aria-label="Periode">' +
+      html += '<div class="sect"><div class="sec-h"><h3>Prisen dag for dag</h3><div class="ranges" role="group" aria-label="Periode">' +
         [[30, "1 md."], [90, "3 mdr."], [365, "1 år"]].map(function (x) {
           return '<button type="button" data-act="range" data-id="' + esc(id) + '" data-r="' + x[0] + '" aria-pressed="' + (r === x[0]) + '">' + x[1] + '</button>';
         }).join("") + '</div></div><div class="chart" data-chart="' + esc(id) + '"></div>';
@@ -614,13 +637,13 @@
     if (os.length) {
       var inS = os.filter(function (o) { return o.inStock !== false; }), top = (inS.length ? inS : os).slice(0, 3);
       var more = os.filter(function (o) { return top.indexOf(o) < 0; });
-      html += '<div class="shops"><div class="sec-h"><h3>Butikker</h3></div>' + shopTable(top, b) +
-        (more.length ? '<details class="allshops" data-allshops="' + esc(id) + '"' + (state.allShops[id] ? " open" : "") + '><summary>Vis alle butikker</summary>' + shopTable(more, b) + '</details>' : '') + '</div>';
+      html += '<div class="shops sect"><div class="sec-h"><h3>Butikker</h3></div>' + shopTable(top, b) +
+        (more.length ? discHtml("allshops", "allshops", id, "Vis alle butikker", !!state.allShops[id], shopTable(more, b)) : '') + '</div>';
     }
     if (single && !xList(p).length) html += '<p class="note">Kun denne butik. Et link fra prisjagt.dk sammenligner flere.</p>';
     html += cmpHtml(p);
     html += altHtml(p);
-    return html + manageHtml(p, h, b, low30, lowAll, single);
+    return html + manageHtml(p, single);
   }
 
   // ---- alternatives: similar products and deals, answered by the AI agent within the hour ----
@@ -669,7 +692,7 @@
     if (altAnswered(p)) {
       var list = altClean(p);
       if (!list.length) return '<p class="note alts">' + esc(p.altNote || "Ingen alternativer fundet.") + (ask ? " " + btn("Prøv igen") + " " + msg : "") + '</p>';
-      return '<div class="alts"><div class="sec-h"><h3>Alternativer</h3>' + (ask ? '<span>' + btn("Søg igen") + ' ' + msg + '</span>' : '') + '</div><ul class="alt-list">' +
+      return '<div class="alts sect"><div class="sec-h"><h3>Alternativer</h3>' + (ask ? '<span>' + btn("Søg igen") + ' ' + msg + '</span>' : '') + '</div><ul class="alt-list">' +
         list.map(function (a, i) { return altItemHtml(p, a, i); }).join("") + '</ul></div>';
     }
     return ask ? '<div class="alts">' + btn("Find alternativer") + ' ' + msg + '</div>' : "";
@@ -1025,7 +1048,7 @@
     var by = groupProducts(ps, sel);
     var rowHtml = function (p) {
       var open = isOpen(p);
-      return '<article class="item' + (isHit(p) ? " hit" : "") + (p.boughtAt ? " bought" : "") + '" data-status="' + esc(p.status) + '">' +
+      return '<article class="item' + (isHit(p) ? " hit" : "") + (open ? " open" : "") + (p.boughtAt ? " bought" : "") + '" data-status="' + esc(p.status) + '">' +
         '<button type="button" class="head" data-act="toggle" data-id="' + esc(p._id) + '" aria-expanded="' + open + '">' + headHtml(p) + '</button>' +
         (open ? '<div class="body">' + bodyHtml(p) + '</div>' : '') + '</article>';
     };
@@ -1149,10 +1172,10 @@
         '<text class="lbl" x="' + (ml + 6) + '" y="' + (Y(tgt) + (lastP.p <= tgt ? -7 : 15)) + '">Dit mål ' + esc(kr(tgt)) + '</text>';
     }
     s += '<path d="' + d + '" fill="none" stroke="var(--series)" stroke-width="2" stroke-linejoin="round"/>' +
-      '<circle cx="' + X(t1) + '" cy="' + Y(lastP.p) + '" r="4.5" fill="var(--series)" stroke="var(--bg)" stroke-width="2"/>' +
+      '<circle cx="' + X(t1) + '" cy="' + Y(lastP.p) + '" r="4.5" fill="var(--series)" stroke="var(--surface)" stroke-width="2"/>' +
       '<text class="now" x="' + (X(t1) - 9) + '" y="' + (Y(lastP.p) + (tgt != null && lastP.p <= tgt ? 19 : -10)) + '" text-anchor="end">' + esc(kr(lastP.p)) + '</text>' +
       '<g class="hov" visibility="hidden"><line y1="' + mt + '" y2="' + (H - mb) + '" stroke="var(--muted)" stroke-width="1"/>' +
-      '<circle r="4.5" fill="var(--series)" stroke="var(--bg)" stroke-width="2"/></g>' +
+      '<circle r="4.5" fill="var(--series)" stroke="var(--surface)" stroke-width="2"/></g>' +
       '<rect x="' + ml + '" y="' + mt + '" width="' + (W - ml - mr) + '" height="' + (H - mt - mb) + '" fill="transparent"/></svg><div class="tip" hidden></div>';
     host.innerHTML = s;
     var svg = host.querySelector("svg"), hov = host.querySelector(".hov"), tip = host.querySelector(".tip");
@@ -1286,10 +1309,29 @@
 
   // ---- list interactions ----
   function prod(id) { return state.products.filter(function (x) { return x._id === id; })[0]; }
+  // focus follows the goal editor: into it when it opens, back on "Ændr" when it closes
+  function focusGoal(id, inEditor) {
+    var q = inEditor ? "#gp-" + CSS.escape(id) + " select" : '[data-act="goal-open"][data-id="' + CSS.escape(id) + '"]', el = document.querySelector(q);
+    if (el) try { el.focus(); } catch (e) {}
+  }
+  $("list").addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape") return;
+    var gp = ev.target.closest && ev.target.closest(".goalpanel"); if (!gp) return;
+    var f = gp.querySelector("[data-edit]"); if (!f) return;
+    ev.preventDefault(); state.goalOpen[f.dataset.edit] = false; render(); focusGoal(f.dataset.edit, false);
+  });
   $("list").addEventListener("click", function (ev) {
     var b = ev.target.closest("[data-act]"); if (!b) return;
     var act = b.dataset.act, id = b.dataset.id, p = prod(id);
     if (act === "toggle") { state.open[id] = !(p ? isOpen(p) : state.open[id]); state.confirmDel = null; render(); }
+    else if (act === "manage" || act === "allshops") {
+      var xo = b.getAttribute("aria-expanded") !== "true", panel = b.nextElementSibling;
+      b.setAttribute("aria-expanded", String(xo)); if (panel) panel.hidden = !xo;
+      (act === "manage" ? state.manage : state.allShops)[id] = xo;
+    }
+    else if (act === "goal-open" || act === "goal-close") {
+      state.goalOpen[id] = act === "goal-open" && !state.goalOpen[id]; render(); focusGoal(id, state.goalOpen[id]);
+    }
     else if (act === "range") { state.range[id] = +b.dataset.r; render(); }
     else if (act === "goal" && sb && p) {
       var gv = Number(b.dataset.v);
@@ -1490,12 +1532,13 @@
     var ty = f.querySelector("select").value, v = ty === "auto" ? null : Number(f.querySelector("input").value), id = f.dataset.edit, p = prod(id), patch;
     if (!p || (ty !== "auto" && (!(v > 0) || (ty === "pct" && v > 95)))) return;
     f.querySelector("input").blur();
-    if (ty === p.targetType && v === p.targetValue) { render(); return; }
+    state.goalOpen[id] = false;
+    if (ty === p.targetType && v === p.targetValue) { render(); focusGoal(id, false); return; }
     // the goal type is only written when it changes
     patch = ty === p.targetType ? { target_value: v } : { target_type: ty, target_value: v };
     sb.from("products").update(patch).eq("id", id).then(function (r) {
       if (r && r.error) { onWriteError(r.error); return; }
-      p.targetType = ty; p.targetValue = v; render(); fetchProducts();
+      p.targetType = ty; p.targetValue = v; render(); focusGoal(id, false); fetchProducts();
     }, function () {});
   });
   $("list").addEventListener("focusout", function () { setTimeout(function () { if (renderPending) render(); }, 0); });
@@ -1503,8 +1546,6 @@
   $("list").addEventListener("toggle", function (ev) {
     var d = ev.target; if (!d || !d.matches) return;
     if (d.id === "errGroup") state.errOpen = d.open;
-    else if (d.dataset.manage) state.manage[d.dataset.manage] = d.open;
-    else if (d.dataset.allshops) state.allShops[d.dataset.allshops] = d.open;
     else if (d.dataset.pshops) state.pshops[d.dataset.pshops] = d.open;
   }, true);
   // a picture that does not load (error does not bubble: captured) falls back to the letter and is not tried again
@@ -1606,17 +1647,23 @@
     $("fHint").textContent = pct ? "Regnes fra normalprisen." : "Varen skal være på lager.";
     $("fHint").hidden = auto || !state.canWrite;
   }
-  // One line: the field and the button. The goal choices ("Godt tilbud" is the default) show while the field has focus or text, or a
-  // choice other than the default is made, and while a pointer is down inside the form (so a tap on a choice is not lost to the blur).
-  var addPress = false;
+  // One line: the field and the button. The goal choices ("Godt tilbud" is the default) are always there on a wide screen. On a phone they show
+  // while the field has focus or text, or a choice other than the default is made, while a pointer is down inside the form (so a tap on a
+  // choice is not lost to the blur), and when "Mål" is tapped. "Detaljer" (and the amount) come with the choices.
+  var addPress = false, addReveal = false, wideMq = window.matchMedia ? window.matchMedia("(min-width: 700px)") : null;
   function syncAdd() {
-    var f = $("addForm"), on = !!$("fMain").value || !$("fTypeAuto").checked || f.contains(document.activeElement) || addPress;
+    var f = $("addForm"), on = !!$("fMain").value || !$("fTypeAuto").checked || (f.contains(document.activeElement) && document.activeElement !== $("goalBtn")) || addPress || addReveal;
+    var wide = !!(wideMq && wideMq.matches);
+    $("addGoal").hidden = !(on || wide);
     $("addMore").hidden = !on;
+    $("goalBtn").setAttribute("aria-expanded", String(on));
   }
+  $("goalBtn").addEventListener("click", function () { addReveal = $("goalBtn").getAttribute("aria-expanded") !== "true"; syncAdd(); });
+  if (wideMq && wideMq.addEventListener) wideMq.addEventListener("change", syncAdd);
   $("addForm").addEventListener("focusin", syncAdd);
   $("addForm").addEventListener("focusout", function () { setTimeout(syncAdd, 0); });
   $("fMain").addEventListener("input", syncAdd);
-  $("addForm").addEventListener("pointerdown", function () { addPress = true; });
+  $("addForm").addEventListener("pointerdown", function (ev) { if (!ev.target.closest("#goalBtn")) addPress = true; });
   ["pointerup", "pointercancel"].forEach(function (ev) { document.addEventListener(ev, function () { if (addPress) { addPress = false; setTimeout(syncAdd, 0); } }); });
   // A value that looks like an address (scheme, www., or a single word with a path) is a link; anything else is a name.
   function looksLikeLink(t) { return /^[a-z][a-z0-9+.-]*:\/\//i.test(t) || /^(javascript|data|vbscript|file|mailto):/i.test(t) || /^www\./i.test(t) || /^\S+\.\S+\/\S*$/.test(t) || /prisjagt\.dk/i.test(t) && !/\s/.test(t); }
@@ -1683,7 +1730,7 @@
         fail(r.error.code === "23514" ? (url ? "Databasen afviste linket eller målet. Tjek, at linket starter med https:// og er en produktside." : "Databasen afviste navnet eller målet. Tjek dem, og prøv igen.") : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
         return;
       }
-      $("fMain").value = ""; $("fVal").value = ""; $("fReq").value = ""; syncAdd();
+      $("fMain").value = ""; $("fVal").value = ""; $("fReq").value = ""; addReveal = false; syncAdd();
       fetchProducts();
     }, function () { btn.disabled = false; fail("Kunne ikke gemme lige nu. Prøv igen om lidt."); }); };
     insertRow(false);
@@ -1708,7 +1755,7 @@
         fail(r.error.code === "23514" ? (/højst/.test(String(r.error.message || "")) ? String(r.error.message) : "Databasen afviste linket. Brug det delte link til ønskelisten fra Ønskeskyen.") : "Kunne ikke gemme lige nu. Prøv igen om lidt.");
         return;
       }
-      $("fMain").value = ""; $("fVal").value = ""; $("fReq").value = ""; state.importMsg = ""; syncAdd();
+      $("fMain").value = ""; $("fVal").value = ""; $("fReq").value = ""; state.importMsg = ""; addReveal = false; syncAdd();
       fetchImports();
     }, function () { btn.disabled = false; fail("Kunne ikke gemme lige nu. Prøv igen om lidt."); });
   }

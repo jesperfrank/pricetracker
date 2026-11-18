@@ -96,21 +96,24 @@
       <div class="addrow">
         <label class="vh" for="fMain">Produktnavn, link eller ønskeliste</label>
         <input type="text" id="fMain" maxlength="500" required placeholder="Produktnavn, link eller ønskeliste">
+        <button type="button" class="goalbtn" id="goalBtn" aria-expanded="false" aria-controls="addGoal">Mål</button>
         <button class="btn" id="fSubmit" type="submit"><span class="bl">Hold øje</span><svg class="bi" viewBox="0 0 20 20" width="20" height="20" aria-hidden="true" focusable="false"><path d="M10 4v12M4 10h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
       </div>
-      <div class="addmore" id="addMore" hidden>
+      <div class="addgoal" id="addGoal" hidden>
         <div class="goal" role="radiogroup" aria-label="Hvornår vil du have besked?">
           <label><input type="radio" name="fType" id="fTypeAuto" value="auto" checked><span>Godt tilbud</span></label>
           <label><input type="radio" name="fType" id="fTypePrice" value="price"><span>Pris under … kr.</span></label>
           <label><input type="radio" name="fType" id="fTypePct" value="pct"><span>Rabat på mindst … %</span></label>
         </div>
-        <div class="req">
-          <label class="vh" for="fReq">Detaljer</label>
-          <input class="inp" type="text" id="fReq" maxlength="120" placeholder="Farve, størrelse m.m. (valgfrit)">
-        </div>
+      </div>
+      <div class="addmore" id="addMore" hidden>
         <div class="amount" id="fAmount" hidden>
           <label class="vh" for="fVal" id="fValLabel">Højeste pris i kroner</label>
           <input class="inp n" type="number" id="fVal" min="1" step="1" inputmode="numeric" placeholder="Højst">
+        </div>
+        <div class="req">
+          <label class="vh" for="fReq">Detaljer</label>
+          <input class="inp" type="text" id="fReq" maxlength="120" placeholder="Farve, størrelse m.m. (valgfrit)">
         </div>
       </div>
     </form>

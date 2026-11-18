@@ -238,7 +238,7 @@ async function open(opts = {}) {
   // The behaviour tests below work with the sections "Indstil vare", "Vis alle butikker" and the group of products that cannot be fetched opened (they are collapsed by default; the tests
   // of that collapsing pass collapsed: true). Opening goes through the real toggle, so the page keeps it across renders.
   if (!opts.collapsed) await page.addInitScript(() => {
-    const fix = () => document.querySelectorAll("details.manage:not([open]), details.allshops:not([open]), details.errs:not([open])").forEach(d => { d.open = true; });
+    const fix = () => document.querySelectorAll('.disc[aria-expanded="false"], details.errs:not([open])').forEach(d => { if (d.tagName === "BUTTON") d.click(); else d.open = true; });
     document.addEventListener("DOMContentLoaded", () => new MutationObserver(fix).observe(document.body, { childList: true, subtree: true }));
   });
   if (opts.storage) await page.addInitScript(s => { for (const k in s) localStorage.setItem(k, s[k]); }, opts.storage);
@@ -250,7 +250,9 @@ const ops = page => page.evaluate(() => window.__db.writes());
 // the account menu, the settings panel, and the collapsed sections inside the list
 const menu = async p => { if (!(await p.isVisible("#acctPop"))) await p.click("#acctBtn"); };
 const openSettings = async p => { await menu(p); await p.click("#settingsBtn"); await p.waitForSelector("#settingsBox:not([hidden])"); };
-const openAll = p => p.evaluate(() => document.querySelectorAll("details.manage, details.allshops, details.errs").forEach(d => { d.open = true; }));
+const openAll = p => p.evaluate(() => document.querySelectorAll('.disc[aria-expanded="false"], details.errs').forEach(d => { if (d.tagName === "BUTTON") d.click(); else d.open = true; }));
+const openGoal = async (p, id) => { const b = p.locator('[data-act="goal-open"][data-id="' + id + '"]'); if ((await b.getAttribute("aria-expanded")) !== "true") await b.click(); await p.waitForSelector("#gp-" + id); };
+const mOpen = loc => loc.locator("> .disc").getAttribute("aria-expanded").then(v => v === "true");
 const goalPick = async (p, sel) => { await p.focus("#fMain"); await p.click(".goal label:has(" + sel + ")"); };
 
 const pendingRow = { id: "p1", user_id: "u1", name: "Nyt produkt", source_url: "https://prisjagt.dk/produkt/ny", target_type: "price", target_value: 500, status: "pending", created_at: new Date().toISOString(), tracked_variants: null, active: true };
@@ -594,6 +596,7 @@ let base;
     await openAll(p);
     const body = await p.locator('.item:has(.head[data-id="dy"]) .body').textContent();
     check("auto goal: the verdict says why, not repeated in a second line", /3\.999 kr\. er 13 % under normalprisen/.test(body) && !/Derfor giver vi besked/.test(body) && body.split("er 13 % under normalprisen").length === 2, body.slice(0, 300));
+    await openGoal(p, "dy");
     check("auto goal: edit form has the three choices, auto selected, no number field",
       (await p.inputValue("#et-dy")) === "auto" && (await p.locator("#et-dy option").count()) === 3 && !(await p.isVisible("#e-dy")));
     // suggested goals
@@ -615,6 +618,7 @@ let base;
     o = (await ops(p))[1];
     check("edit: to auto -> {target_type auto, target_value null}", JSON.stringify(o.payload) === '{"target_type":"auto","target_value":null}', JSON.stringify(o.payload));
     await p.waitForFunction(() => /Godt tilbud/.test(document.querySelector('.head[data-id="dy"]').textContent));
+    await openGoal(p, "dy");
     await p.selectOption("#et-dy", "pct");
     check("edit: choosing % shows the number field", await p.isVisible("#e-dy"));
     await p.fill("#e-dy", "20"); await p.click('[data-edit="dy"] button[type=submit]');
@@ -644,6 +648,7 @@ let base;
     const p = await open({ products: [row("test-sony-xm5", { id: "x5", target_value: 1700 }), row("test-lego-falcon", { id: "lg" })], label: "edit" });
     await p.waitForSelector(".item");
     await p.locator('.head[data-id="x5"]').click(); await openAll(p);
+    await openGoal(p, "x5");
     await p.fill('#e-x5', "1900"); await p.click('[data-edit="x5"] button[type=submit]');
     await p.waitForFunction(() => window.__db.writes().length === 1);
     let o = (await ops(p))[0];
@@ -654,7 +659,7 @@ let base;
     await p.click('[data-act="del"][data-id="x5"]');
     check("delete: asks first", /Fjern produktet og dets historik\?/.test(await p.textContent('.item .body')) && (await ops(p)).length === 1);
     await p.click('[data-act="del-no"]');
-    check("delete: 'Behold' cancels", (await ops(p)).length === 1 && await p.isVisible('[data-edit="x5"]'));
+    check("delete: 'Behold' cancels", (await ops(p)).length === 1 && await p.isVisible('.goalline .gact'));
     await p.click('[data-act="del"][data-id="x5"]'); await p.click('[data-act="del-yes"]');
     await p.waitForFunction(() => window.__db.writes().length === 2);
     o = (await ops(p))[1];
@@ -1101,11 +1106,11 @@ let base;
       // someone else's product: readable, markable, nothing else (the owner of the LIST has no edit rights over it either)
       await p.locator('.head[data-id="hans"]').click();
       const body = await p.locator('.item:has(.head[data-id="hans"]) .body').innerHTML();
-      check("share: someone else's product has no edit, delete, goal, shop, variant or move controls", !/data-edit|data-act="del"|data-act="goal"|data-shops|data-act="change"|data-listpick|data-fixurl/.test(body), body.slice(0, 300));
+      check("share: someone else's product has no edit, delete, goal, shop, variant or move controls", !/data-edit|data-act="goal-open"|data-act="del"|data-act="goal"|data-shops|data-act="change"|data-listpick|data-fixurl/.test(body), body.slice(0, 300));
       check("share: ... but it can be marked as bought, and its link is just 'Link'", /data-act="buy"/.test(body) && />Link</.test(body) && !/Dit link/.test(body));
       await p.locator('.head[data-id="mine"]').click();
       const mine = await p.locator('.item:has(.head[data-id="mine"]) .body').innerHTML();
-      check("share: my own product keeps every control", /data-edit/.test(mine) && /data-act="del"/.test(mine) && /data-shops/.test(mine) && /data-listpick/.test(mine));
+      check("share: my own product keeps every control", /data-act="goal-open"/.test(mine) && /data-act="del"/.test(mine) && /data-shops/.test(mine) && /data-listpick/.test(mine));
       await p.locator('.head[data-id="koebt"]').click();
       const kb = await p.locator('.item:has(.head[data-id="koebt"]) .body').innerHTML();
       check("share: the list owner can undo someone else's bought mark", /data-bought="koebt"/.test(kb) && /data-act="unbuy"/.test(kb));
@@ -1181,16 +1186,16 @@ let base;
       check("member: 'Købt af Far for 500 kr.' for Far's mark, and plain 'Købt for 77 kr.' for my own", hs.some(h => /Købt af Far for 500 kr\./.test(h)) && hs.some(h => /Købt for 77 kr\./.test(h) && !/Købt af/.test(h)), JSON.stringify(hs));
       await p.locator('.head[data-id="moders"]').click();
       const mb = await p.locator('.item:has(.head[data-id="moders"]) .body').innerHTML();
-      check("member: Mor's product has no edit, delete, goal, shop or move controls, only 'Købt'", !/data-edit|data-act="del"|data-act="goal"|data-shops|data-act="change"|data-listpick/.test(mb) && /data-act="buy"/.test(mb));
+      check("member: Mor's product has no edit, delete, goal, shop or move controls, only 'Købt'", !/data-edit|data-act="goal-open"|data-act="del"|data-act="goal"|data-shops|data-act="change"|data-listpick/.test(mb) && /data-act="buy"/.test(mb));
       await p.locator('.head[data-id="fars"]').click();
       const fb = await p.locator('.item:has(.head[data-id="fars"]) .body').innerHTML();
       check("member: Far's bought mark cannot be undone or re-priced by me", !/data-bought|data-act="unbuy"/.test(fb));
       await p.locator('.head[data-id="minegen"]').click();
       const eb = await p.locator('.item:has(.head[data-id="minegen"]) .body').innerHTML();
-      check("member: my own bought mark on Mor's product can be undone and re-priced by me", /data-bought="minegen"/.test(eb) && /data-act="unbuy"/.test(eb) && !/data-edit/.test(eb));
+      check("member: my own bought mark on Mor's product can be undone and re-priced by me", /data-bought="minegen"/.test(eb) && /data-act="unbuy"/.test(eb) && !/data-edit|data-act="goal-open"/.test(eb));
       await p.locator('.head[data-id="min"]').click();
       const ob = await p.locator('.item:has(.head[data-id="min"]) .body').innerHTML();
-      check("member: my own product in the shared list has every control, the move list names both lists", /data-edit/.test(ob) && /data-act="del"/.test(ob) && /data-listpick/.test(ob) && (await p.locator("#lp-min option").allTextContents()).join("|") === "Ingen liste|Gaver|Privat");
+      check("member: my own product in the shared list has every control, the move list names both lists", /data-act="goal-open"/.test(ob) && /data-act="del"/.test(ob) && /data-listpick/.test(ob) && (await p.locator("#lp-min option").allTextContents()).join("|") === "Ingen liste|Gaver|Privat");
       // marking as bought writes the bought columns only
       await p.locator('.item:has(.head[data-id="moders"]) [data-act="buy"]').click(); await settle(p);
       const up = (await ops(p)).filter(o => o.op === "update");
@@ -1699,7 +1704,7 @@ let base;
       await p.waitForFunction(() => /Købt for 3\.999 kr\./.test(document.body.textContent));
       const it = p.locator(".item", { has: p.locator('.head[data-id="dy"]') });
       check("bought: the line says 'Købt for 3.999 kr.', no goal text, no highlight, no 'Mål nået'", (await it.locator(".meta").first().textContent()) === "Købt for 3.999 kr." && (await it.getAttribute("class")).indexOf("hit") < 0 && !/Mål nået|Godt tilbud/.test(await it.locator(".head").textContent()) && (await it.locator(".price span").count()) === 0);
-      check("bought: dimmed, and at the bottom of the list", (await it.getAttribute("class")).indexOf("bought") >= 0 && +(await it.evaluate(e => getComputedStyle(e).opacity)) < 1 && (await p.locator(".item").last().getAttribute("class")).indexOf("bought") >= 0 && (await p.locator(".item").first().getAttribute("class")).indexOf("bought") < 0);
+      check("bought: dimmed, and at the bottom of the list", (await it.getAttribute("class")).indexOf("bought") >= 0 && +(await it.locator(".thumb").evaluate(e => getComputedStyle(e).opacity)) < 1 && (await p.locator(".item").last().getAttribute("class")).indexOf("bought") >= 0 && (await p.locator(".item").first().getAttribute("class")).indexOf("bought") < 0);
       const cel = await p.evaluate(() => (window.__pvCelebrations || []).length);
       await p.evaluate(() => window.__tick()); await p.waitForTimeout(200);
       check("bought: no sound or celebration for it (the one before the click was the hit it used to be)", (await p.evaluate(() => (window.__pvCelebrations || []).length)) === cel);
@@ -1940,7 +1945,7 @@ let base;
       await p.waitForFunction(() => /Følger 4 butikker/.test(document.body.innerText));
       check("extras: the list and the line follow at once (and after the list is read again)", (await body(p, "x1").locator(".xshops .foot").count()) === 3 && !/butik-b\.dk/.test(await body(p, "x1").locator(".xshops").innerText()));
       await p.waitForTimeout(150);
-      check("extras: ... still after the read", (await body(p, "x1").locator(".xshops .foot").count()) === 3 && (await body(p, "x1").locator(".manage").evaluate(d => d.open)));
+      check("extras: ... still after the read", (await body(p, "x1").locator(".xshops .foot").count()) === 3 && (await mOpen(body(p, "x1").locator(".manage"))));
       // down to the last one: null, then the product is "not found elsewhere" again
       await body(p, "x1").locator('[data-act="x-rm"]').first().click();
       await p.waitForFunction(() => window.__db.writes().length === 2);
@@ -1973,26 +1978,26 @@ let base;
     const bf = await p.locator("#fMain").boundingBox(), bb = await p.locator("#fSubmit").boundingBox();
     check("add line: the field and the button are in one row, the button inside the same bar", Math.abs((bf.y + bf.height / 2) - (bb.y + bb.height / 2)) < 3 && bb.x > bf.x && (await p.locator(".addrow #fSubmit").count()) === 1 && (await p.locator(".addrow #fMain").count()) === 1);
     check("add line: the button is still called 'Hold øje'", (await p.getByRole("button", { name: "Hold øje" }).count()) === 1 && bb.height >= 44);
-    check("add line: the goal choices are hidden until the field is used (not just invisible: not in the accessibility tree either)",
-      !(await p.isVisible("#addMore")) && !(await p.isVisible(".goal")) && (await p.getByRole("radio").count()) === 0 && await p.evaluate(() => document.getElementById("addMore").hidden));
+    check("add line (wide): the three goal choices are always visible as chips, 'Mål' is not needed, 'Detaljer' waits for the field",
+      await p.isVisible(".goal") && (await p.getByRole("radio").count()) === 3 && !(await p.isVisible("#goalBtn")) && !(await p.isVisible("#fReq")) && await p.evaluate(() => document.getElementById("addMore").hidden));
     await p.focus("#fMain");
-    check("add line: on focus the three choices appear below the field, 'Godt tilbud' is the default", await p.isVisible(".goal") && (await p.getByRole("radio").count()) === 3 && await p.isChecked("#fTypeAuto") && !(await p.isVisible("#fAmount")));
+    check("add line: on focus 'Detaljer' appears with the three choices, 'Godt tilbud' is the default", await p.isVisible("#fReq") && await p.isVisible(".goal") && (await p.getByRole("radio").count()) === 3 && await p.isChecked("#fTypeAuto") && !(await p.isVisible("#fAmount")));
     const gb = await p.locator(".goal").boundingBox();
     check("add line: ... below the field", gb.y >= bf.y + bf.height - 1);
     check("add line: the choices are a labelled radiogroup", (await p.getAttribute(".goal", "role")) === "radiogroup" && /Hvornår/.test(await p.getAttribute(".goal", "aria-label")) && (await p.getByRole("radiogroup").count()) === 1);
     await p.click("h1");
     await p.waitForTimeout(50);
-    check("add line: leaving the empty field hides them again", !(await p.isVisible(".goal")));
+    check("add line: leaving the empty field hides them again", !(await p.isVisible("#fReq")));
     await p.fill("#fMain", "Sony"); await p.click("h1"); await p.waitForTimeout(50);
-    check("add line: text in the field keeps them", await p.isVisible(".goal"));
+    check("add line: text in the field keeps them", await p.isVisible("#fReq"));
     await p.fill("#fMain", ""); await p.click("h1"); await p.waitForTimeout(50);
-    check("add line: emptied and left: hidden", !(await p.isVisible(".goal")));
+    check("add line: emptied and left: hidden", !(await p.isVisible("#fReq")));
     await p.focus("#fMain"); await p.click(".goal label:has(#fTypePrice)");
     check("add line: a tap on a choice is not lost to the blur, and the amount field shows", await p.isChecked("#fTypePrice") && await p.isVisible("#fAmount"));
     await p.click("h1"); await p.waitForTimeout(50);
-    check("add line: a choice other than the default stays visible", await p.isVisible(".goal") && await p.isVisible("#fAmount"));
+    check("add line: a choice other than the default stays visible", await p.isVisible("#fReq") && await p.isVisible("#fAmount"));
     await p.click(".goal label:has(#fTypeAuto)"); await p.click("h1"); await p.waitForTimeout(50);
-    check("add line: back to the default and left: hidden again", !(await p.isVisible(".goal")));
+    check("add line: back to the default and left: hidden again", !(await p.isVisible("#fReq")));
     // keyboard: Tab goes field -> button -> the choices -> on, never trapped; arrows move in the radiogroup; Enter submits
     await p.focus("#fMain"); await p.keyboard.press("Tab");
     check("add line: Tab from the field reaches the button", await p.evaluate(() => document.activeElement.id) === "fSubmit");
@@ -2016,7 +2021,12 @@ let base;
       const b = await n.locator("#fSubmit").boundingBox(), f = await n.locator("#fMain").boundingBox(), r = await n.locator(".addrow").boundingBox();
       check("add line at " + w + " px: compact square button (at least 44 px), same row, inside the bar", b.width >= 44 && b.width <= 52 && b.height >= 44 && Math.abs((f.y + f.height / 2) - (b.y + b.height / 2)) < 3 && b.x + b.width <= r.x + r.width);
       check("add line at " + w + " px: the compact button keeps its accessible name", (await n.getByRole("button", { name: "Hold øje" }).count()) === 1 && (await n.locator("#fSubmit svg").getAttribute("aria-hidden")) === "true");
-      check("add line at " + w + " px: field wide enough to read (at least 220 px)", f.width >= 220, String(f.width));
+      check("add line at " + w + " px: field wide enough to read (at least " + (w < 400 ? 175 : 215) + " px, with the 'Mål' button in the row)", f.width >= (w < 400 ? 175 : 215), String(f.width));
+      check("add line at " + w + " px: 'Mål' is a visible text button in the row, at least 44 px high, collapsed", await n.isVisible("#goalBtn") && (await n.locator("#goalBtn").boundingBox()).height >= 44 && (await n.getAttribute("#goalBtn", "aria-expanded")) === "false" && !(await n.isVisible(".goal")) && !(await n.isVisible("#fReq")) && (await n.getByRole("button", { name: "Mål" }).count()) === 1);
+      await n.click("#goalBtn");
+      check("add line at " + w + " px: 'Mål' reveals the three choices and 'Detaljer', aria-expanded true", (await n.getAttribute("#goalBtn", "aria-expanded")) === "true" && await n.isVisible(".goal") && (await n.getByRole("radio").count()) === 3 && await n.isVisible("#fReq"));
+      await n.click("#goalBtn");
+      check("add line at " + w + " px: 'Mål' again hides them", (await n.getAttribute("#goalBtn", "aria-expanded")) === "false" && !(await n.isVisible(".goal")) && !(await n.isVisible("#fReq")));
       await n.context().close();
     }
   }
@@ -2094,7 +2104,7 @@ let base;
     await p.evaluate(() => { var r = window.__db.products.filter(x => x.id === "gb")[0]; r.bought_at = "2026-11-16T10:00:00Z"; r.bought_price = 2049; r.bought_by = "u1"; });
     await tick(p);
     const n2 = await names(p);
-    check("order: a bought product goes last and is dimmed", n2[n2.length - 1] === "Midt" && +(await p.locator('.item:has(.head[data-id="gb"])').evaluate(e => getComputedStyle(e).opacity)) < 1, JSON.stringify(n2));
+    check("order: a bought product goes last and is dimmed", n2[n2.length - 1] === "Midt" && +(await p.locator('.item:has(.head[data-id="gb"]) .thumb').evaluate(e => getComputedStyle(e).opacity)) < 1, JSON.stringify(n2));
     // the order is a fresh sort on load and when another list is chosen
     await p.evaluate(() => { var r = window.__db.products.filter(x => x.id === "gc")[0]; r.target_value = 2040; });
     await tick(p);
@@ -2132,14 +2142,14 @@ let base;
     check("errors: the group comes after every live row", ys.every(y => y < yg));
     check("errors: waiting rows (fetching, choose variant) stay in the main list with their short status; 'Vælg variant' is visible",
       await p.locator('#list > .item[data-status="pending"]').isVisible() && /Henter produktet/.test(await p.locator('#list > .item[data-status="pending"] .head .meta').textContent()) && await p.locator('#list > .item[data-status="choose"] .head .meta').isVisible() && /Vælg variant/.test(await p.textContent('#list > .item[data-status="choose"] .head .meta')));
-    const redText = await p.evaluate(() => { var red = "rgb(179, 48, 45)", bad = []; document.querySelectorAll("#list > .item *, #errGroup > summary").forEach(function (e) { if (e.children.length === 0 && e.textContent.trim() && getComputedStyle(e).color === red) bad.push(e.textContent.trim()); }); return bad; });
+    const redText = await p.evaluate(() => { var red = "rgb(168, 43, 40)", bad = []; document.querySelectorAll("#list > .item *, #errGroup > summary").forEach(function (e) { if (e.children.length === 0 && e.textContent.trim() && getComputedStyle(e).color === red) bad.push(e.textContent.trim()); }); return bad; });
     check("errors: no red text anywhere in the main list but the real warning 'Oppustet førpris' (and the destructive 'Fjern')", redText.every(t => t === "Oppustet førpris" || t === "Fjern") && redText.indexOf("Oppustet førpris") >= 0, JSON.stringify(redText));
     await p.click("#errGroup > summary");
     check("errors: opened, each row shows its short reason in muted text", await p.locator('.item[data-status="error"]').first().isVisible() && /findes ikke længere/.test(await p.textContent('.head[data-id="e1"] .meta')) && /Siden svarer ikke\./.test(await p.textContent('.head[data-id="e2"] .meta')));
     check("errors: ... and the reason is not red and not a warning", await p.evaluate(() => { var m = document.querySelector('.head[data-id="e1"] .meta'), c = getComputedStyle(m).color; return c !== "rgb(179, 48, 45)" && !m.querySelector(".warn"); }));
     await p.locator('.head[data-id="e1"]').click();
-    check("errors: a row keeps its actions: the change-link form is in the detail, 'Indstil vare' holds remove", await p.locator('[data-fixurl="e1"]').isVisible() && !(await p.locator('[data-act="del"][data-id="e1"]').isVisible()) && (await p.locator('.item:has(.head[data-id="e1"]) details.manage [data-act="del"]').count()) === 1 && !(await p.evaluate(() => /poor/.test(document.querySelector('.item[data-status="error"] .body .verdict').className))));
-    await p.locator('.item:has(.head[data-id="e1"]) details.manage > summary').click();
+    check("errors: a row keeps its actions: the change-link form is in the detail, 'Indstil vare' holds remove", await p.locator('[data-fixurl="e1"]').isVisible() && !(await p.locator('[data-act="del"][data-id="e1"]').isVisible()) && (await p.locator('.item:has(.head[data-id="e1"]) .manage [data-act="del"]').count()) === 1 && !(await p.evaluate(() => /poor/.test(document.querySelector('.item[data-status="error"] .body .verdict').className))));
+    await p.locator('.item:has(.head[data-id="e1"]) .manage > .disc').click();
     check("errors: ... and remove is reachable there", await p.locator('[data-act="del"][data-id="e1"]').isVisible());
     await p.evaluate(() => window.__tick()); await p.waitForTimeout(250);
     check("errors: the open group stays open across a poll", await p.evaluate(() => document.getElementById("errGroup").open) && await p.locator('[data-fixurl="e1"]').isVisible());
@@ -2159,16 +2169,16 @@ let base;
     await p.waitForSelector(".item"); await p.locator('.head[data-id="x5"]').click();
     const body = p.locator(".item .body");
     const pos = async sel => body.locator(sel).first().evaluate(e => { var r = e.getBoundingClientRect(); return r.top + window.scrollY; });
-    const o = [await pos(".verdict"), await pos(".stats"), await pos(".chart"), await pos(".shops"), await pos(".alts"), await pos("details.manage")];
+    const o = [await pos(".verdict"), await pos(".stats"), await pos(".chart"), await pos(".shops"), await pos(".alts"), await pos(".manage")];
     check("detail: order is verdict, stats, chart, shops, alternatives, then 'Indstil vare'", o.every((y, i) => i === 0 || y > o[i - 1]), JSON.stringify(o));
     const rowsTop = await body.locator(".shops > .tablewrap tr").allInnerTexts();
     check("detail: the three cheapest shops with the item in stock, each with 'Se varen'", rowsTop.length === 3 && /Geekd/.test(rowsTop[0]) && /CDON/.test(rowsTop[1]) && /Komplett/.test(rowsTop[2]) && rowsTop.every(t => /Se varen/.test(t)) && !rowsTop.some(t => /Ikke på lager/.test(t)), JSON.stringify(rowsTop));
-    check("detail: one link 'Vis alle butikker', collapsed, the rest (sold out included) hidden", (await body.locator("details.allshops > summary").textContent()).trim() === "Vis alle butikker" && !(await body.locator("details.allshops").evaluate(e => e.open)) && !(await p.isVisible("text=punkt1")) && !(await p.isVisible("text=Proshop")));
-    await body.locator("details.allshops > summary").click();
-    const more = await body.locator("details.allshops tr").allInnerTexts();
+    check("detail: one link 'Vis alle butikker', collapsed, the rest (sold out included) hidden", (await body.locator(".allshops > .disc").textContent()).trim() === "Vis alle butikker" && !(await mOpen(body.locator(".allshops"))) && !(await p.isVisible("text=punkt1")) && !(await p.isVisible("text=Proshop")));
+    await body.locator(".allshops > .disc").click();
+    const more = await body.locator(".allshops tr").allInnerTexts();
     check("detail: 'Vis alle butikker' shows the other four, sold-out shops included, each with 'Se varen'", more.length === 4 && more.some(t => /punkt1/.test(t)) && more.filter(t => /Ikke på lager/.test(t)).length === 3 && more.every(t => /Se varen/.test(t)), JSON.stringify(more));
     await p.evaluate(() => window.__tick()); await p.waitForTimeout(250);
-    check("detail: ... and it stays open across a poll", await body.locator("details.allshops").evaluate(e => e.open));
+    check("detail: ... and it stays open across a poll", await mOpen(body.locator(".allshops")));
     // fewer than four shops: no link; nothing in stock: the three cheapest overall
     const few = row("test-sony-xm5", { id: "f1", offers: [{ store: "A", price: 100, url: "https://a.dk/x", inStock: true, variant: "v1" }, { store: "B", price: 120, url: "https://b.dk/x", inStock: true, variant: "v1" }] });
     const none = row("test-sony-xm5", { id: "f2", offers: [1, 2, 3, 4].map(i => ({ store: "S" + i, price: 100 * i, url: "https://s" + i + ".dk/x", inStock: false, variant: "v1" })) });
@@ -2186,21 +2196,23 @@ let base;
     const LISTS = [{ id: "l1", user_id: "u1", name: "Elektronik" }];
     const p = await open({ products: [Object.assign({}, x5, { list_id: "l1" })], lists: LISTS, collapsed: true, label: "manage" });
     await p.waitForSelector(".item"); await p.locator('.head[data-id="x5"]').click();
-    const m = p.locator("details.manage");
-    check("manage: one collapsed section 'Indstil vare'", (await m.count()) === 1 && (await m.locator("> summary").textContent()).trim() === "Indstil vare" && !(await m.evaluate(e => e.open)));
-    const all = ['[data-edit="x5"]', ".sugg .chip", "#lp-x5", '[data-act="change"]', ".pshops", '[data-act="buy"]', "a[href]", '[data-act="del"]'];
+    const m = p.locator(".manage");
+    check("manage: one collapsed section 'Indstil vare'", (await m.count()) === 1 && (await m.locator("> .disc").textContent()).trim() === "Indstil vare" && (await m.locator("> .disc").evaluate(e => e.tagName)) === "BUTTON" && (await m.locator("> .disc").getAttribute("aria-expanded")) === "false" && !(await mOpen(m)));
+    const all = ["#lp-x5", '[data-act="change"]', ".pshops", '[data-act="buy"]', "a[href]", '[data-act="del"]'];
     const hidden = [];
     for (const sel of all) { if (await m.locator(sel).first().isVisible()) hidden.push(sel); }
     check("manage: goal editor, suggested goals, list, variant, shop choices, købt, the link and remove are all inside it and not shown while it is closed", (await Promise.all(all.map(sel => m.locator(sel).count()))).every(n => n >= 1) && hidden.length === 0, hidden.join());
-    check("manage: nothing of that is outside the section", (await p.locator('.item .body').evaluate(b => { var out = b.cloneNode(true); out.querySelectorAll("details.manage").forEach(d => d.remove()); return !out.querySelector("[data-edit], [data-listpick], [data-act=change], [data-act=buy], [data-act=del], [data-shops], .sugg"); })));
-    await m.locator("> summary").click();
+    check("manage: nothing of that is outside the section", (await p.locator('.item .body').evaluate(b => { var out = b.cloneNode(true); out.querySelectorAll(".manage").forEach(d => d.remove()); return !out.querySelector("[data-edit], [data-listpick], [data-act=change], [data-act=buy], [data-act=del], [data-shops], .sugg"); })));
+    check("manage: the goal editor and the suggested goals are not in it any more (they live at the goal line)", (await m.locator("[data-edit], .sugg").count()) === 0);
+    await m.locator("> .disc").click();
+    check("manage: the button says it is open", (await m.locator("> .disc").getAttribute("aria-expanded")) === "true");
     const vis = []; for (const sel of all) vis.push(await m.locator(sel).first().isVisible());
     check("manage: opened, each of them is shown", vis.every(Boolean), JSON.stringify(vis));
     await p.evaluate(() => window.__tick()); await p.waitForTimeout(250);
-    check("manage: stays open across a poll", await p.locator("details.manage").evaluate(e => e.open));
-    await p.locator("details.manage > summary").click();
+    check("manage: stays open across a poll", await mOpen(p.locator(".manage")));
+    await p.locator(".manage > .disc").click();
     await p.evaluate(() => window.__tick()); await p.waitForTimeout(250);
-    check("manage: and stays closed when closed", !(await p.locator("details.manage").evaluate(e => e.open)));
+    check("manage: and stays closed when closed", !(await mOpen(p.locator(".manage"))));
     await p.context().close();
   }
 
@@ -2294,6 +2306,85 @@ let base;
     check("phone: motion is short and switched off for people who ask for less", /prefers-reduced-motion: reduce\) \{ \* \{ transition: none !important; animation: none !important/.test(css) && !/(transition|animation)[^;{}]*\b(\d*\.?\d+)s\b/.test(css.replace(/\.1\d?s|\.2s|\.15s|\.16s/g, "")));
   }
 
+  // 5j. design pass: the open product is a card, the goal line, "Ændr", the buttons, and the colours (contrast of the tokens)
+  {
+    const mk = (id, over) => row("test-sony-xm5", Object.assign({ id, name: "Vare " + id }, over));
+    const gx = [mk("g1", { target_type: "price", target_value: 1700 }), mk("g2", { target_type: "auto", target_value: null }), mk("g3", { target_type: "pct", target_value: 15 }), mk("g4", { target_type: "price", target_value: 1700, user_id: "u2" })];
+    for (const scheme of ["light", "dark"]) {
+      const p = await open({ products: gx, scheme, collapsed: true, label: "card-" + scheme });
+      await p.waitForSelector(".item");
+      await p.locator('.head[data-id="g1"]').click();
+      const st = await p.evaluate(() => {
+        const cs = e => getComputedStyle(e), o = document.querySelector(".item.open"), c = document.querySelector('.item:not(.open)');
+        const lum = s => { const m = s.match(/[\d.]+/g).map(Number), f = v => { v /= 255; return v <= .03928 ? v / 12.92 : Math.pow((v + .055) / 1.055, 2.4); }; return .2126 * f(m[0]) + .7152 * f(m[1]) + .0722 * f(m[2]); };
+        const r = o.getBoundingClientRect(), pr = o.parentElement.getBoundingClientRect(), cr = c.getBoundingClientRect();
+        return { bodyBg: cs(document.body).backgroundColor, bg: cs(o).backgroundColor, border: cs(o).borderTopWidth, shadow: cs(o).boxShadow, radius: parseFloat(cs(o).borderTopLeftRadius),
+          closedBg: cs(c).backgroundColor, closedShadow: cs(c).boxShadow, lumBody: lum(cs(document.body).backgroundColor), lumCard: lum(cs(o).backgroundColor), padTop: parseFloat(cs(o).marginTop), padBot: parseFloat(cs(o).marginBottom), scrollOk: document.documentElement.scrollWidth <= document.documentElement.clientWidth };
+      });
+      check("card (" + scheme + "): the open product has its own background, a border and a shadow, rounded corners", st.bg !== st.bodyBg && parseFloat(st.border) >= 1 && st.shadow !== "none" && st.radius >= 12 && st.closedShadow === "none", JSON.stringify(st));
+      check("card (" + scheme + "): " + (scheme === "light" ? "slightly raised (lighter than the page)" : "slightly lighter than the page"), st.lumCard > st.lumBody, JSON.stringify(st));
+      check("card (" + scheme + "): space above and below it so it is clear where it begins and ends", st.padTop >= 12 && st.padBot >= 16, JSON.stringify([st.padTop, st.padBot]));
+      check("card (" + scheme + "): no horizontal scroll", st.scrollOk);
+      await p.context().close();
+    }
+    {
+      const p = await open({ products: gx, collapsed: true, label: "goalline" });
+      await p.waitForSelector(".item");
+      const line = async id => { await p.locator('.head[data-id="' + id + '"]').click(); return (await p.locator('.item:has(.head[data-id="' + id + '"]) .goalline .gt').textContent()).trim(); };
+      check("goal line: a price goal reads 'Mål: under 1.700 kr.'", (await line("g1")) === "Mål: under 1.700 kr.");
+      check("goal line: an auto goal reads 'Mål: godt tilbud'", (await line("g2")) === "Mål: godt tilbud");
+      check("goal line: a percent goal reads 'Mål: 15 % rabat'", (await line("g3")) === "Mål: 15 % rabat");
+      check("goal line: someone else's product shows the line without 'Ændr'", (await line("g4")) === "Mål: under 1.700 kr." && (await p.locator('.item:has(.head[data-id="g4"]) .gact').count()) === 0 && (await p.locator('.item:has(.head[data-id="g1"]) .gact').count()) === 1);
+      // "Ændr": closed by default, opens the editor and the suggestions right there, focus goes in
+      const act = p.locator('.item:has(.head[data-id="g1"]) .gact');
+      check("Ændr: a visible button, at least 44 px high, collapsed, editor and suggestions not shown", (await act.getAttribute("aria-expanded")) === "false" && (await act.boundingBox()).height >= 44 && !(await p.isVisible("#et-g1")) && (await p.locator("#gp-g1").count()) === 0 && (await act.textContent()) === "Ændr");
+      await act.click();
+      const open1 = await p.evaluate(() => ({ exp: document.querySelector('[data-act="goal-open"][data-id="g1"]').getAttribute("aria-expanded"), act: document.activeElement.id, ctl: document.querySelector('[data-act="goal-open"][data-id="g1"]').getAttribute("aria-controls") }));
+      check("Ændr: aria-expanded true, controls the editor, focus moves into it", open1.exp === "true" && open1.ctl === "gp-g1" && open1.act === "et-g1", JSON.stringify(open1));
+      check("Ændr: the goal editor (type, value, Gem) and the suggested goals are shown inline", await p.isVisible("#et-g1") && await p.isVisible("#e-g1") && await p.isVisible('[data-edit="g1"] button[type=submit]') && (await p.locator("#gp-g1 .sugg .chip").count()) >= 2 && (await p.isVisible("#gp-g1 .sugg .chip")));
+      await p.keyboard.press("Escape");
+      const esc1 = await p.evaluate(() => ({ exp: document.querySelector('[data-act="goal-open"][data-id="g1"]').getAttribute("aria-expanded"), act: document.activeElement.getAttribute("data-act"), has: !!document.getElementById("gp-g1") }));
+      check("Ændr: Escape closes it and focus is back on 'Ændr'", esc1.exp === "false" && esc1.act === "goal-open" && !esc1.has, JSON.stringify(esc1));
+      await act.click(); await p.click('#gp-g1 [data-act="goal-close"]');
+      check("Ændr: 'Luk' closes it too", (await act.getAttribute("aria-expanded")) === "false" && (await p.locator("#gp-g1").count()) === 0);
+      await act.click(); await p.fill("#e-g1", "1500"); await p.click('[data-edit="g1"] button[type=submit]');
+      await p.waitForFunction(() => window.__db.writes().length === 1);
+      const o = (await ops(p))[0];
+      check("Ændr: 'Gem' saves through the existing path (update target_value only)", o.op === "update" && o.filters[0][1] === "g1" && JSON.stringify(o.payload) === '{"target_value":1500}', JSON.stringify(o));
+      await p.waitForFunction(() => /Mål: under 1\.500 kr\./.test(document.querySelector(".item.open .goalline").textContent));
+      check("Ændr: the line shows the new goal and the editor is closed again", (await p.locator("#gp-g1").count()) === 0 && (await act.getAttribute("aria-expanded")) === "false");
+      await p.context().close();
+    }
+    {   // the two buttons on a phone: full width, 44 px, chevron turns, aria-expanded
+      const p = await open({ products: [mk("g1", { target_type: "price", target_value: 1700 })], width: 400, collapsed: true, label: "discs" });
+      await p.waitForSelector(".item"); await p.locator('.head[data-id="g1"]').click();
+      const g = await p.evaluate(() => ["manage", "allshops"].map(c => { const b = document.querySelector("." + c + " > .disc"), r = b.getBoundingClientRect(), w = b.parentElement.getBoundingClientRect(), cs = getComputedStyle(b), af = getComputedStyle(b, "::after");
+        return { c, tag: b.tagName, h: r.height, full: Math.abs(r.width - w.width) < 2, border: parseFloat(cs.borderTopWidth), exp: b.getAttribute("aria-expanded"), t: af.transform }; }));
+      check("buttons: 'Indstil vare' and 'Vis alle butikker' are bordered buttons, 44 px high, full width, closed", g.length === 2 && g.every(x => x.tag === "BUTTON" && x.h >= 44 && x.full && x.border >= 1 && x.exp === "false"), JSON.stringify(g));
+      await p.click(".manage > .disc");
+      const g2 = await p.evaluate(() => { const b = document.querySelector(".manage > .disc"); return { exp: b.getAttribute("aria-expanded"), t: getComputedStyle(b, "::after").transform, closed: "" }; });
+      await p.waitForTimeout(250);
+      const t2 = await p.evaluate(() => getComputedStyle(document.querySelector(".manage > .disc"), "::after").transform);
+      check("buttons: opening turns the chevron (aria-expanded true, the arrow is rotated more)", g2.exp === "true" && t2 !== g[0].t, g[0].t + " -> " + t2);
+      const destr = await p.evaluate(() => { const r = document.querySelector('.manage-in [data-act="del"]'), cs = getComputedStyle(r), last = document.querySelector(".manage-in .mrow:last-child"); return { c: cs.color, b: parseFloat(cs.borderTopWidth), last: last.classList.contains("end") && last.contains(r) }; });
+      check("buttons: 'Fjern' is at the very end, in its own section, in the warning colour with a border", destr.last && destr.b >= 1, JSON.stringify(destr));
+      await p.context().close();
+    }
+    {   // contrast of the main text / muted / accent pairs, from the resolved CSS colours, in both themes
+      const lumOf = rgb => { const m = rgb.match(/[\d.]+/g).map(Number), f = v => { v /= 255; return v <= .03928 ? v / 12.92 : Math.pow((v + .055) / 1.055, 2.4); }; return .2126 * f(m[0]) + .7152 * f(m[1]) + .0722 * f(m[2]); };
+      const ratio = (a, b) => { const x = lumOf(a), y = lumOf(b); return (Math.max(x, y) + .05) / (Math.min(x, y) + .05); };
+      const PAIRS = [["ink", "bg"], ["ink", "card"], ["ink2", "bg"], ["ink2", "card"], ["ink2", "sunk"], ["muted", "bg"], ["muted", "card"], ["muted", "sunk"], ["muted", "good-wash"], ["accent", "bg"], ["accent", "card"], ["accent", "sunk"], ["accent", "accent-wash"], ["on-accent", "accent"], ["good", "bg"], ["good", "card"], ["good", "good-wash"], ["danger", "bg"], ["danger", "card"]];
+      for (const scheme of ["light", "dark"]) {
+        const p = await open({ products: [], scheme, label: "contrast-" + scheme });
+        await p.waitForSelector("#addForm:not([hidden])");
+        const res = await p.evaluate(names => { const probe = document.createElement("i"); document.body.appendChild(probe); const out = {}; names.forEach(n => { probe.style.color = "var(--" + n + ")"; out[n] = getComputedStyle(probe).color; }); probe.remove(); return out; }, Array.from(new Set([].concat.apply([], PAIRS))));
+        const low = PAIRS.map(([f, b]) => [f + "/" + b, ratio(res[f], res[b])]).filter(x => x[1] < 4.5);
+        check("contrast (" + scheme + "): text, muted, accent, good and danger tokens are at least 4.5:1 on their backgrounds (" + PAIRS.length + " pairs)", low.length === 0, JSON.stringify(low) + JSON.stringify(res));
+        await p.context().close();
+      }
+    }
+  }
+
   // 11. layout at 400px, 12. screenshots
   {
     const LISTS = [{ id: "l1", user_id: "u1", name: "Elektronik" }, { id: "l2", user_id: "u1", name: "Bastian" }, { id: "l3", user_id: "u1", name: "Hjemmet" }];
@@ -2326,6 +2417,8 @@ let base;
       await d.locator('.head[data-id="x5"]').scrollIntoViewIfNeeded();
       await d.waitForSelector("canvas.confetti", { state: "detached", timeout: 8000 }).catch(() => {});
       await d.waitForTimeout(250);
+      if (scheme === "dark") await d.locator('.head[data-id="dy"]').click();   // the deal, open: its green card
+      await d.waitForTimeout(150);
       await d.screenshot({ path: path.join(ROOT, "screenshot-" + scheme + ".png"), fullPage: true });
       const s = await open({ session: false, scheme, label: "shot-out-" + scheme });
       await s.screenshot({ path: path.join(ROOT, "screenshot-login-" + scheme + ".png") });
@@ -2461,8 +2554,8 @@ let base;
       await p.waitForSelector(".item");
       for (const id of ["d1", "d2", "d3", "d0", "d4"]) await p.click('.head[data-id="' + id + '"]');
       const line = async id => { const l = bodyOf(p, id).locator("p.req"); return (await l.count()) ? (await l.first().innerText()).trim() : null; };
-      check("details: one quiet line 'Detaljer: ...' at the top of the detail, before everything else",
-        (await line("d1")) === "Detaljer: hvid/grøn, str. 43" && (await bodyOf(p, "d1").evaluate(e => e.firstElementChild.className.indexOf("req") >= 0)));
+      check("details: one quiet line 'Detaljer: ...' at the top of the detail, right after the goal line",
+        (await line("d1")) === "Detaljer: hvid/grøn, str. 43" && (await bodyOf(p, "d1").evaluate(e => e.children[1].className.indexOf("req") >= 0 && e.firstElementChild.className.indexOf("goalwrap") >= 0)));
       check("details: no line without details, and none when the database has no such column (no input either)",
         (await line("d2")) === null && (await line("d0")) === null && (await bodyOf(p, "d0").locator("[data-req]").count()) === 0 && !/Detaljer/.test(await bodyOf(p, "d0").innerText()));
       check("details: hostile text is shown as text, escaped, and runs nothing", (await line("d3")) === "Detaljer: " + HOSTILE.slice(0, 120) && (await bodyOf(p, "d3").locator("img").count()) === 0 && (await p.evaluate(() => window.__xss)) === undefined);
