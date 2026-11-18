@@ -28,7 +28,7 @@
     return window.supabase.createClient(url, key);
   }
 
-  var state = { goalOpen: {}, manage: {}, allShops: {}, pshops: {}, errOpen: false, ord: null, share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
+  var state = { goalOpen: {}, manage: {}, allShops: {}, pshops: {}, errOpen: false, ord: null, share: null, confirmMember: null, confirmLeave: null, memCount: {}, people: {}, imports: [], importsOk: false, importMsg: "", confirmImport: null, questions: [], qOk: false, qOpen: false, qExp: {}, qAll: false, lists: [], listsOk: false, listSel: "all", listForm: null, confirmList: null, products: [], loaded: false, canWrite: true, open: {}, range: {}, confirmDel: null, pick: {}, change: {}, note: {}, rowMsg: {},
     prefs: { always: [], exclude: [], only: false, notify: false, digest: false, asked: true }, profileSound: null };
   var access = { admin: false, requests: [], allowed: [], confirm: null, msg: "", busy: false, seq: 0 };
   var noacc = { on: false, state: "", timer: null, busy: false, msg: "" };
@@ -1024,6 +1024,159 @@
     }, function () { b.disabled = false; state.importMsg = "Kunne ikke gemme lige nu. Prøv igen om lidt."; renderImports(); });
   });
 
+  // ---- questions ("Spørg om en vare"): free-form shopping advice, answered by the AI agent within the hour ----
+  // The answer (summary, picks, note) comes from the AI agent and is untrusted, like the alternatives: text goes through esc(), a link only
+  // when it passes parseLink (https, the same rule as the database), the "-18 %" tag is computed here. Without the table (schema.sql not
+  // run yet) the whole feature stays hidden. The person's own words are escaped as well.
+  var Q_STALE = 6 * 36e5, Q_SHOWN = 5, Q_MAX = 300, Q_NEAR = 250;
+  var Q_MSGS = [/^Du kan stille 5 spørgsmål i døgnet\.$/, /^Der er allerede 3 spørgsmål i gang\./, /^Du kan gemme 30 spørgsmål\./, /^Skriv mindst 5 tegn\.$/];
+  var lastQHtml = null;
+  function normQ(r) {
+    return { id: r.id, text: String(r.question == null ? "" : r.question), listId: r.list_id || null, createdAt: r.created_at || "",
+      status: r.status === "done" || r.status === "failed" ? r.status : "pending", summary: typeof r.summary === "string" ? r.summary : "",
+      picks: Array.isArray(r.picks) ? r.picks : [], note: typeof r.note === "string" ? r.note : "" };
+  }
+  function qClean(v) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f-\u009f<>]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, Q_MAX); }
+  function qCut(t) { t = String(t); return t.length > 100 ? t.slice(0, 99).replace(/\s+$/, "") + "…" : t; }
+  function qPicks(q) {
+    return q.picks.filter(function (a) {
+      return a && typeof a === "object" && typeof a.name === "string" && a.name.trim() && typeof a.store === "string" && typeof a.price === "number" && isFinite(a.price) && a.price > 0;
+    }).slice(0, 5);
+  }
+  // pending (waiting), stale (pending for more than 6 hours: shown as failed, can still be answered), done (has usable picks), failed
+  function qKind(q) {
+    if (q.status === "pending") { var t = Date.parse(q.createdAt); return isFinite(t) && Date.now() - t > Q_STALE ? "stale" : "pending"; }
+    return q.status === "done" && qPicks(q).length ? "done" : "failed";
+  }
+  // "-18 %": when the normal price is at least 5 % above the price
+  function qTag(a) {
+    if (typeof a.was !== "number" || !isFinite(a.was) || !(a.was > a.price)) return "";
+    var pc = Math.round((1 - a.price / a.was) * 100);
+    return pc >= 5 ? "−" + pc + " %" : "";
+  }
+  function qPickHtml(q, a, i) {
+    var u = typeof a.url === "string" ? parseLink(a.url) : null, tag = qTag(a), act = "";
+    var name = u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(a.name) + '</a>' : esc(a.name);
+    if (u) {
+      var has = altTracked(u);
+      act = '<button type="button" class="link" data-qact="follow" data-id="' + esc(q.id) + '" data-i="' + i + '"' + (has ? " disabled" : "") + '>' + (has ? "Følges" : "Følg") + '</button>';
+    }
+    return '<li><div class="alt-row"><span class="alt-name">' + name + '</span><span class="alt-price n">' + esc(kr(a.price)) + '</span></div>' +
+      '<div class="meta">' + esc(a.store) + (tag ? ' · <span class="alt-tag">' + esc(tag) + '</span>' : '') + '</div>' +
+      (typeof a.why === "string" && a.why ? '<div class="meta alt-why">' + esc(a.why) + '</div>' : '') +
+      (act ? '<div class="alt-act">' + act + '</div>' : '') + '</li>';
+  }
+  function qItemHtml(q) {
+    var k = qKind(q), id = esc(q.id), open = k === "done" && !!state.qExp[q.id];
+    var msg = '<span class="meta" data-rowmsg="q-' + id + '">' + esc(state.rowMsg["q-" + q.id] || "") + '</span>';
+    var btn = function (act, label) { return '<button type="button" class="link" data-qact="' + act + '" data-id="' + id + '">' + label + '</button>'; };
+    var line = '<span class="q-text">' + esc(qCut(q.text)) + '</span>';
+    if (k === "done") {
+      var picks = qPicks(q), n = picks.length;
+      return '<li class="q-item' + (open ? " open" : "") + '" data-qid="' + id + '"><button type="button" class="q-head tog" data-qact="toggle" data-id="' + id + '" aria-expanded="' + open + '"><span class="q-main">' + line +
+        '<span class="meta q-state">' + n + " forslag" + '</span></span></button>' +
+        (open ? '<div class="q-body">' + (q.summary ? '<p class="q-sum">' + esc(q.summary) + '</p>' : "") + '<ul class="alt-list">' +
+          picks.map(function (a, i) { return qPickHtml(q, a, i); }).join("") + '</ul><div class="q-act">' + btn("rm", "Fjern") + ' ' + msg + '</div></div>' : "") + '</li>';
+    }
+    if (k === "pending") return '<li class="q-item" data-qid="' + id + '"><div class="q-head"><span class="q-main">' + line + '<span class="meta q-state">Søger. Svar inden for en time.</span></span></div></li>';
+    var note = k === "stale" ? "Ingen svar." : (q.note || "Kunne ikke finde et svar.");
+    return '<li class="q-item" data-qid="' + id + '"><div class="q-head"><span class="q-main">' + line + '<span class="meta q-state">' + esc(note) + ' ' + btn("retry", "Prøv igen") + ' ' + btn("rm", "Fjern") + ' ' + msg + '</span></span></div></li>';
+  }
+  function qHtml() {
+    var all = state.questions;
+    if (!all.length) return "";
+    var shown = state.qAll ? all : all.slice(0, Q_SHOWN);
+    return '<div class="q-sect"><div class="sec-h"><h3>Spørgsmål</h3></div><ul class="q-list">' + shown.map(qItemHtml).join("") + '</ul>' +
+      (all.length > Q_SHOWN ? '<p class="q-more"><button type="button" class="link" data-qact="more">' + (state.qAll ? "Vis færre" : "Vis flere") + '</button></p>' : "") + '</div>';
+  }
+  function renderQuestions() {
+    var show = !!(user && state.canWrite && state.qOk && !noacc.on);
+    $("qBox").hidden = !show;
+    if (!show) return;
+    $("qOpen").setAttribute("aria-expanded", String(state.qOpen)); $("qForm").hidden = !state.qOpen;
+    var html = qHtml();
+    if (html !== lastQHtml) { $("qList").innerHTML = html; lastQHtml = html; }       // only when something changed: a focused button is not lost to a poll
+  }
+  function fetchQuestions() {
+    if (!sb || !user) return;
+    var uid = user.id;
+    sb.from("questions").select("*").order("created_at", { ascending: false }).then(function (r) {
+      if (!user || user.id !== uid) return;
+      if (r.error) { if (/^(42P01|PGRST205)$/.test(String(r.error.code || ""))) { state.qOk = false; renderQuestions(); } return; }   // no table yet, or a hiccup: say nothing
+      state.questions = (r.data || []).map(normQ).sort(function (a, b) { return String(b.createdAt).localeCompare(String(a.createdAt)); });
+      state.qOk = true; renderQuestions();
+    }, function () {});
+  }
+  function qError(e) {
+    var m = String((e && e.message) || "");
+    for (var i = 0; i < Q_MSGS.length; i++) if (Q_MSGS[i].test(m)) return m;
+    return "Kunne ikke gemme lige nu. Prøv igen om lidt.";
+  }
+  $("qOpen").addEventListener("click", function () {
+    state.qOpen = !state.qOpen; renderQuestions();
+    if (state.qOpen) { try { $("qText").focus(); } catch (e) {} } else { $("qMsg").hidden = true; }
+  });
+  $("qText").addEventListener("input", function () {
+    var n = $("qText").value.length;
+    $("qCount").textContent = n >= Q_NEAR ? n + "/" + Q_MAX : "";
+  });
+  $("qForm").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var msg = $("qMsg"); msg.hidden = true;
+    var fail = function (t) { msg.textContent = t; msg.hidden = false; };
+    var text = qClean($("qText").value);
+    if (text.length < 5) { fail("Skriv mindst 5 tegn."); return; }
+    if (!sb) return;
+    var btn = $("qSubmit"), row = { question: text }, into = curSel();
+    if (listKnown(into)) row.list_id = into;                // the list that is selected now: "Følg" adds to it
+    btn.disabled = true;
+    sb.from("questions").insert(row).then(function (r) {
+      btn.disabled = false;
+      if (r && r.error) { onWriteError(r.error); fail(qError(r.error)); return; }
+      $("qText").value = ""; $("qCount").textContent = ""; state.qOpen = false; renderQuestions(); fetchQuestions();
+      try { $("qOpen").focus(); } catch (e) {}
+    }, function () { btn.disabled = false; fail(qError(null)); });
+  });
+  $("qList").addEventListener("click", function (ev) {
+    var b = ev.target.closest("[data-qact]"); if (!b || !sb) return;
+    var act = b.dataset.qact, id = b.dataset.id, q = state.questions.filter(function (x) { return x.id === id; })[0];
+    if (act === "more") { state.qAll = !state.qAll; renderQuestions(); return; }
+    if (!q) return;
+    if (act === "toggle") { state.qExp[id] = !state.qExp[id]; renderQuestions(); return; }
+    if (act === "rm") {
+      b.disabled = true; setRowMsg("q-" + id, "");
+      sb.from("questions").delete().eq("id", id).then(function (r) {
+        if (r && r.error) { b.disabled = false; setRowMsg("q-" + id, qError(r.error)); onWriteError(r.error); return; }
+        state.questions = state.questions.filter(function (x) { return x.id !== id; }); delete state.qExp[id]; renderQuestions(); fetchQuestions();
+      }, function () { b.disabled = false; setRowMsg("q-" + id, qError(null)); });
+    }
+    else if (act === "retry") {
+      var nrow = { question: q.text };
+      if (listKnown(q.listId)) nrow.list_id = q.listId;
+      b.disabled = true; setRowMsg("q-" + id, "");
+      sb.from("questions").insert(nrow).then(function (r) {
+        if (r && r.error) { b.disabled = false; setRowMsg("q-" + id, qError(r.error)); onWriteError(r.error); return; }
+        state.rowMsg["q-" + id] = ""; fetchQuestions();
+      }, function () { b.disabled = false; setRowMsg("q-" + id, qError(null)); });
+    }
+    else if (act === "follow") {
+      var pick = qPicks(q)[+b.dataset.i], pu = pick && typeof pick.url === "string" ? parseLink(pick.url) : null;
+      if (!pu || altTracked(pu)) return;
+      var prow = { name: PLACEHOLDER, source_url: pu, target_type: "auto", target_value: null, active: true };
+      var cur = curSel(), into2 = listKnown(q.listId) ? q.listId : (listKnown(cur) ? cur : null);   // the question's list, else the list selected now
+      if (into2) prow.list_id = into2;
+      b.disabled = true; setRowMsg("q-" + id, "");
+      sb.from("products").insert(prow).then(function (r) {
+        if (r && r.error) {
+          var m = String(r.error.message || "");
+          setRowMsg("q-" + id, r.error.code === "23514" && /^Du kan højst/.test(m) ? m : "Kunne ikke følge den lige nu. Prøv igen om lidt.");
+          b.disabled = false; onWriteError(r.error); return;
+        }
+        b.textContent = "Følges"; fetchProducts();           // the next render finds the link among the products
+      }, function () { b.disabled = false; setRowMsg("q-" + id, "Kunne ikke følge den lige nu. Prøv igen om lidt."); });
+    }
+  });
+
   var renderPending = false;
   function render() {
     renderStatus();
@@ -1032,7 +1185,7 @@
     if (a && list.contains(a) && a.tagName === "INPUT" &&
       (a.type === "checkbox" || a.type === "radio" ? a.checked !== a.defaultChecked : a.value !== a.defaultValue)) { renderPending = true; return; }
     renderPending = false;
-    renderLists(); renderImports();
+    renderLists(); renderImports(); renderQuestions();
     var sel = curSel();
     var ps = state.products.filter(function (p) { return inSel(p, sel); });
     if (!state.products.length) {
@@ -1225,7 +1378,7 @@
       } else {
         state.products = (r.data || []).map(norm);
         state.loaded = true;
-        render(); checkSound(); fetchLists(); fetchImports();
+        render(); checkSound(); fetchLists(); fetchImports(); fetchQuestions();
       }
       if (again) { again = false; fetchProducts(); }
     }, function () {
@@ -1310,6 +1463,7 @@
     state.prefs.asked = true; state.prefs.notify = false; $("mailAsk").hidden = true;
     state.loaded = false; state.products = []; state.canWrite = true; state.ord = null; state.errOpen = false;
     state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.share = null; state.confirmMember = null; state.confirmLeave = null; state.memCount = {}; state.people = {}; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null;
+    state.questions = []; state.qOk = false; state.qOpen = false; state.qExp = {}; state.qAll = false; lastQHtml = null; $("qList").innerHTML = ""; $("qText").value = ""; $("qCount").textContent = ""; $("qMsg").hidden = true;
     $("status").textContent = "Henter listen …";
     loadSounds();
     ensureProfile(); fetchProducts(); fetchAccess();
@@ -1322,6 +1476,7 @@
     clearInterval(pollTimer); pollTimer = null;
     try { if (channel) sb.removeChannel(channel); } catch (e) {}
     channel = null; state.products = []; state.loaded = false; state.ord = null; state.lists = []; state.listsOk = false; state.listForm = null; state.confirmList = null; state.share = null; state.confirmMember = null; state.confirmLeave = null; state.memCount = {}; state.people = {}; state.imports = []; state.importsOk = false; state.importMsg = ""; state.confirmImport = null; renderImports();
+    state.questions = []; state.qOk = false; state.qOpen = false; state.qExp = {}; state.qAll = false; renderQuestions();
     access.admin = false; access.requests = []; access.allowed = []; access.confirm = null; access.seq++; accMsg(""); renderAccess();
   }
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && user) { if (noacc.on) recheckAccess(); else fetchProducts(); } });

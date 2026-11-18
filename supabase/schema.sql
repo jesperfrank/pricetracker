@@ -1814,6 +1814,287 @@ grant execute on function public.ai_alt_list() to anon, authenticated;
 grant execute on function public.ai_alt_set(uuid, jsonb) to anon, authenticated;
 grant execute on function public.ai_alt_fail(uuid, text) to anon, authenticated;
 
+-- ---------------------------------------------------------------- questions ("Spørg om en vare", answered by the AI agent)
+-- A person writes in their own words what they are looking for; within the hour the AI agent (the same scheduled Claude session and
+-- the same x-resolver-token as the functions above, no broader access) answers with a short recommendation and a few concrete
+-- products. The browser creates, reads and deletes its own rows and can never update one (no UPDATE grant, no policy). A row is
+-- pending until ai_ask_set() or ai_ask_fail() answers it. list_id = the list that was selected when the person asked (their own or
+-- one they are a member of); "Følg" on a pick adds the product to it.
+create table if not exists public.questions (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null default auth.uid() references auth.users on delete cascade,
+  list_id     uuid references public.lists(id) on delete set null,
+  question    text not null,
+  created_at  timestamptz not null default now(),
+  status      text not null default 'pending' check (status in ('pending', 'done', 'failed')),
+  summary     text check (summary is null or char_length(summary) <= 600),
+  picks       jsonb check (picks is null or (case when jsonb_typeof(picks) = 'array' then jsonb_array_length(picks) <= 5 else false end)),
+  note        text check (note is null or char_length(note) <= 200),
+  answered_at timestamptz
+);
+-- The person's words: trimmed, 5 to 300 characters, no control characters and no angle brackets (questions_guard cleans them first,
+-- the same way as products.requirements, so the text never makes a row fail for those reasons). Dropped and re-added by name.
+alter table public.questions drop constraint if exists questions_question_check;
+alter table public.questions add constraint questions_question_check check (
+  char_length(question) between 5 and 300
+  and question = btrim(question, E' \t\r\n ')
+  and question !~ '[\x01-\x1f\x7f-\x9f<>]');
+create index if not exists questions_user_idx on public.questions (user_id, created_at desc);
+create index if not exists questions_pending_idx on public.questions (created_at) where status = 'pending';
+
+alter table public.questions enable row level security;
+revoke all on public.questions from public, anon;
+drop policy if exists questions_own on public.questions;
+drop policy if exists questions_select on public.questions;
+drop policy if exists questions_insert on public.questions;
+drop policy if exists questions_delete on public.questions;
+create policy questions_select on public.questions
+  for select to authenticated
+  using ((select auth.uid()) = user_id and public.is_allowed());
+create policy questions_insert on public.questions
+  for insert to authenticated
+  with check ((select auth.uid()) = user_id and public.is_allowed());
+create policy questions_delete on public.questions
+  for delete to authenticated
+  using ((select auth.uid()) = user_id and public.is_allowed());
+-- No UPDATE for browser users at all (a row is created, read and deleted; the AI agent's functions do the rest).
+grant select, insert, delete on public.questions to authenticated;
+revoke update on public.questions from authenticated;
+grant select, insert, update, delete on public.questions to service_role;
+
+-- One row per question asked, so the limit (5 per person per rolling 24 hours) survives a question being removed again. No policy
+-- and no grants: only ask_take_slot() and the service role.
+create table if not exists public.ask_attempts (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  at      timestamptz not null default now()
+);
+create index if not exists ask_attempts_idx on public.ask_attempts (user_id, at);
+alter table public.ask_attempts enable row level security;
+revoke all on public.ask_attempts from public, anon, authenticated;
+grant select, insert, update, delete on public.ask_attempts to service_role;
+
+-- Called by questions_guard for a new question of a browser user (it is no use as an RPC), speaks only about the caller, and is
+-- SECURITY DEFINER so the caller needs no rights on ask_attempts. The three limits, checked under one lock per person:
+-- 5 questions in 24 hours, 3 waiting for an answer at a time (one that has waited more than 6 hours is shown as failed and no longer
+-- counts), 30 stored (the person removes old ones; nothing is deleted automatically).
+create or replace function public.ask_take_slot()
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  me uuid := auth.uid();
+begin
+  if me is null or pg_trigger_depth() = 0 then
+    raise exception 'not allowed' using errcode = '42501';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('ask:' || me::text, 0));
+  delete from public.ask_attempts a where a.user_id = me and a.at < now() - interval '2 days';
+  if (select count(*) from public.ask_attempts a where a.user_id = me and a.at > now() - interval '24 hours') >= 5 then
+    raise exception 'Du kan stille 5 spørgsmål i døgnet.' using errcode = 'check_violation';
+  end if;
+  if (select count(*) from public.questions q where q.user_id = me and q.status = 'pending' and q.created_at > now() - interval '6 hours') >= 3 then
+    raise exception 'Der er allerede 3 spørgsmål i gang. Vent på svar.' using errcode = 'check_violation';
+  end if;
+  if (select count(*) from public.questions q where q.user_id = me) >= 30 then
+    raise exception 'Du kan gemme 30 spørgsmål. Fjern et først.' using errcode = 'check_violation';
+  end if;
+  insert into public.ask_attempts (user_id) values (me);
+end;
+$$;
+revoke all on function public.ask_take_slot() from public, anon;
+grant execute on function public.ask_take_slot() to authenticated;
+
+-- Every role: the text is cleaned (control characters and angle brackets become spaces, runs of spaces one, cut at 300) and must have
+-- 5 characters. A browser user: a new row always starts as a plain pending question (the AI columns are the agent's), the time is
+-- the server's, the list must be their own or one they are a member of, and the limits above apply. The service role and the SQL
+-- editor are not restricted.
+create or replace function public.questions_guard()
+returns trigger
+language plpgsql
+set search_path = public
+as $$
+declare
+  restricted boolean := current_user in ('authenticated', 'anon');
+begin
+  new.question := btrim(left(btrim(regexp_replace(regexp_replace(new.question, '[\x01-\x1f\x7f-\x9f<>]+', ' ', 'g'), '[  ]{2,}', ' ', 'g'), E'  '), 300), E'  ');
+  if char_length(coalesce(new.question, '')) < 5 then
+    raise exception 'Skriv mindst 5 tegn.' using errcode = 'check_violation';
+  end if;
+  if not restricted then
+    return new;
+  end if;
+  new.status := 'pending'; new.summary := null; new.picks := null; new.note := null; new.answered_at := null;
+  new.created_at := now();
+  if new.list_id is not null and not (public.owns_list(new.list_id) or public.is_list_member(new.list_id)) then
+    raise exception 'Listen findes ikke.' using errcode = 'foreign_key_violation';
+  end if;
+  perform public.ask_take_slot();
+  return new;
+end;
+$$;
+
+drop trigger if exists questions_guard_trg on public.questions;
+create trigger questions_guard_trg
+  before insert on public.questions
+  for each row execute function public.questions_guard();
+
+-- Up to 3 pending questions, oldest first (also one that has waited more than 6 hours: it can still be answered). Nothing about the person.
+create or replace function public.ai_ask_list()
+returns table (id uuid, question text, asked_at timestamptz)
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  return query
+    select q.id, q.question, q.created_at
+      from public.questions q
+     where q.status = 'pending'
+     order by q.created_at, q.id
+     limit 3;
+end;
+$$;
+
+-- Stores the answer for a pending question: p_summary (1 to 600 characters, plain text) and 1 to 5 picks, each an object with exactly
+-- the keys name (1-120), url (https, the products.source_url rule, 500), store (1-60), price (> 0 and < 10 million), why (1-160)
+-- and optionally was (a number above price; null counts as absent). The same strict rules as ai_alt_set: no control characters
+-- (not even a line break), no invisible direction marks and no < or > in any text. Anything else raises 22023 and stores nothing.
+-- The stored copy is cleaned (trimmed, price and was rounded to 2 decimals). Returns true, or false when the question is not pending.
+create or replace function public.ai_ask_set(p_id uuid, p_summary text, p_picks jsonb)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  e       jsonb;
+  i       integer := 0;
+  k       text;
+  s       text;
+  pr      numeric;
+  wa      numeric;
+  clean   jsonb := '[]'::jsonb;
+  item    jsonb;
+  n       integer;
+  summ    text;
+  bad     constant text := '[[:cntrl:]<>​-‏‪-‮⁦-⁩﻿  ]';
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  if p_summary is null then
+    raise exception 'ai_ask: summary is missing' using errcode = '22023';
+  end if;
+  summ := btrim(p_summary);
+  if summ ~ bad then
+    raise exception 'ai_ask: summary has control characters or angle brackets' using errcode = '22023';
+  end if;
+  if char_length(summ) not between 1 and 600 then
+    raise exception 'ai_ask: summary must be 1 to 600 characters' using errcode = '22023';
+  end if;
+  if p_picks is null or jsonb_typeof(p_picks) <> 'array' or jsonb_array_length(p_picks) not between 1 and 5 then
+    raise exception 'ai_ask: picks must be an array of 1 to 5 objects' using errcode = '22023';
+  end if;
+  for e in select x from jsonb_array_elements(p_picks) x loop
+    i := i + 1;
+    if jsonb_typeof(e) <> 'object' then
+      raise exception 'ai_ask: pick %: not an object', i using errcode = '22023';
+    end if;
+    for k in select jsonb_object_keys(e) loop
+      if k not in ('name', 'url', 'store', 'price', 'was', 'why') then
+        raise exception 'ai_ask: pick %: unknown key %', i, left(k, 40) using errcode = '22023';
+      end if;
+    end loop;
+    foreach k in array array['name', 'url', 'store', 'price', 'why'] loop
+      if not e ? k or jsonb_typeof(e -> k) = 'null' then
+        raise exception 'ai_ask: pick %: % is missing', i, k using errcode = '22023';
+      end if;
+    end loop;
+    -- the text fields
+    foreach k in array array['name', 'url', 'store', 'why'] loop
+      if jsonb_typeof(e -> k) <> 'string' then
+        raise exception 'ai_ask: pick %: % must be a string', i, k using errcode = '22023';
+      end if;
+      s := btrim(e ->> k);
+      if s ~ bad then
+        raise exception 'ai_ask: pick %: % has control characters or angle brackets', i, k using errcode = '22023';
+      end if;
+      if (k = 'name' and char_length(s) not between 1 and 120)
+         or (k = 'store' and char_length(s) not between 1 and 60)
+         or (k = 'why' and char_length(s) not between 1 and 160)
+         or (k = 'url' and (char_length(s) > 500 or s !~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$')) then
+        raise exception 'ai_ask: pick %: % is not valid', i, k using errcode = '22023';
+      end if;
+    end loop;
+    -- the numbers
+    if jsonb_typeof(e -> 'price') <> 'number' then
+      raise exception 'ai_ask: pick %: price must be a number', i using errcode = '22023';
+    end if;
+    pr := round((e ->> 'price')::numeric, 2);
+    if not (pr > 0 and pr < 10000000) then
+      raise exception 'ai_ask: pick %: price must be above 0 and below 10000000', i using errcode = '22023';
+    end if;
+    wa := null;
+    if e ? 'was' and jsonb_typeof(e -> 'was') <> 'null' then
+      if jsonb_typeof(e -> 'was') <> 'number' then
+        raise exception 'ai_ask: pick %: was must be a number', i using errcode = '22023';
+      end if;
+      wa := round((e ->> 'was')::numeric, 2);
+      if not (wa > pr and wa < 10000000) then
+        raise exception 'ai_ask: pick %: was must be above price and below 10000000', i using errcode = '22023';
+      end if;
+    end if;
+    item := jsonb_build_object('name', btrim(e ->> 'name'), 'url', btrim(e ->> 'url'),
+                               'store', btrim(e ->> 'store'), 'price', pr, 'why', btrim(e ->> 'why'));
+    if wa is not null then item := item || jsonb_build_object('was', wa); end if;
+    clean := clean || jsonb_build_array(item);
+  end loop;
+  update public.questions
+     set status = 'done', summary = summ, picks = clean, note = null, answered_at = now()
+   where id = p_id and status = 'pending';
+  get diagnostics n = row_count;
+  return n = 1;
+end;
+$$;
+
+-- The agent cannot answer (not a question about buying a product, or nothing could be verified): a short note for the person
+-- (control characters and < > removed, cut to 200 characters, a plain sentence when empty), no picks. Returns true, or false when the
+-- question is not pending (any more).
+create or replace function public.ai_ask_fail(p_id uuid, p_note text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  n integer;
+  t text;
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  t := left(btrim(regexp_replace(coalesce(p_note, ''), '[[:cntrl:]<>​-‏‪-‮⁦-⁩﻿  ]+', ' ', 'g')), 200);
+  update public.questions
+     set status = 'failed', summary = null, picks = null, note = coalesce(nullif(btrim(t), ''), 'Kunne ikke finde et svar.'), answered_at = now()
+   where id = p_id and status = 'pending';
+  get diagnostics n = row_count;
+  return n = 1;
+end;
+$$;
+
+revoke all on function public.ai_ask_list() from public;
+revoke all on function public.ai_ask_set(uuid, text, jsonb) from public;
+revoke all on function public.ai_ask_fail(uuid, text) from public;
+grant execute on function public.ai_ask_list() to anon, authenticated;
+grant execute on function public.ai_ask_set(uuid, text, jsonb) to anon, authenticated;
+grant execute on function public.ai_ask_fail(uuid, text) to anon, authenticated;
+
 -- First run only: nobody is admin yet, so the address added first (the owner added themselves first) becomes admin.
 -- Later runs change nothing, so admin never moves.
 update public.allowed_emails

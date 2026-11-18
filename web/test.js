@@ -19,7 +19,7 @@ const server = http.createServer((req, res) => {
 const FAKE = `
 (function () {
   var init = window.__INIT || {};
-  var db = window.__db = { products: init.products || [], lists: init.lists || [], noLists: !!init.noLists, profiles: init.profiles || [], imports: init.imports || [], noImports: !!init.noImports, members: init.members || [], people: init.people || {}, noMembers: !!init.noMembers, noAskedCol: !!init.noAskedCol, shareAnswer: "ok", ops: [], deny: false, otpError: null,
+  var db = window.__db = { products: init.products || [], lists: init.lists || [], noLists: !!init.noLists, profiles: init.profiles || [], imports: init.imports || [], noImports: !!init.noImports, questions: init.questions || [], noQuestions: !!init.noQuestions, members: init.members || [], people: init.people || {}, noMembers: !!init.noMembers, noAskedCol: !!init.noAskedCol, shareAnswer: "ok", ops: [], deny: false, otpError: null,
     session: init.session || null, seq: 100, admin: !!init.admin, requests: init.requests || [], allowedList: init.allowed || [], rpcs: [], askReply: "requested", access: init.access || "allowed", accessErr: !!init.accessErr };
   var authCb = null, rt = [];
   // the 60-second poll: remember its callback so a test can run it at once
@@ -45,8 +45,9 @@ const FAKE = `
       return new Promise(function (resolve, reject) { setTimeout(function () {
         if (db.netFail && q.op !== "select") return reject(new Error("Failed to fetch"));
         if (q.op !== "select") db.ops.push({ table: table, op: q.op, payload: clone(q.payload), filters: clone(q.filters) });
-        var rows = table === "products" ? db.products : table === "lists" ? db.lists : table === "imports" ? db.imports : table === "list_members" ? db.members : db.profiles;
+        var rows = table === "products" ? db.products : table === "lists" ? db.lists : table === "imports" ? db.imports : table === "questions" ? db.questions : table === "list_members" ? db.members : db.profiles;
         if (table === "list_members" && db.noMembers) return resolve({ data: null, error: { code: "PGRST205", message: "Could not find the table public.list_members in the schema cache" } });
+        if (table === "questions" && db.noQuestions) return resolve({ data: null, error: { code: "PGRST205", message: "Could not find the table public.questions in the schema cache" } });
         if (table === "imports" && db.noImports) return resolve({ data: null, error: { code: "PGRST205", message: "Could not find the table public.imports in the schema cache" } });
         if (q.op === "insert" && db.insertError && (table === "products" || table === "imports")) return resolve({ data: null, error: clone(db.insertError) });
         if (table === "products" && q.op === "insert" && db.oldGoalCheck && q.payload.target_type === "auto") return resolve({ data: null, error: { code: "23514", message: 'new row for relation "products" violates check constraint "products_target_type_check"', details: "Failing row contains (...)." } });
@@ -72,6 +73,13 @@ const FAKE = `
           if (q.payload.list_id && !db.lists.some(function (l) { return l.id === q.payload.list_id; })) return resolve({ data: null, error: { code: "23503", message: "fk" } });
           var ir = { id: "im-" + (++db.seq), user_id: "u1", list_id: q.payload.list_id || null, url: iu, status: "pending", note: null, found: null, added: null, created_at: new Date().toISOString(), done_at: null };
           rows.push(ir); return resolve({ data: null, error: null });
+        }
+        if (table === "questions" && q.op === "insert") {   // what the database does for a new question: cleans the text, starts it as pending, the server's time, the limits
+          if (db.questionError) return resolve({ data: null, error: clone(db.questionError) });
+          var qt = String(q.payload.question == null ? "" : q.payload.question).replace(/[\u0000-\u001f\u007f-\u009f<>]+/g, " ").replace(/ {2,}/g, " ").trim().slice(0, 300);
+          if (qt.length < 5) return resolve({ data: null, error: { code: "23514", message: "Skriv mindst 5 tegn." } });
+          rows.push({ id: "q-" + (++db.seq), user_id: "u1", list_id: q.payload.list_id || null, question: qt, created_at: new Date().toISOString(), status: "pending", summary: null, picks: null, note: null, answered_at: null });
+          return resolve({ data: null, error: null });
         }
         if (q.op === "insert") {
           var r = Object.assign({ id: "new-" + (++db.seq), status: "pending", user_id: "u1", created_at: new Date().toISOString(), tracked_variants: null }, clone(q.payload));
@@ -241,7 +249,7 @@ async function open(opts = {}) {
   await page.route(/fonts\.(googleapis|gstatic)\.com/, r => r.fulfill({ contentType: "text/css", body: "" }));
   // config.js in the repo holds the real project's values, so both cases are served from the test, never from the file.
   await page.route(/\/config\.js$/, r => r.fulfill({ contentType: "text/javascript", body: opts.config === false ? "window.PV_CONFIG={supabaseUrl:\"\",supabaseAnonKey:\"\"};" : 'window.PV_CONFIG={supabaseUrl:"https://x.supabase.test",supabaseAnonKey:"anon"};' }));
-  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, imports: opts.imports || [], noImports: !!opts.noImports, members: opts.members || [], people: opts.people || {}, noMembers: !!opts.noMembers, noAskedCol: !!opts.noAskedCol, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [], access: opts.access, accessErr: !!opts.accessErr };
+  const init = { session: opts.session === false ? null : { user: { id: "u1", email: "mor@familie.dk" } }, products: opts.products || [], lists: opts.lists || [], noLists: !!opts.noLists, imports: opts.imports || [], noImports: !!opts.noImports, questions: opts.questions || [], noQuestions: !!opts.noQuestions, members: opts.members || [], people: opts.people || {}, noMembers: !!opts.noMembers, noAskedCol: !!opts.noAskedCol, profiles: opts.profiles || [], admin: !!opts.admin, requests: opts.requests || [], allowed: opts.allowed || [], access: opts.access, accessErr: !!opts.accessErr };
   await page.addInitScript("window.__INIT = " + JSON.stringify(init) + ";");
   if (opts.fake !== false) await page.addInitScript(FAKE);
   // The behaviour tests below work with the sections "Indstil vare", "Vis alle butikker" and the group of products that cannot be fetched opened (they are collapsed by default; the tests
@@ -1777,6 +1785,217 @@ let base;
       await p.waitForFunction(() => window.__db.ops.length >= 1);
       await p.waitForFunction(() => !document.getElementById("readonly").hidden);
       check("alt: a refused write (no access) switches the page to read-only like everywhere else", await p.isVisible("#readonly"));
+      await p.context().close();
+    }
+  }
+
+  // 10f. questions ("Spørg om en vare"): free-form shopping advice, answered by the AI agent (everything in an answer is untrusted)
+  {
+    const HOUR = 36e5, ago = h => new Date(Date.now() - h * HOUR).toISOString();
+    const qr = (id, over) => Object.assign({ id, user_id: "u1", list_id: null, question: "Robotstøvsuger til lejlighed med hund, højst 3.000 kr.", created_at: ago(0.5), status: "pending", summary: null, picks: null, note: null, answered_at: null }, over || {});
+    const PICKS = [
+      { name: "Roborock Q Revo", url: "https://prisjagt.dk/product.php?p=16373878", store: "Elgiganten", price: 2999, was: 3999, why: "Børster og mopper hundehår op." },
+      { name: "Dreame L10s", url: "https://prisjagt.dk/product.php?p=222", store: "Power", price: 2400, was: 2450, why: "Billigere, mindre sug." },
+      { name: "Eufy X8", url: "https://prisjagt.dk/product.php?p=333", store: "Proshop", price: 1799, why: "Uden normalpris." }
+    ];
+    const done = (id, over) => qr(id, Object.assign({ status: "done", created_at: ago(2), answered_at: ago(1), summary: "Roborock passer bedst til hundehår. Eufy er billigst.", picks: PICKS }, over || {}));
+    const txt = async loc => (await loc.innerText()).replace(/\s+/g, " ").trim();
+    const item = (p, id) => p.locator('#qList .q-item[data-qid="' + id + '"]');
+    const writes = async p => (await ops(p)).filter(o => o.table === "questions");
+    {   // not there before schema.sql has been run again
+      const p = await open({ products: [row("test-sony-xm5", { id: "x5" })], noQuestions: true, label: "q-none" });
+      await p.waitForSelector(".item");
+      check("questions: a database without the table hides the whole feature, quietly", !(await p.isVisible("#qBox")) && !(await p.isVisible("#qOpen")) && (await p.locator("#qList").innerHTML()) === "");
+      await p.context().close();
+    }
+    {   // the entry point and the form
+      const p = await open({ products: [row("test-sony-xm5", { id: "x5" })], lists: [{ id: "l1", user_id: "u1", name: "Elektronik" }], label: "q-form", storage: { "pv-list": "all" } });
+      await p.waitForSelector(".item"); await p.waitForSelector("#qBox:not([hidden])");
+      check("questions: a quiet text button 'Spørg om en vare' near the add form, the panel closed", (await p.textContent("#qOpen")) === "Spørg om en vare" && !(await p.isVisible("#qForm")) && (await p.getAttribute("#qOpen", "aria-expanded")) === "false"
+        && (await p.evaluate(() => { const a = document.getElementById("addForm"), q = document.getElementById("qBox"), l = document.getElementById("list"); return !!(a.compareDocumentPosition(q) & Node.DOCUMENT_POSITION_FOLLOWING) && !!(q.compareDocumentPosition(l) & Node.DOCUMENT_POSITION_FOLLOWING); })));
+      check("questions: the button is a link-style button, not a primary one", (await p.getAttribute("#qOpen", "class")).split(" ").indexOf("link") >= 0 && (await p.getAttribute("#qOpen", "class")).indexOf("btn") < 0);
+      await p.click("#qOpen");
+      check("questions: it opens a textarea ('Hvad leder du efter?', 300 at most) and a 'Spørg' button; no counter yet",
+        (await p.isVisible("#qText")) && (await p.getAttribute("#qText", "placeholder")) === "Hvad leder du efter?" && (await p.getAttribute("#qText", "maxlength")) === "300" && (await p.textContent("#qSubmit")) === "Spørg"
+        && (await p.getAttribute("#qOpen", "aria-expanded")) === "true" && (await p.textContent("#qCount")) === "" && (await p.evaluate(() => document.activeElement.id)) === "qText");
+      await p.fill("#qText", "x".repeat(249));
+      check("questions: no counter at 249 characters", (await p.textContent("#qCount")) === "");
+      await p.fill("#qText", "x".repeat(250));
+      check("questions: a counter only when close to the limit", (await p.textContent("#qCount")) === "250/300");
+      await p.fill("#qText", "kaf");
+      await p.click("#qSubmit");
+      check("questions: too short: 'Skriv mindst 5 tegn.' and nothing is sent", (await p.textContent("#qMsg")) === "Skriv mindst 5 tegn." && (await writes(p)).length === 0);
+      await p.fill("#qText", "  Kaffemaskine  <b>til</b>\n kontoret  ");
+      await p.click("#qSubmit");
+      await p.waitForFunction(() => document.querySelectorAll("#qList .q-item").length === 1);
+      const w = await writes(p);
+      check("questions: asking inserts the cleaned words (and no list when none is selected)", w.length === 1 && w[0].op === "insert" && JSON.stringify(w[0].payload) === JSON.stringify({ question: "Kaffemaskine b til /b kontoret" }), JSON.stringify(w));
+      check("questions: ... the panel closes and empties, focus returns to the button", !(await p.isVisible("#qForm")) && (await p.inputValue("#qText")) === "" && (await p.evaluate(() => document.activeElement.id)) === "qOpen");
+      check("questions: ... the new question shows as waiting: 'Søger. Svar inden for en time.'", (await txt(p.locator("#qList .q-item"))) === "Kaffemaskine b til /b kontoret Søger. Svar inden for en time.", await txt(p.locator("#qList .q-item")));
+      check("questions: ... a waiting question has no 'Fjern', no 'Prøv igen'", (await p.locator("#qList button").count()) === 0);
+      await p.click("#chips [data-lsel='l1']"); await p.click("#qOpen"); await p.fill("#qText", "Hylde til garagen");
+      await p.click("#qSubmit"); await p.waitForFunction(() => document.querySelectorAll("#qList .q-item").length === 2);
+      const w2 = await writes(p);
+      check("questions: the list selected when asking is sent with the question", JSON.stringify(w2[1].payload) === JSON.stringify({ question: "Hylde til garagen", list_id: "l1" }), JSON.stringify(w2[1]));
+      check("questions: ... and the questions of every list are listed, newest first", JSON.stringify(await p.locator("#qList .q-text").allInnerTexts()) === JSON.stringify(["Hylde til garagen", "Kaffemaskine b til /b kontoret"]));
+      await p.click("#qOpen");
+      await p.evaluate(() => { window.__db.questionError = { code: "23514", message: "Du kan stille 5 spørgsmål i døgnet." }; });
+      await p.fill("#qText", "Noget helt andet her"); await p.click("#qSubmit");
+      await p.waitForFunction(() => !document.getElementById("qMsg").hidden);
+      check("questions: the daily limit is shown as the database says it, the text stays, the button works again", (await p.textContent("#qMsg")) === "Du kan stille 5 spørgsmål i døgnet." && (await p.inputValue("#qText")) === "Noget helt andet her" && !(await p.isDisabled("#qSubmit")));
+      await p.evaluate(() => { window.__db.questionError = { code: "23514", message: "Der er allerede 3 spørgsmål i gang. Vent på svar." }; });
+      await p.click("#qSubmit");
+      await p.waitForFunction(() => /3 spørgsmål/.test(document.getElementById("qMsg").textContent));
+      check("questions: ... and so are the other two limits", (await p.textContent("#qMsg")) === "Der er allerede 3 spørgsmål i gang. Vent på svar.");
+      await p.evaluate(() => { window.__db.questionError = { message: "boom <script>" }; });
+      await p.click("#qSubmit");
+      await p.waitForFunction(() => /Kunne ikke gemme/.test(document.getElementById("qMsg").textContent));
+      check("questions: any other error is a generic sentence, never the raw message", !/boom|script/.test(await p.textContent("#qMsg")));
+      await p.evaluate(() => { window.__db.questionError = null; window.__db.deny = true; });
+      await p.click("#qSubmit");
+      await p.waitForFunction(() => !document.getElementById("readonly").hidden);
+      check("questions: a refused write (no access) hides the feature like the add field", !(await p.isVisible("#qBox")));
+      await p.context().close();
+    }
+    {   // the answers
+      const p = await open({ products: [row("test-sony-xm5", { id: "x5", source_url: "https://prisjagt.dk/product.php?p=222" })], lists: [{ id: "l1", user_id: "u1", name: "Elektronik" }, { id: "l2", user_id: "u1", name: "Hjem" }], storage: { "pv-list": "all" }, label: "q-answers",
+        questions: [done("d1", { list_id: "l1", created_at: ago(3) }), qr("w1", { created_at: ago(1) }), qr("s1", { created_at: ago(7), question: "Gammelt spørgsmål om en vaskemaskine" }), qr("f1", { created_at: ago(5), status: "failed", note: "Det er ikke et spørgsmål om en vare.", question: "Hvad er meningen med livet" }),
+          qr("f2", { created_at: ago(6), status: "failed", question: "Uden note her" }), done("e1", { created_at: ago(8), picks: [], question: "Færdig uden forslag" })] });
+      await p.waitForSelector("#qList .q-item");
+      check("questions: the 5 newest are shown (waiting 1h, done 3h, failed 5h, 6h, stale 7h), the sixth after 'Vis flere'", (await p.locator("#qList .q-item").count()) === 5 && (await p.locator('[data-qact="more"]').textContent()) === "Vis flere");
+      await p.click('[data-qact="more"]');
+      const order = await p.locator("#qList .q-item").evaluateAll(els => els.map(e => e.getAttribute("data-qid")));
+      check("questions: newest first", JSON.stringify(order) === JSON.stringify(["w1", "d1", "f1", "f2", "s1", "e1"]), JSON.stringify(order));
+      check("questions: a waiting one: 'Søger. Svar inden for en time.' and no button", (await txt(item(p, "w1"))) === "Robotstøvsuger til lejlighed med hund, højst 3.000 kr. Søger. Svar inden for en time." && (await item(p, "w1").locator("button").count()) === 0);
+      check("questions: a done one is collapsed to the question and '3 forslag'", (await txt(item(p, "d1"))) === "Robotstøvsuger til lejlighed med hund, højst 3.000 kr. 3 forslag" && (await item(p, "d1").locator(".q-body").count()) === 0);
+      check("questions: a stale waiting one (more than 6 hours) is shown as failed: 'Ingen svar. Prøv igen' and 'Fjern'", (await txt(item(p, "s1"))) === "Gammelt spørgsmål om en vaskemaskine Ingen svar. Prøv igen Fjern");
+      check("questions: a failed one: the note, 'Prøv igen' and 'Fjern'", (await txt(item(p, "f1"))) === "Hvad er meningen med livet Det er ikke et spørgsmål om en vare. Prøv igen Fjern");
+      check("questions: a failed one without a note: a plain sentence", (await txt(item(p, "f2"))) === "Uden note her Kunne ikke finde et svar. Prøv igen Fjern");
+      check("questions: an answer without any usable pick counts as failed", (await txt(item(p, "e1"))) === "Færdig uden forslag Kunne ikke finde et svar. Prøv igen Fjern");
+      await item(p, "d1").locator("button.q-head").click();
+      const it = item(p, "d1");
+      check("questions: opening shows the summary as a paragraph and the picks as a compact list", (await it.locator("p.q-sum").innerText()) === "Roborock passer bedst til hundehår. Eufy er billigst." && (await it.locator(".alt-list li").count()) === 3 && (await it.locator("button.q-head").getAttribute("aria-expanded")) === "true");
+      const first = await txt(it.locator(".alt-list li").first());
+      check("questions: a pick shows name, price, store, the tag and the why sentence", /Roborock Q Revo/.test(first) && /2\.999 kr\./.test(first) && /Elgiganten/.test(first) && /−25 %/.test(first) && /Børster og mopper hundehår op\./.test(first), first);
+      const tags = await it.locator(".alt-list li").evaluateAll(els => els.map(e => { const t = e.querySelector(".alt-tag"); return t ? t.textContent : ""; }));
+      check("questions: '−25 %' only when was/price gives at least 5 % (none for 2.400 of 2.450, none without 'was')", JSON.stringify(tags) === JSON.stringify(["−25 %", "", ""]), JSON.stringify(tags));
+      const a0 = it.locator(".alt-name a").first();
+      check("questions: the name is a link in a new tab with rel noopener noreferrer", (await a0.getAttribute("target")) === "_blank" && (await a0.getAttribute("rel")) === "noopener noreferrer" && (await a0.getAttribute("href")) === "https://prisjagt.dk/product.php?p=16373878");
+      check("questions: the why sentence is muted (same style as alternatives)", (await it.locator(".alt-why").first().getAttribute("class")).indexOf("meta") >= 0);
+      check("questions: 'Følg' on each pick, 'Følges' (disabled) for a link the person already follows", (await it.locator('[data-qact="follow"]').allInnerTexts()).join("|") === "Følg|Følges|Følg" && (await it.locator('[data-qact="follow"]').nth(1).isDisabled()));
+      await it.locator('[data-qact="follow"]').first().click();
+      await p.waitForFunction(() => window.__db.ops.some(o => o.table === "products" && o.op === "insert"));
+      const ins = (await ops(p)).filter(o => o.table === "products" && o.op === "insert");
+      check("questions: 'Følg' adds the product with that link to the question's list, goal auto", ins.length === 1 && JSON.stringify(ins[0].payload) === JSON.stringify({ name: "Nyt produkt", source_url: "https://prisjagt.dk/product.php?p=16373878", target_type: "auto", target_value: null, active: true, list_id: "l1" }), JSON.stringify(ins));
+      await p.waitForFunction(() => document.querySelector('#qList [data-qact="follow"]').textContent === "Følges");
+      await p.evaluate(() => window.__tick()); await p.waitForTimeout(150);
+      check("questions: ... it says 'Følges' at once, and still after the next poll", (await item(p, "d1").locator('[data-qact="follow"]').first().textContent()) === "Følges" && (await item(p, "d1").locator('[data-qact="follow"]').first().isDisabled()));
+      await p.evaluate(() => { window.__db.insertError = { code: "23514", message: "Du kan højst følge 40 produkter. Slet et produkt først." }; });
+      await item(p, "d1").locator('[data-qact="follow"]').nth(2).click();
+      await p.waitForFunction(() => /højst/.test(document.querySelector('[data-rowmsg="q-d1"]').textContent));
+      check("questions: a refused 'Følg' says why (the 40-product limit) and the button works again", (await item(p, "d1").locator('[data-rowmsg="q-d1"]').textContent()) === "Du kan højst følge 40 produkter. Slet et produkt først." && !(await item(p, "d1").locator('[data-qact="follow"]').nth(2).isDisabled()));
+      await p.evaluate(() => { window.__db.insertError = null; });
+      await item(p, "d1").locator("button.q-head").click();
+      check("questions: collapsing again", (await item(p, "d1").locator(".q-body").count()) === 0);
+      // retry and remove
+      await item(p, "f1").locator('[data-qact="retry"]').click();
+      await p.waitForFunction(() => window.__db.ops.some(o => o.table === "questions" && o.op === "insert"));
+      const rw = await writes(p);
+      check("questions: 'Prøv igen' creates a new question with the same words", rw.length === 1 && JSON.stringify(rw[0].payload) === JSON.stringify({ question: "Hvad er meningen med livet" }), JSON.stringify(rw));
+      await p.waitForFunction(() => document.querySelectorAll("#qList .q-item").length === 7);
+      check("questions: ... which shows as waiting at the top; the old one stays", (await p.locator("#qList .q-text").first().innerText()) === "Hvad er meningen med livet" && (await txt(p.locator("#qList .q-item").first())).indexOf("Søger") >= 0);
+      await p.evaluate(() => { window.__db.questionError = { code: "23514", message: "Du kan stille 5 spørgsmål i døgnet." }; });
+      await item(p, "f2").locator('[data-qact="retry"]').click();
+      await p.waitForFunction(() => /5 spørgsmål/.test(document.querySelector('[data-rowmsg="q-f2"]').textContent));
+      check("questions: a refused 'Prøv igen' says why, next to the question", (await item(p, "f2").locator('[data-rowmsg="q-f2"]').textContent()) === "Du kan stille 5 spørgsmål i døgnet.");
+      await p.evaluate(() => { window.__db.questionError = null; });
+      await item(p, "s1").locator('[data-qact="rm"]').click();
+      await p.waitForFunction(() => !document.querySelector('[data-id="s1"]'));
+      const del = (await writes(p)).filter(o => o.op === "delete");
+      check("questions: 'Fjern' deletes that row at once (no confirmation) and it is gone", del.length === 1 && del[0].filters[0][1] === "s1" && (await p.locator("#qList .q-item").count()) === 6);
+      await p.click('[data-id="d1"].q-head'); await item(p, "d1").locator('[data-qact="rm"]').click();
+      await p.waitForFunction(() => !document.querySelector('[data-id="d1"]'));
+      check("questions: an answered one has 'Fjern' inside, too", (await writes(p)).filter(o => o.op === "delete").length === 2);
+      await p.context().close();
+    }
+    {   // follow into the selected list when the question has none; a question's list that is gone
+      const p = await open({ products: [row("test-sony-xm5", { id: "x5" })], lists: [{ id: "l1", user_id: "u1", name: "Elektronik" }, { id: "l2", user_id: "u1", name: "Hjem" }], storage: { "pv-list": "l2" }, label: "q-follow-list",
+        questions: [done("a1"), done("a2", { list_id: "gone", created_at: ago(3) })] });
+      await p.waitForSelector("#qList .q-item");
+      await item(p, "a1").locator("button.q-head").click();
+      await item(p, "a1").locator('[data-qact="follow"]').nth(2).click();
+      await p.waitForFunction(() => window.__db.ops.some(o => o.table === "products" && o.op === "insert"));
+      const i1 = (await ops(p)).filter(o => o.table === "products" && o.op === "insert");
+      check("questions: a question with no list: 'Følg' goes into the list selected now", i1[0].payload.list_id === "l2" && i1[0].payload.source_url === "https://prisjagt.dk/product.php?p=333", JSON.stringify(i1));
+      await item(p, "a2").locator("button.q-head").click();
+      await item(p, "a2").locator('[data-qact="follow"]').nth(0).click();
+      await p.waitForFunction(() => window.__db.ops.filter(o => o.table === "products" && o.op === "insert").length === 2);
+      const i2 = (await ops(p)).filter(o => o.table === "products" && o.op === "insert");
+      check("questions: ... also when the question's own list is gone", i2[1].payload.list_id === "l2");
+      await p.context().close();
+    }
+    {   // at most 5, "Vis flere"
+      const many = []; for (let i = 0; i < 7; i++) many.push(qr("m" + i, { created_at: ago(1 + i), question: "Spørgsmål nummer " + i, status: "failed", note: "x" }));
+      const p = await open({ products: [row("test-sony-xm5", { id: "x5" })], questions: many, label: "q-more" });
+      await p.waitForSelector("#qList .q-item");
+      check("questions: at most the 5 newest, with 'Vis flere'", (await p.locator("#qList .q-item").count()) === 5 && (await p.locator('[data-qact="more"]').textContent()) === "Vis flere" && (await p.locator("#qList .q-text").last().innerText()) === "Spørgsmål nummer 4");
+      await p.click('[data-qact="more"]');
+      check("questions: 'Vis flere' shows all, 'Vis færre' goes back", (await p.locator("#qList .q-item").count()) === 7 && (await p.locator('[data-qact="more"]').textContent()) === "Vis færre");
+      await p.click('[data-qact="more"]');
+      check("questions: ... back to 5", (await p.locator("#qList .q-item").count()) === 5);
+      const few = await open({ products: [row("test-sony-xm5", { id: "x5" })], questions: many.slice(0, 5), label: "q-five" });
+      await few.waitForSelector("#qList .q-item");
+      check("questions: no 'Vis flere' with 5 or fewer", (await few.locator('[data-qact="more"]').count()) === 0);
+      await few.context().close(); await p.context().close();
+    }
+    {   // the poll: a waiting question is answered meanwhile
+      const p = await open({ products: [row("test-sony-xm5", { id: "x5" })], questions: [qr("w1")], label: "q-poll" });
+      await p.waitForSelector("#qList .q-item");
+      check("questions: waiting", (await txt(p.locator("#qList .q-item"))).indexOf("Søger") >= 0);
+      await p.evaluate(a => { const r = window.__db.questions[0]; r.status = "done"; r.summary = "Kort svar."; r.picks = a; r.answered_at = new Date().toISOString(); }, PICKS);
+      await p.evaluate(() => window.__tick());
+      await p.waitForFunction(() => /3 forslag/.test(document.getElementById("qList").innerText));
+      check("questions: the page's poll picks up the answer", (await txt(p.locator("#qList .q-item"))).indexOf("3 forslag") >= 0);
+      await p.evaluate(() => { window.__db.questions[0].created_at = new Date(Date.now() - 20 * 36e5).toISOString(); window.__db.questions.push({ id: "q-w2", user_id: "u1", list_id: null, question: "Venter længe", created_at: new Date(Date.now() - 7 * 36e5).toISOString(), status: "pending", summary: null, picks: null, note: null, answered_at: null }); });
+      await p.evaluate(() => window.__tick());
+      await p.waitForFunction(() => /Venter længe/.test(document.getElementById("qList").innerText));
+      check("questions: ... and a question that has waited more than 6 hours turns into 'Ingen svar. Prøv igen'", /^Venter længe Ingen svar\. Prøv igen/.test(await txt(p.locator("#qList .q-item").first())));
+      await p.context().close();
+    }
+    {   // hostile strings
+      const EV = [
+        { name: '<img src=x onerror="window.__xss=1">Fup', url: "https://shop.example.dk/a", store: "<script>window.__xss=2</script>Butik", price: 100, was: 200, why: '"><svg onload="window.__xss=3"> hej &amp; <b>fed</b>' },
+        { name: "Farligt link", url: "javascript:window.__xss=4", store: "S", price: 50, why: "x" },
+        { name: "Http link", url: "http://shop.example.dk/plain", store: "S", price: 50, why: "x" },
+        { name: "Citat", url: 'https://shop.example.dk/a"onmouseover="window.__xss=5', store: "S", price: 50, why: "x" },
+        { name: "Data", url: "data:text/html,<script>window.__xss=6</script>", store: "S", price: 50, why: "x" },
+        { name: "Port", url: "https://user:pw@shop.example.dk:8443/x", store: "S", price: 50, why: "x" },
+        { name: "Pris som tekst", url: "https://shop.example.dk/p", store: "S", price: "<b>1</b>", why: "x" },
+        { name: "", url: "https://shop.example.dk/p", store: "S", price: 5, why: "x" }, "ikke et objekt", null, 7
+      ];
+      const p = await open({ products: [row("test-sony-xm5", { id: "x5" })], label: "q-hostile", questions: [
+        done("h1", { question: '<script>window.__xss=8</script>Spørgsmål <b>fed</b>', summary: '<img src=x onerror="window.__xss=9"> Svar & mere', picks: EV }),
+        qr("h2", { created_at: ago(3), status: "failed", note: '<script>window.__xss=10</script><b>Note</b>', question: "Fejl <i>kursiv</i>" })] });
+      await p.waitForSelector("#qList .q-item");
+      await item(p, "h1").locator("button.q-head").click();
+      const box = p.locator("#qList");
+      check("questions: hostile strings are shown as text: no element is injected, no script runs", (await box.locator("img, script, svg, b, i").count()) === 0 && (await p.evaluate(() => window.__xss)) === undefined);
+      const all = await box.innerText();
+      check("questions: ... the text itself is visible, escaped (question, summary, name, store, why, note)", all.indexOf('<script>window.__xss=8</script>Spørgsmål <b>fed</b>') >= 0 && all.indexOf('<img src=x onerror="window.__xss=9"> Svar & mere') >= 0
+        && all.indexOf('<img src=x onerror="window.__xss=1">Fup') >= 0 && all.indexOf("<script>window.__xss=2</script>Butik") >= 0 && all.indexOf("&amp; <b>fed</b>") >= 0 && all.indexOf("<script>window.__xss=10</script><b>Note</b>") >= 0 && all.indexOf("Fejl <i>kursiv</i>") >= 0, all.slice(0, 400));
+      const hrefs = await box.locator("a").evaluateAll(as => as.map(a => a.getAttribute("href")));
+      check("questions: only https links become links (javascript:, data:, http:, a port or user:password@ do not)", hrefs.length === 2 && hrefs.every(h => /^https:\/\//.test(h)) && !hrefs.some(h => /["'<> ]|^javascript|^data:|^http:/.test(h)), JSON.stringify(hrefs));
+      check("questions: ... a link with a quote in it cannot break out of the attribute", (await box.locator("[onmouseover], [onerror], [onload]").count()) === 0 && (await p.evaluate(() => window.__xss)) === undefined);
+      check("questions: ... a pick without a usable link has no 'Følg'; a bad price or name or non-object is dropped; never more than 5 shown", (await box.locator(".alt-list li").count()) === 5 && (await box.locator('[data-qact="follow"]').count()) === 2, "li " + (await box.locator(".alt-list li").count()));
+      check("questions: ... the tag is computed, never copied from the text", JSON.stringify(await box.locator(".alt-tag").allInnerTexts()) === JSON.stringify(["−50 %"]));
+      await p.context().close();
+    }
+    {   // a phone, one open answer
+      const p = await open({ products: [row("test-sony-xm5", { id: "x5" })], width: 400, questions: [done("d1", { question: "Meget lang tekst ".repeat(15) }), qr("w1")], label: "q-mobile" });
+      await p.waitForSelector("#qList .q-item");
+      await item(p, "d1").locator("button.q-head").click(); await p.click("#qOpen");
+      const m = await p.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth, h: document.querySelector("#qList .q-text").getBoundingClientRect().height }));
+      check("questions: no horizontal overflow at 400 px, a long question is cut to one line", m.sw <= m.cw && m.h < 30, JSON.stringify(m));
       await p.context().close();
     }
   }

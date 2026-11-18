@@ -476,6 +476,7 @@ drop policy products_select on public.products; drop policy products_update_shar
 drop trigger products_list_check_trg on public.products;
 alter table public.products drop column list_id;
 drop table public.lists cascade;
+drop table if exists public.questions cascade;      -- its list_id key went with the lists table; the next run creates it again
 \o /dev/null
 \i :schema
 \i :schema
@@ -2562,6 +2563,316 @@ reset role;
 select t.tok(null);
 delete from public.products;
 delete from public.lists where id = '00000000-0000-0000-0000-00000000aa77';
+select set_config('request.jwt.claims', '', false);
+
+-- 11d. questions ("Spørg om en vare"): the table, its limits and guard, and the AI agent's three functions
+delete from public.products;
+insert into public.lists (id, user_id, name) values
+  ('00000000-0000-0000-0000-00000000aa0d', '00000000-0000-0000-0000-0000000000a1', 'Ask A'),
+  ('00000000-0000-0000-0000-00000000aa0e', '00000000-0000-0000-0000-0000000000c5', 'Ask C');
+insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa0d', '00000000-0000-0000-0000-0000000000b2') on conflict do nothing;
+update public.resolver_secret set token = repeat('a', 64);
+select t.tok(null);
+create function t.ask(q text, l uuid default null) returns text language plpgsql as $$
+begin insert into public.questions (question, list_id) values (q, l); return 'ok'; exception when others then return sqlstate || ' ' || sqlerrm; end $$;
+create function t.qid(q text) returns uuid language sql security definer as $$ select id from public.questions where question = q $$;
+create function t.qage(h numeric) returns void language sql security definer as $$ update public.questions set created_at = created_at - make_interval(hours => h::int) $$;
+create function t.alog(h numeric) returns void language sql security definer as $$ update public.ask_attempts set at = at - make_interval(hours => h::int) $$;
+create function t.qpend(q text) returns void language sql security definer as $$
+  update public.questions set status = 'pending', summary = null, picks = null, note = null, answered_at = null where question = q $$;
+grant execute on function t.ask(text, uuid), t.qid(text), t.qage(numeric), t.alog(numeric), t.qpend(text) to public;
+
+select t.chk('ask: the table, the log and the functions exist; no anon rights; no UPDATE for authenticated; no rights at all on the log',
+  to_regclass('public.questions') is not null and to_regclass('public.ask_attempts') is not null
+  and (select count(*) = 4 from pg_proc where pronamespace = 'public'::regnamespace and proname in ('ai_ask_list', 'ai_ask_set', 'ai_ask_fail', 'ask_take_slot'))
+  and not has_table_privilege('anon', 'public.questions', 'select') and not has_table_privilege('anon', 'public.questions', 'insert')
+  and has_table_privilege('authenticated', 'public.questions', 'select') and has_table_privilege('authenticated', 'public.questions', 'insert')
+  and has_table_privilege('authenticated', 'public.questions', 'delete') and not has_table_privilege('authenticated', 'public.questions', 'update')
+  and has_table_privilege('service_role', 'public.questions', 'update')
+  and not has_table_privilege('authenticated', 'public.ask_attempts', 'select') and not has_table_privilege('anon', 'public.ask_attempts', 'insert')
+  and (select relrowsecurity from pg_class where oid = 'public.questions'::regclass) and (select relrowsecurity from pg_class where oid = 'public.ask_attempts'::regclass));
+select t.chk('ask: grants of the functions as ai_alt (anon and authenticated, never public); ask_take_slot not for anon',
+  has_function_privilege('anon', 'public.ai_ask_list()', 'execute') and has_function_privilege('authenticated', 'public.ai_ask_set(uuid, text, jsonb)', 'execute')
+  and has_function_privilege('anon', 'public.ai_ask_fail(uuid, text)', 'execute') and not has_function_privilege('anon', 'public.ask_take_slot()', 'execute')
+  and not exists (select 1 from information_schema.routine_privileges where routine_name like 'ai_ask%' and grantee = 'PUBLIC'));
+
+set role anon;
+select t.chk('ask: anon cannot read or write questions', t.denied('select * from public.questions') and t.denied($$insert into public.questions (question) values ('hej hej hej')$$));
+reset role;
+set role authenticated;
+select t.asX();
+select t.chk('ask: a signed-in stranger (not allowed) sees nothing and cannot insert', (select count(*) = 0 from public.questions) and t.ask('Robotstøvsuger til hund') like '42501%');
+select t.asA();
+select t.chk('ask: A asks', t.ask('  Robotstøvsuger   til lejlighed med hund, højst 3.000 kr.  ') = 'ok');
+select t.chk('ask: ... stored trimmed, single spaces, pending, own, server time, AI columns empty',
+  (select question = 'Robotstøvsuger til lejlighed med hund, højst 3.000 kr.' and status = 'pending' and user_id = '00000000-0000-0000-0000-0000000000a1'
+      and summary is null and picks is null and note is null and answered_at is null and abs(extract(epoch from now() - created_at)) < 60 and list_id is null from public.questions));
+select t.chk('ask: control characters and angle brackets are cleaned', t.ask('Kaffe' || chr(10) || 'maskine <b>til</b>' || chr(7) || ' kontor') = 'ok');
+select t.chk('ask: ... and not stored', (select count(*) = 1 from public.questions where question = 'Kaffe maskine b til /b kontor'));
+reset role;
+delete from public.questions; delete from public.ask_attempts;
+set role authenticated;
+select t.asA();
+select t.chk('ask: too short (after cleaning) or empty: a clear Danish error', t.ask('abcd') = '23514 Skriv mindst 5 tegn.' and t.ask('   ') like '23514 Skriv mindst%' and t.ask('<><><>') like '23514 Skriv mindst%' and t.ask(null) like '23514 Skriv mindst%');
+reset role;
+delete from public.questions; delete from public.ask_attempts;
+set role authenticated;
+select t.asA();
+select t.chk('ask: 300 characters are fine, longer is cut at 300', t.ask(repeat('a', 300)) = 'ok' and t.ask(repeat('b', 400)) = 'ok');
+select t.chk('ask: ... as stored', (select count(*) = 1 from public.questions where question = repeat('b', 300)) and (select count(*) = 1 from public.questions where question = repeat('a', 300)));
+reset role;
+delete from public.questions; delete from public.ask_attempts;
+set role authenticated;
+select t.asA();
+select t.chk('ask: the browser cannot set the AI columns, the status, the time (on insert), and cannot insert for someone else',
+  t.err($$insert into public.questions (question, status, summary, picks, note, answered_at, created_at) values ('Hylde til garage', 'done', 'x', '[1]', 'n', now(), now() - interval '3 days')$$) = 'ok1');
+select t.chk('ask: ... as stored, and nobody else as owner',
+  (select status = 'pending' and summary is null and picks is null and note is null and answered_at is null and created_at > now() - interval '1 minute' from public.questions where question = 'Hylde til garage')
+  and t.err($$insert into public.questions (user_id, question) values ('00000000-0000-0000-0000-0000000000b2', 'Fars spørgsmål')$$) like '%row-level security%');
+select t.chk('ask: no browser UPDATE at all (privilege)', t.denied($$update public.questions set question = 'noget andet her' where true$$) and t.denied($$update public.questions set status = 'done' where true$$));
+reset role;
+delete from public.questions; delete from public.ask_attempts;
+
+-- lists and isolation
+set role authenticated;
+select t.asA();
+select t.chk('ask: a list: the person''s own is accepted; another person''s or an unknown one is refused',
+  t.ask('Hvilken støvsuger', '00000000-0000-0000-0000-00000000aa0d') = 'ok'
+  and t.ask('Hvilken kaffemaskine', '00000000-0000-0000-0000-00000000aa0e') = '23503 Listen findes ikke.'
+  and t.ask('Hvilken printer', '00000000-0000-0000-0000-0000deadbeef') = '23503 Listen findes ikke.');
+select t.asB();
+select t.chk('ask: B (a member of A''s list) can ask into it', t.ask('Hvilken ovn', '00000000-0000-0000-0000-00000000aa0d') = 'ok');
+select t.chk('ask: ... and does not see A''s question', (select count(*) = 1 and bool_and(question = 'Hvilken ovn') from public.questions));
+select t.asC();
+select t.chk('ask: C (not a member) cannot use A''s list; C sees none of the others'' questions', t.ask('Hvilken ovn', '00000000-0000-0000-0000-00000000aa0d') = '23503 Listen findes ikke.' and (select count(*) = 0 from public.questions));
+select t.asB();
+select t.chk('ask: B cannot delete A''s question (nothing deleted), can delete own',
+  t.err($$delete from public.questions where question = 'Hvilken støvsuger'$$) = 'ok0' and t.err($$delete from public.questions where question = 'Hvilken ovn'$$) = 'ok1');
+select t.asA();
+select t.chk('ask: A still has the question', (select count(*) = 1 from public.questions where question = 'Hvilken støvsuger'));
+reset role;
+delete from public.lists where id = '00000000-0000-0000-0000-00000000aa0d';
+select t.chk('ask: deleting the list keeps the question, list_id null', (select list_id is null from public.questions where question = 'Hvilken støvsuger'));
+insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000aa0d', '00000000-0000-0000-0000-0000000000a1', 'Ask A');
+delete from public.questions; delete from public.ask_attempts;
+
+-- the limits
+set role authenticated;
+select t.asA();
+select t.chk('ask: limit: three pending at a time; the fourth is refused with a clear message',
+  t.ask('Spørgsmål nummer et') = 'ok' and t.ask('Spørgsmål nummer to') = 'ok' and t.ask('Spørgsmål nummer tre') = 'ok'
+  and t.ask('Spørgsmål nummer fire') = '23514 Der er allerede 3 spørgsmål i gang. Vent på svar.');
+select t.chk('ask: ... a refused question leaves nothing (no row, no log entry)', (select count(*) = 3 from public.questions));
+reset role;
+select t.chk('ask: ... the log has the three that were accepted', (select count(*) = 3 from public.ask_attempts where user_id = '00000000-0000-0000-0000-0000000000a1'));
+select t.tok(repeat('a', 64));
+set role anon;
+select public.ai_ask_fail(t.qid('Spørgsmål nummer et'), 'x') and public.ai_ask_fail(t.qid('Spørgsmål nummer to'), 'x');
+reset role;
+set role authenticated;
+select t.asA();
+select t.chk('ask: limit: five a day: the fourth and fifth are fine once answers are in',
+  t.ask('Spørgsmål nummer fire') = 'ok' and t.ask('Spørgsmål nummer fem') = 'ok');
+select t.chk('ask: limit: the sixth in 24 hours says "Du kan stille 5 spørgsmål i døgnet."', t.ask('Spørgsmål nummer seks') = '23514 Du kan stille 5 spørgsmål i døgnet.');
+select t.chk('ask: ... removing questions does not give slots back', t.err($$delete from public.questions$$) = 'ok5' and t.ask('Spørgsmål nummer seks') = '23514 Du kan stille 5 spørgsmål i døgnet.');
+select t.asB();
+select t.chk('ask: ... B has a limit of their own', t.ask('Fars spørgsmål') = 'ok');
+reset role;
+select t.alog(25);
+set role authenticated;
+select t.asA();
+select t.chk('ask: ... after 24 hours the slots are back', t.ask('Spørgsmål nummer seks') = 'ok');
+reset role;
+select t.alog(49);
+set role authenticated;
+select t.asA();
+select t.chk('ask: ... log rows older than 2 days are cleaned on the next question', t.ask('Spørgsmål nummer syv') = 'ok');
+reset role;
+select t.chk('ask: ... only the new row is left for A', (select count(*) = 1 from public.ask_attempts where user_id = '00000000-0000-0000-0000-0000000000a1'));
+delete from public.questions; delete from public.ask_attempts;
+-- a pending question that has waited more than 6 hours no longer counts as pending (the page calls it failed)
+set role authenticated;
+select t.asA();
+select t.ask('Gammelt et') = 'ok' and t.ask('Gammelt to') = 'ok' and t.ask('Gammelt tre') = 'ok';
+reset role;
+select t.qage(7);
+set role authenticated;
+select t.asA();
+select t.chk('ask: limit: three pending that are more than 6 hours old do not block a new question', t.ask('Nyt spørgsmål efter svigt') = 'ok');
+reset role;
+delete from public.questions; delete from public.ask_attempts;
+-- 30 stored
+insert into public.questions (user_id, question, status, summary, picks, answered_at)
+  select '00000000-0000-0000-0000-0000000000a1', 'Gemt spørgsmål nr ' || g, 'done', 'Kort svar.', '[]', now() from generate_series(1, 30) g;
+set role authenticated;
+select t.asA();
+select t.chk('ask: limit: at most 30 stored per person, with a clear message; nothing is deleted automatically',
+  t.ask('Spørgsmål nummer 31') = '23514 Du kan gemme 30 spørgsmål. Fjern et først.' and (select count(*) = 30 from public.questions));
+select t.chk('ask: ... removing one makes room', t.err($$delete from public.questions where question = 'Gemt spørgsmål nr 1'$$) = 'ok1' and t.ask('Spørgsmål nummer 31') = 'ok');
+select t.asB();
+select t.chk('ask: ... B is not affected by A''s 30', t.ask('Fars spørgsmål') = 'ok');
+reset role;
+set role authenticated;
+select t.asA();
+select t.chk('ask: ask_take_slot is no RPC: refused outside a trigger (and anon has no right to it)', t.err($$select public.ask_take_slot()$$) = 'not allowed');
+reset role;
+delete from public.questions; delete from public.ask_attempts;
+
+-- the service role and the SQL editor are not restricted by the limits, but the text is still cleaned
+insert into public.questions (user_id, question, status, summary, picks, answered_at)
+  select '00000000-0000-0000-0000-0000000000a1', 'Service spørgsmål ' || g || '<x>', 'done', 'Kort svar.', '[]', now() from generate_series(1, 7) g;
+select t.chk('ask: the owner role: no limits, the guard still cleans the text and keeps the AI columns it was given',
+  (select count(*) = 7 and bool_and(question ~ '^Service spørgsmål [0-9] x$') and bool_and(status = 'done') from public.questions));
+select t.chk('ask: a question must be 5 to 300 characters, trimmed, without angle brackets also by constraint',
+  t.err($$update public.questions set question = 'ab' where true$$) like '%questions_question_check%' and t.err($$update public.questions set question = ' ab cdef ' where true$$) like '%questions_question_check%'
+  and t.err($$update public.questions set question = 'ab<cdef' where true$$) like '%questions_question_check%' and t.err($$update public.questions set status = 'x' where true$$) like '%status%'
+  and t.err($$update public.questions set summary = repeat('x', 601) where true$$) like '%summary%' and t.err($$update public.questions set note = repeat('x', 201) where true$$) like '%note%'
+  and t.err($$update public.questions set picks = '{}' where true$$) like '%picks%' and t.err($$update public.questions set picks = '[1,2,3,4,5,6]' where true$$) like '%picks%');
+delete from public.questions; delete from public.ask_attempts;
+
+-- the AI agent's functions
+insert into public.questions (user_id, question, created_at) values
+  ('00000000-0000-0000-0000-0000000000a1', 'Fjerde ældste', now() - interval '1 hour'),
+  ('00000000-0000-0000-0000-0000000000a1', 'Sæt-test spørgsmål', now() - interval '4 hours'),
+  ('00000000-0000-0000-0000-0000000000b2', 'Ældste spørgsmål', now() - interval '9 hours'),
+  ('00000000-0000-0000-0000-0000000000a1', 'Tredje ældste', now() - interval '2 hours'),
+  ('00000000-0000-0000-0000-0000000000a1', 'Allerede besvaret', now() - interval '10 hours');
+update public.questions set status = 'done', summary = 'x', picks = '[]', answered_at = now() where question = 'Allerede besvaret';
+create function t.ccnt() returns text language plpgsql as $$ begin return (select count(*) from public.ai_ask_list())::text; exception when others then return sqlerrm; end $$;
+create function t.pickb() returns jsonb language sql as $$
+  select '{"name":"Roborock Q Revo","url":"https://prisjagt.dk/product.php?p=12345","store":"Elgiganten","price":2999,"was":3999,"why":"God til hundehår."}'::jsonb $$;
+create function t.picks(patch jsonb, drop_key text default null) returns jsonb language sql as $$
+  select jsonb_build_array((t.pickb() || coalesce(patch, '{}'::jsonb)) - coalesce(drop_key, '')) $$;
+create function t.kset(summ text, p jsonb) returns text language plpgsql as $$
+begin return public.ai_ask_set(t.qid('Sæt-test spørgsmål'), summ, p)::text; exception when others then return sqlstate || ' ' || sqlerrm; end $$;
+grant execute on function t.ccnt(), t.pickb(), t.picks(jsonb, text), t.kset(text, jsonb) to public;
+
+select t.chk('ai_ask: list takes the resolver token: none, empty, wrong, a prefix: all refused (anon and signed in); set and fail too', (
+  select bool_and(r) from (
+    select t.ccnt() = 'resolver: invalid or missing token' as r from (select t.tok(null)) x union all
+    select t.ccnt() = 'resolver: invalid or missing token' from (select t.tok('')) x union all
+    select t.ccnt() = 'resolver: invalid or missing token' from (select t.tok('fel')) x union all
+    select t.ccnt() = 'resolver: invalid or missing token' from (select t.tok(repeat('a', 63))) x) y));
+set role anon;
+select t.tok(null);
+select t.chk('ai_ask: anon without a token: refused with 42501, also set and fail',
+  t.err($$select * from public.ai_ask_list()$$) = 'resolver: invalid or missing token'
+  and t.err(format($$select public.ai_ask_set(%L, 'Svar.', %L)$$, t.qid('Sæt-test spørgsmål'), t.picks(null))) = 'resolver: invalid or missing token'
+  and t.err(format($$select public.ai_ask_fail(%L, 'x')$$, t.qid('Sæt-test spørgsmål'))) = 'resolver: invalid or missing token');
+do $$ begin perform public.ai_ask_list(); raise exception 'no error'; exception when sqlstate '42501' then null; end $$;
+reset role;
+set role authenticated;
+select t.asA();
+select t.chk('ai_ask: ... and as a signed-in user without the token', t.ccnt() = 'resolver: invalid or missing token'
+  and t.err(format($$select public.ai_ask_fail(%L, 'x')$$, t.qid('Sæt-test spørgsmål'))) = 'resolver: invalid or missing token');
+reset role;
+select t.chk('ai_ask: nothing was changed by the refused calls', (select count(*) = 4 from public.questions where status = 'pending'));
+
+select t.tok(repeat('a', 64));
+set role anon;
+select t.chk('ai_ask: list: at most 3, oldest first, only pending (of all people, nothing about them)',
+  t.ccnt() = '3' and (select array_agg(question order by asked_at, id) from public.ai_ask_list()) = array['Ældste spørgsmål', 'Sæt-test spørgsmål', 'Tredje ældste']
+  and (select array_agg(question) from public.ai_ask_list()) = array['Ældste spørgsmål', 'Sæt-test spørgsmål', 'Tredje ældste']);
+select t.chk('ai_ask: list: the columns are exactly id, question, asked_at, and nothing identifies the person',
+  (select proargnames from pg_proc where proname = 'ai_ask_list') = array['id', 'question', 'asked_at']
+  and (select to_jsonb(l)::text !~ '(@|user|list_id|0000-0000-0000-0000-0000000000)' from public.ai_ask_list() l limit 1));
+-- set
+select t.chk('ai_ask: set: summary missing, empty, blank, over 600, or with control characters, a line break, a tab or angle brackets',
+  t.kset(null, t.picks(null)) like '22023%' and t.kset('', t.picks(null)) like '22023%summary must be 1 to 600%' and t.kset('   ', t.picks(null)) like '22023%'
+  and t.kset(repeat('x', 601), t.picks(null)) like '22023%' and t.kset('a' || chr(10) || 'b', t.picks(null)) like '22023%control characters%'
+  and t.kset('a' || chr(9) || 'b', t.picks(null)) like '22023%' and t.kset('a' || chr(7) || 'b', t.picks(null)) like '22023%' and t.kset('a<b', t.picks(null)) like '22023%' and t.kset('a>b', t.picks(null)) like '22023%'
+  and t.kset('<b>fed</b>', t.picks(null)) like '22023%' and t.kset('a' || chr(8238) || 'b', t.picks(null)) like '22023%' and t.kset('a' || chr(8203) || 'b', t.picks(null)) like '22023%');
+select t.chk('ai_ask: set: picks: not an array, empty, 6 items, items that are not objects',
+  t.kset('Svar.', '{"a":1}') like '22023 ai_ask: picks must be%' and t.kset('Svar.', '[]') like '22023%' and t.kset('Svar.', null) like '22023%' and t.kset('Svar.', '"x"') like '22023%'
+  and t.kset('Svar.', (select jsonb_agg(t.pickb()) from generate_series(1, 6))) like '22023%' and t.kset('Svar.', '[1]') like '22023 ai_ask: pick 1: not an object' and t.kset('Svar.', '[null]') like '22023%');
+select t.chk('ai_ask: set: five picks are the most that is accepted (checked below)', t.kset('Svar.', (select jsonb_agg(t.pickb()) from generate_series(1, 5))) = 'true');
+reset role;
+select t.qpend('Sæt-test spørgsmål');
+set role anon;
+select t.chk('ai_ask: set: extra key (also "kind", which ai_alt has), and every required key missing or null',
+  t.kset('Svar.', t.picks('{"extra":1}')) like '22023 ai_ask: pick 1: unknown key extra' and t.kset('Svar.', t.picks('{"kind":"deal"}')) like '22023%unknown key kind'
+  and t.kset('Svar.', t.picks(null, 'name')) like '%name is missing' and t.kset('Svar.', t.picks(null, 'url')) like '%url is missing'
+  and t.kset('Svar.', t.picks(null, 'store')) like '%store is missing' and t.kset('Svar.', t.picks(null, 'price')) like '%price is missing' and t.kset('Svar.', t.picks(null, 'why')) like '%why is missing'
+  and t.kset('Svar.', t.picks('{"name":null}')) like '%name is missing');
+select t.chk('ai_ask: set: name 1-120, store 1-60, why 1-160 characters',
+  t.kset('Svar.', t.picks('{"name":""}')) like '%name is not valid' and t.kset('Svar.', t.picks('{"name":"   "}')) like '%name is not valid'
+  and t.kset('Svar.', t.picks(jsonb_build_object('name', repeat('x', 121)))) like '%name is not valid' and t.kset('Svar.', t.picks('{"name":5}')) like '%name must be a string'
+  and t.kset('Svar.', t.picks(jsonb_build_object('store', repeat('x', 61)))) like '%store is not valid' and t.kset('Svar.', t.picks('{"store":""}')) like '%store is not valid'
+  and t.kset('Svar.', t.picks(jsonb_build_object('why', repeat('x', 161)))) like '%why is not valid' and t.kset('Svar.', t.picks('{"why":""}')) like '%why is not valid');
+select t.chk('ai_ask: set: url must be https like products.source_url (no http, port, user:password@, dotless host, space, javascript:, 501 characters)',
+  t.kset('Svar.', t.picks('{"url":"http://shop.dk/x"}')) like '%url is not valid' and t.kset('Svar.', t.picks('{"url":"https://shop.dk:8443/x"}')) like '%url is not valid'
+  and t.kset('Svar.', t.picks('{"url":"https://u:p@shop.dk/x"}')) like '%url is not valid' and t.kset('Svar.', t.picks('{"url":"https://localhost/x"}')) like '%url is not valid'
+  and t.kset('Svar.', t.picks('{"url":"https://shop.dk/a b"}')) like '%url is not valid' and t.kset('Svar.', t.picks('{"url":"javascript:alert(1)"}')) like '%url is not valid'
+  and t.kset('Svar.', t.picks(jsonb_build_object('url', 'https://shop.dk/' || repeat('a', 485)))) like '%url is not valid' and t.kset('Svar.', t.picks('{"url":""}')) like '%url is not valid'
+  and t.kset('Svar.', t.picks('{"url":7}')) like '%url must be a string');
+select t.chk('ai_ask: set: text with control characters, newlines, tabs, angle brackets or invisible direction marks is refused in every pick field', (
+  select bool_and(t.kset('Svar.', t.picks(jsonb_build_object(f, v))) like '22023%')
+    from (values ('name'), ('store'), ('why'), ('url')) a(f),
+         (values ('a' || chr(10) || 'b'), ('a' || chr(9) || 'b'), ('a' || chr(7) || 'b'), ('a<b'), ('a>b'), ('<script>x</script>'), ('a' || chr(8238) || 'b'), ('a' || chr(8203) || 'b'), ('a' || chr(65279) || 'b'), ('a' || chr(8232) || 'b')) b(v)));
+select t.chk('ai_ask: set: price must be a number above 0 and below 10 million',
+  t.kset('Svar.', t.picks('{"price":0}')) like '%price must be above 0%' and t.kset('Svar.', t.picks('{"price":-5}')) like '%price must be above 0%' and t.kset('Svar.', t.picks('{"price":"12"}')) like '%price must be a number'
+  and t.kset('Svar.', t.picks('{"price":10000000}')) like '%price must be above 0%' and t.kset('Svar.', t.picks('{"price":0.001}')) like '%price must be above 0%' and t.kset('Svar.', t.picks('{"price":true}')) like '%price must be a number');
+select t.chk('ai_ask: set: was must be a number above price (null counts as absent) and below 10 million',
+  t.kset('Svar.', t.picks('{"was":2999}')) like '%was must be above price%' and t.kset('Svar.', t.picks('{"was":1000}')) like '%was must be above price%' and t.kset('Svar.', t.picks('{"was":"3999"}')) like '%was must be a number'
+  and t.kset('Svar.', t.picks('{"was":10000000}')) like '%was must be above price%' and t.kset('Svar.', t.picks('{"was":2999.001}')) like '%was must be above price%');
+select t.chk('ai_ask: set: nothing was stored by any refused call', t.q($$select (status = 'pending' and summary is null and picks is null and answered_at is null)::text from public.questions where question = 'Sæt-test spørgsmål'$$) = 'true');
+select t.chk('ai_ask: set: unknown id and a question that is not pending: false', public.ai_ask_set('00000000-0000-0000-0000-000000000000', 'Svar.', t.picks(null)) = false
+  and public.ai_ask_set(t.qid('Allerede besvaret'), 'Nyt svar.', t.picks(null)) = false and t.q($$select summary from public.questions where question = 'Allerede besvaret'$$) = 'x');
+-- a good answer, with a question that has waited more than 6 hours (it can still be answered)
+select t.chk('ai_ask: set: a good answer returns true (also for a question that waited more than 6 hours)',
+  (select count(*) = 1 from public.ai_ask_list() where question = 'Sæt-test spørgsmål') and
+  t.kset('  Roborock passer bedst til hundehår.  ', t.picks('{"name":"  Roborock Q Revo  ","price":2999.456,"why":" Børster mod hår. "}')) = 'true');
+reset role;
+select t.chk('ai_ask: set: stored as a cleaned copy (trimmed, rounded), status done, answered_at now, note null',
+  (select status = 'done' and summary = 'Roborock passer bedst til hundehår.' and note is null and abs(extract(epoch from now() - answered_at)) < 60
+      and picks = '[{"name":"Roborock Q Revo","url":"https://prisjagt.dk/product.php?p=12345","store":"Elgiganten","price":2999.46,"was":3999,"why":"Børster mod hår."}]'::jsonb
+    from public.questions where question = 'Sæt-test spørgsmål'));
+set role anon;
+select t.chk('ai_ask: set: the answer is given once: no longer pending, false, nothing changes, and it is gone from the list',
+  t.kset('Andet svar.', t.picks(null)) = 'false' and t.q($$select (summary like 'Roborock%')::text from public.questions where question = 'Sæt-test spørgsmål'$$) = 'true'
+  and (select count(*) = 0 from public.ai_ask_list() where question = 'Sæt-test spørgsmål'));
+select t.chk('ai_ask: set: a 600-character summary and a pick without "was" (or with it null) are fine', (select public.ai_ask_set(t.qid('Fjerde ældste'), repeat('x', 600), jsonb_build_array(t.pickb() - 'was', t.pickb() || '{"was":null}')))
+  and t.q($$select (char_length(summary) = 600 and not (picks -> 0) ? 'was' and not (picks -> 1) ? 'was')::text from public.questions where question = 'Fjerde ældste'$$) = 'true');
+-- fail
+select t.chk('ai_ask: fail: stores the note (trimmed), status failed, no picks, answered_at now',
+  public.ai_ask_fail(t.qid('Tredje ældste'), '  Ikke et spørgsmål om en vare.  '));
+select t.chk('ai_ask: fail: not pending any more: false, nothing changes', not public.ai_ask_fail(t.qid('Tredje ældste'), 'igen') and not public.ai_ask_fail(t.qid('Sæt-test spørgsmål'), 'x')
+  and not public.ai_ask_fail('00000000-0000-0000-0000-000000000000', 'x'));
+reset role;
+select t.chk('ai_ask: fail: the stored row', (select status = 'failed' and note = 'Ikke et spørgsmål om en vare.' and summary is null and picks is null and abs(extract(epoch from now() - answered_at)) < 60 from public.questions where question = 'Tredje ældste'));
+select t.qpend('Tredje ældste');
+set role anon;
+select public.ai_ask_fail(t.qid('Tredje ældste'), repeat('x', 300));
+reset role;
+select t.chk('ai_ask: fail: cut at 200 characters', (select char_length(note) = 200 from public.questions where question = 'Tredje ældste'));
+select t.qpend('Tredje ældste');
+set role anon;
+select public.ai_ask_fail(t.qid('Tredje ældste'), 'a' || chr(10) || '<b>fed</b>' || chr(7) || 'b');
+reset role;
+select t.chk('ai_ask: fail: control characters and angle brackets removed', (select note = 'a b fed /b b' from public.questions where question = 'Tredje ældste'));
+select t.qpend('Tredje ældste');
+set role anon;
+select public.ai_ask_fail(t.qid('Tredje ældste'), '   ');
+reset role;
+select t.chk('ai_ask: fail: an empty note gives a plain sentence', (select note = 'Kunne ikke finde et svar.' from public.questions where question = 'Tredje ældste'));
+select t.qpend('Tredje ældste');
+set role anon;
+select public.ai_ask_fail(t.qid('Tredje ældste'), null);
+reset role;
+select t.chk('ai_ask: fail: a null note gives the same sentence', (select note = 'Kunne ikke finde et svar.' from public.questions where question = 'Tredje ældste'));
+-- the person reads the answer, nobody else does
+set role authenticated;
+select t.asA();
+select t.chk('e2e: A reads the answer (summary and picks), and cannot change it', (select summary like 'Roborock%' and picks -> 0 ->> 'name' = 'Roborock Q Revo' from public.questions where question = 'Sæt-test spørgsmål')
+  and t.denied($$update public.questions set summary = 'mit eget svar' where true$$));
+select t.asB();
+select t.chk('e2e: B does not see A''s questions (but the own one)', (select count(*) = 1 and bool_and(question = 'Ældste spørgsmål') from public.questions));
+select t.asC();
+select t.chk('e2e: C sees none', (select count(*) = 0 from public.questions));
+reset role;
+select t.tok(null);
+delete from public.questions; delete from public.ask_attempts;
+delete from public.lists where id in ('00000000-0000-0000-0000-00000000aa0d', '00000000-0000-0000-0000-00000000aa0e');
 select set_config('request.jwt.claims', '', false);
 
 -- 12. final whole-file run on the populated database

@@ -380,3 +380,32 @@ body { padding-top: calc(48px + env(safe-area-inset-top, 0px)); padding-bottom: 
 .settings #shopForm input[type=text] { background: var(--card) }
 .settings #shopForm .chk { align-items: center; min-height: 44px; margin: 0; font-size: 14.5px; color: var(--ink) }
 .settings .link { font-weight: 500; color: var(--accent) }
+
+/* questions ("Spørg om en vare"): a quiet text button under the add field, a small panel, the answers as quiet rows */
+.qa { margin: 0 0 14px }
+.qa-open { font-size: 13.5px; font-weight: 500; min-height: 44px }
+.qa-form { display: grid; gap: 8px; margin: 2px 0 10px; max-width: 520px; animation: rise .16s ease-out }
+.qa-form textarea { display: block; width: 100%; min-height: 84px; padding: 11px 14px; background: var(--card); border: 1px solid var(--edge); border-radius: 12px; font: inherit; font-size: 16px; line-height: 1.45; resize: vertical }
+.qa-form textarea::placeholder { color: var(--muted); opacity: 1 }
+.qa-form textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) }
+.qa-row { display: flex; align-items: center; justify-content: space-between; gap: 12px }
+.qa-row .meta { margin: 0 }
+.qa .msg { margin: 0 }
+.q-sect { margin-top: 4px }
+.q-sect .sec-h { margin-bottom: 4px }
+.q-list { list-style: none; margin: 0; padding: 0 }
+.q-item { border-bottom: 1px solid var(--soft) }
+.q-head { display: block; width: 100%; min-width: 0; padding: 10px 0; background: none; border: 0; text-align: left }
+.q-head.tog { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer }
+.q-head.tog::after { content: ""; flex: none; width: 7px; height: 7px; margin: 0 4px 3px 12px; border-right: 1.5px solid var(--ink2); border-bottom: 1.5px solid var(--ink2); transform: rotate(45deg); transition: transform .15s ease }
+.q-item.open .q-head.tog::after { transform: rotate(225deg); margin-bottom: -2px }
+.q-main { display: block; min-width: 0; flex: 1 1 auto }
+.q-text { display: block; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.q-state { display: block; margin-top: 1px }
+.q-state .link, .q-act .link { font-size: 13px; font-weight: 500; color: var(--accent) }
+.q-item.open { background: var(--card); border: 1px solid var(--edge); border-radius: 14px; margin: 6px -12px; padding: 0 12px 12px }
+.q-body { padding-top: 2px }
+.q-sum { margin: 0 0 12px; max-width: 62ch; color: var(--ink2); font-size: 14.5px }
+.q-act { margin-top: 10px; font-size: 13px }
+.q-more { margin: 6px 0 0; font-size: 13px }
+.q-more .link { font-size: 13px; font-weight: 500; color: var(--accent) }

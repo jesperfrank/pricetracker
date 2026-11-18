@@ -135,6 +135,17 @@
     <p class="notice mailask" id="mailAsk" hidden>Vil du have mail ved nye tilbud? <button type="button" class="link" id="mailYes">Ja tak</button> <button type="button" class="link" id="mailNo">Nej tak</button></p>
     <p class="notice" id="readonly" hidden>Du har ikke adgang til at gemme endnu. Bed ejeren om adgang.</p>
 
+    <section class="qa" id="qBox" aria-label="Spørg om en vare" hidden>
+      <button type="button" class="link qa-open" id="qOpen" aria-expanded="false" aria-controls="qForm">Spørg om en vare</button>
+      <form class="qa-form" id="qForm" autocomplete="off" novalidate hidden>
+        <label class="vh" for="qText">Hvad leder du efter?</label>
+        <textarea id="qText" rows="3" maxlength="300" placeholder="Hvad leder du efter?"></textarea>
+        <div class="qa-row"><span class="meta" id="qCount" aria-live="polite"></span><button class="btn small" id="qSubmit" type="submit">Spørg</button></div>
+        <p class="msg" id="qMsg" role="alert" hidden></p>
+      </form>
+      <div id="qList" aria-live="polite"></div>
+    </section>
+
     <nav class="lists" id="listsBox" aria-label="Lister" hidden>
       <div class="chips" id="chips"></div>
       <form class="listform" id="listForm" autocomplete="off" novalidate hidden>
