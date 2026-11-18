@@ -1314,7 +1314,7 @@ let base;
 
     // status lines
     {
-      const today = new Date().toISOString(), yest = new Date(Date.now() - 36 * 3600e3).toISOString(), old = "2026-10-03T10:00:00Z";
+      const today = new Date().toISOString(), yest = new Date(Date.now() - 24 * 3600e3).toISOString(), old = "2026-10-03T10:00:00Z";
       const p = await open({ products: [row("test-sony")], lists: LISTS, label: "wish-lines", imports: [
         imp("a", { created_at: "2026-11-16T09:00:00Z" }),
         imp("b", { status: "done", found: 12, added: 12, created_at: "2026-11-16T08:00:00Z", title: "Bastians ønskeliste", synced_at: today, sync_fails: 0, note: "De er lagt på en ny liste, Fødselsdagsønsker." }),
