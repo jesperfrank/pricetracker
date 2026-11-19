@@ -812,10 +812,11 @@
     var n = o && typeof o.note === "string" ? o.note : "";
     return /(^| · )pris fra i går$/.test(n) ? "pris fra i går" : /(^| · )pris fra tidligere i dag$/.test(n) ? "pris fra tidligere i dag" : "";
   }
-  // A shop the job found by searching the web (extra_state[link].origin === "search") gets a quiet tag; the agent's and the person's links nothing.
+  // A shop the job found itself gets a quiet tag: by searching the web (extra_state[link].origin === "search") or in the manufacturer's own web
+  // shop (origin "brand"). The agent's and the person's links nothing.
   function xFound(p, x) {
     var st = p.extraState && typeof p.extraState[x.raw] === "object" && p.extraState[x.raw] ? p.extraState[x.raw] : null;
-    return !!st && st.origin === "search";
+    return st && st.origin === "search" ? "fundet ved søgning" : st && st.origin === "brand" ? "producentens butik" : "";
   }
   var X_MAX = 5, X_ERRORS = ["Den butik følges allerede.", "Du kan højst følge 5 ekstra butikker.", "Brug et link til varens egen side i butikken."];
   function xHost(u) { try { return new URL(u).hostname.toLowerCase().replace(/^www\./, ""); } catch (e) { return ""; } }
@@ -825,7 +826,7 @@
     var id = p._id, msg = '<span class="meta" data-rowmsg="x-' + esc(id) + '">' + esc(state.rowMsg["x-" + id] || "") + '</span>';
     return '<div class="xshops"><div class="meta">Butikker, vi følger</div>' + l.map(function (x) {
       var why = xState(p, x);
-      return '<div class="foot"><span><a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer">' + esc(x.host) + '</a>' + (xFound(p, x) ? ' <span class="meta xfound">fundet ved søgning</span>' : '') + (why ? ' <span class="meta xwhy">' + esc(why) + '</span>' : '') + '</span>' +
+      return '<div class="foot"><span><a href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer">' + esc(x.host) + '</a>' + (xFound(p, x) ? ' <span class="meta xfound">' + xFound(p, x) + '</span>' : '') + (why ? ' <span class="meta xwhy">' + esc(why) + '</span>' : '') + '</span>' +
         (ed ? '<button type="button" class="link warn" data-act="x-rm" data-id="' + esc(id) + '" data-i="' + x.i + '">Fjern</button>' : '') + '</div>';
     }).join("") + (ed ? '<form class="edit xadd" data-xadd="' + esc(id) + '" novalidate><label class="vh" for="xa-' + esc(id) + '">Link til varen i en butik</label>' +
       '<input class="wide" type="url" id="xa-' + esc(id) + '" maxlength="500" placeholder="Link til varen i en butik" autocomplete="off">' +

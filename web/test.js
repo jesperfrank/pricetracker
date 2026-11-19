@@ -2390,7 +2390,7 @@ let base;
     {
       const p = await open({ products: [pj("p1", null), noCol, pj("p2", [MFR], { extra_state: { [MFR]: { seen: true, fails: 0, at: ago(0), offer: { store: "Roborock", price: 4050, inStock: true, note: null, at: ago(0) } } } }), pj("p3", null, { user_id: "o9", list_id: "lx" }),
         pj("p4", [MFR], { user_id: "o9", list_id: "lx" }), stale, single, pj("p7", null, { compare_state: "wanted", compare_at: ago(0.01) }), pj("p8", [MFR, XB, XC, XD, XE]), pj("p9", [XB], { extra_state: { [XB]: { why: "noprice", seen: false, fails: 1 } } }),
-        pj("p10", [MFR, XB, XC], { extra_state: { [MFR]: { origin: "search", seen: true, fails: 0 }, [XB]: { origin: "hand", seen: true }, [XC]: { seen: true, fails: 0 } } })],
+        pj("p10", [MFR, XB, XC, XD], { extra_state: { [MFR]: { origin: "search", seen: true, fails: 0 }, [XB]: { origin: "hand", seen: true }, [XC]: { seen: true, fails: 0 }, [XD]: { origin: "brand", seen: true, fails: 0 } } })],
         lists: [{ id: "lx", user_id: "o9", name: "Delt" }], members: [{ list_id: "lx", user_id: "u1" }], label: "extra-pj" });
       await p.waitForSelector(".item");
       for (const id of ["p1", "p0", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10"]) await p.click('.head[data-id="' + id + '"]');
@@ -2409,8 +2409,8 @@ let base;
       check("pj extras: each link that gives no price says why, short and muted: kunne ikke læses, anden vare?; a stale offer 'pris fra i går'; nothing else is shown (ingen pris is tested below)",
         JSON.stringify(states) === JSON.stringify([["butik-b.dk", "kunne ikke læses"], ["shop.butik-c.dk", "pris fra i går"], ["butik-d.dk", "anden vare?"], ["butik-e.dk", ""]]), JSON.stringify(states));
       const found = await body(p, "p10").locator(".xshops .foot").evaluateAll(fs => fs.map(f => [f.querySelector("a").textContent, (f.querySelector(".xfound") || {}).textContent || ""]));
-      check("pj extras: a shop the job found by searching has the quiet tag 'fundet ved søgning'; hand-added, agent-found and unknown origin show nothing new", JSON.stringify(found) === JSON.stringify([["roborock.com", "fundet ved søgning"], ["butik-b.dk", ""], ["shop.butik-c.dk", ""]])
-        && (await body(p, "p10").locator(".xfound").getAttribute("class")).indexOf("meta") !== -1 && !/[—!]/.test(await body(p, "p10").locator(".xshops").innerText()), JSON.stringify(found));
+      check("pj extras: a shop the job found by searching has the quiet tag 'fundet ved søgning', the manufacturer's own shop 'producentens butik'; hand-added, agent-found and unknown origin show nothing new", JSON.stringify(found) === JSON.stringify([["roborock.com", "fundet ved søgning"], ["butik-b.dk", ""], ["shop.butik-c.dk", ""], ["butik-d.dk", "producentens butik"]])
+        && (await body(p, "p10").locator(".xfound").first().getAttribute("class")).indexOf("meta") !== -1 && !/[—!]/.test(await body(p, "p10").locator(".xshops").innerText()), JSON.stringify(found));
       check("pj extras: ... and no tag anywhere else (no tag on the other products, no new text when a search found nothing)", (await body(p, "p5").locator(".xfound").count()) === 0 && (await body(p, "p2").locator(".xfound").count()) === 0 && (await body(p, "p1").locator(".xfound").count()) === 0);
       check("pj extras: nothing the job wrote is shown as html, no em dash, no exclamation mark", !/onerror|<img/.test(await m5.innerHTML()) && !/[—!]/.test(await m5.innerText()));
       // the add: a valid link is appended, one write, nothing else

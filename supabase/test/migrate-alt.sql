@@ -67,7 +67,7 @@ select t.chk('migrated: the agent lists both (oldest first), answers one, fails 
   (select array_agg(title order by requested_at) from public.ai_alt_list()) = array['Mors ting', 'Fars ting']
   and (select price = 90 and normal_price = 120 and host = 'shop.example.dk' from public.ai_alt_list() where title = 'Mors ting'));
 select t.chk('migrated: ... answer', public.ai_alt_set('00000000-0000-0000-0000-0000000000f1',
-  '[{"kind":"similar","name":"Lignende","url":"https://shop.example.dk/l","store":"Shop","price":99,"why":"Næsten det samme."}]'));
+  '[{"kind":"similar","name":"Lignende","url":"https://prisjagt.dk/product.php?p=777","store":"Shop","price":99,"why":"Næsten det samme."}]'));
 select t.chk('migrated: ... fail', public.ai_alt_fail('00000000-0000-0000-0000-0000000000f2', 'Ingen fundet.'));
 reset role;
 

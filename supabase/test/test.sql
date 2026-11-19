@@ -1549,7 +1549,7 @@ create function t.pend(n text) returns void language sql security definer as $$
   update public.products set alt_requested_at = now() - interval '1 hour', alt_done_at = null, alternatives = null, alt_note = null, active = true, status = 'tracking' where name = n $$;
 grant execute on function t.pend(text) to public;
 create function t.base() returns jsonb language sql as $$
-  select '{"kind":"deal","name":"Bose QC 45","url":"https://shop.example.dk/bose?id=1","store":"Shop","price":1999,"was":2499,"why":"Rabat på 20 % i dag."}'::jsonb $$;
+  select '{"kind":"deal","name":"Bose QC 45","url":"https://prisjagt.dk/product.php?p=16373878","store":"Shop","price":1999,"was":2499,"why":"Rabat på 20 % i dag."}'::jsonb $$;
 create function t.items(patch jsonb, drop_key text default null) returns jsonb language sql as $$
   select jsonb_build_array((t.base() || coalesce(patch, '{}'::jsonb)) - coalesce(drop_key, '')) $$;
 create function t.aset(items jsonb) returns text language plpgsql as $$
@@ -1578,6 +1578,15 @@ select t.chk('ai: set: url must be https like products.source_url (no http, port
   and t.aset(t.items('{"url":"https://shop.dk/a b"}')) like '%url is not valid' and t.aset(t.items('{"url":"javascript:alert(1)"}')) like '%url is not valid'
   and t.aset(t.items(jsonb_build_object('url', 'https://shop.dk/' || repeat('a', 485)))) like '%url is not valid' and t.aset(t.items('{"url":""}')) like '%url is not valid'
   and t.aset(t.items('{"url":7}')) like '%url must be a string');
+select t.chk('ai: set: the url must be exactly a prisjagt.dk product page (a shop link, another prisjagt page, an extra query, another host that starts with prisjagt.dk, 19 digits, no digits)',
+  t.aset(t.items('{"url":"https://shop.example.dk/bose?id=1"}')) like '22023%url is not valid' and t.aset(t.items('{"url":"https://www.elgiganten.dk/product/1"}')) like '%url is not valid'
+  and t.aset(t.items('{"url":"https://prisjagt.dk/"}')) like '%url is not valid' and t.aset(t.items('{"url":"https://prisjagt.dk/search?q=x"}')) like '%url is not valid'
+  and t.aset(t.items('{"url":"https://prisjagt.dk/product.php?p=1&x=2"}')) like '%url is not valid' and t.aset(t.items('{"url":"https://prisjagt.dk/product.php?p=1#a"}')) like '%url is not valid'
+  and t.aset(t.items('{"url":"https://prisjagt.dk.evil.dk/product.php?p=1"}')) like '%url is not valid' and t.aset(t.items('{"url":"https://evil.dk/https://prisjagt.dk/product.php?p=1"}')) like '%url is not valid'
+  and t.aset(t.items('{"url":"https://prisjagt.dk/product.php?p=abc"}')) like '%url is not valid' and t.aset(t.items('{"url":"https://prisjagt.dk/product.php?p="}')) like '%url is not valid'
+  and t.aset(t.items(jsonb_build_object('url', 'https://prisjagt.dk/product.php?p=' || repeat('1', 19)))) like '%url is not valid'
+  and t.aset(t.items('{"url":"http://prisjagt.dk/product.php?p=1"}')) like '%url is not valid' and t.aset(t.items('{"url":"https://prisjagt.dk:8443/product.php?p=1"}')) like '%url is not valid'
+  and t.aset(t.items('{"url":"https://prisjagt.dk/Product.php?p=1"}')) like '%url is not valid' and t.aset(t.items('{"url":"https://prisjagt.dk/product.php?p=1 x"}')) like '%url is not valid');
 select t.chk('ai: set: text with control characters, newlines, tabs, angle brackets or invisible direction marks is refused in every text field', (
   select bool_and(t.aset(t.items(jsonb_build_object(f, v))) like '22023%')
     from (values ('name'), ('store'), ('why'), ('url')) a(f),
@@ -1594,7 +1603,7 @@ select t.chk('ai: set: nothing was stored by any refused call', t.q($$select (al
 select t.chk('ai: set: a good answer returns true', t.aset(t.items('{"name":"  Bose QC 45  ","price":1999.456,"why":" Rabat. "}')) = 'true');
 reset role;
 select t.chk('ai: set: stored as a cleaned copy (trimmed, rounded), alt_done_at = now, alt_note null',
-  (select alternatives = '[{"kind":"deal","name":"Bose QC 45","url":"https://shop.example.dk/bose?id=1","store":"Shop","price":1999.46,"was":2499,"why":"Rabat."}]'::jsonb
+  (select alternatives = '[{"kind":"deal","name":"Bose QC 45","url":"https://prisjagt.dk/product.php?p=16373878","store":"Shop","price":1999.46,"was":2499,"why":"Rabat."}]'::jsonb
       and abs(extract(epoch from now() - alt_done_at)) < 60 and alt_note is null and alt_done_at >= alt_requested_at from public.products where name = 'alt1'));
 set role anon;
 select t.chk('ai: set: the answer is given once: no longer pending, so false and nothing changes', t.aset(t.items('{"name":"Anden"}')) = 'false'
@@ -1603,11 +1612,11 @@ select t.chk('ai: ... and it is gone from the list', (select count(*) = 0 from p
 reset role;
 select t.pend('alt1');
 set role anon;
-select t.chk('ai: set: 6 items, similar without was, was null is dropped, 500-character url, 120-character name, extreme prices',
-  t.aset((select jsonb_agg(t.base() || jsonb_build_object('kind', 'similar', 'was', null, 'name', repeat('n', 120), 'price', 0.01, 'url', 'https://shop.dk/' || repeat('a', 484)) ) from generate_series(1, 6))) = 'true');
+select t.chk('ai: set: 6 items, similar without was, was null is dropped, www. dropped from the url, 120-character name, extreme prices',
+  t.aset((select jsonb_agg(t.base() || jsonb_build_object('kind', 'similar', 'was', null, 'name', repeat('n', 120), 'price', 0.01, 'url', 'https://www.prisjagt.dk/product.php?p=' || repeat('9', 18)) ) from generate_series(1, 6))) = 'true');
 reset role;
-select t.chk('ai: ... stored with 6 items, no was key, the new answer replaced the old',
-  (select jsonb_array_length(alternatives) = 6 and not (alternatives -> 0 ? 'was') and alternatives -> 0 ->> 'kind' = 'similar' and char_length(alternatives -> 0 ->> 'url') = 500 from public.products where name = 'alt1'));
+select t.chk('ai: ... stored with 6 items, no was key, the url without www., the new answer replaced the old',
+  (select jsonb_array_length(alternatives) = 6 and not (alternatives -> 0 ? 'was') and alternatives -> 0 ->> 'kind' = 'similar' and alternatives -> 0 ->> 'url' = 'https://prisjagt.dk/product.php?p=' || repeat('9', 18) from public.products where name = 'alt1'));
 select t.pend('alt1');
 set role anon;
 select t.chk('ai: set: price 9999999.99 with was above price is not possible, below the limit is fine', t.aset(t.items('{"price":9999999.99,"was":9999999.995}')) like '%was must be above price%'
@@ -2981,6 +2990,12 @@ select t.chk('ai_ask: set: url must be https like products.source_url (no http, 
   and t.kset('Svar.', t.picks('{"url":"https://shop.dk/a b"}')) like '%url is not valid' and t.kset('Svar.', t.picks('{"url":"javascript:alert(1)"}')) like '%url is not valid'
   and t.kset('Svar.', t.picks(jsonb_build_object('url', 'https://shop.dk/' || repeat('a', 485)))) like '%url is not valid' and t.kset('Svar.', t.picks('{"url":""}')) like '%url is not valid'
   and t.kset('Svar.', t.picks('{"url":7}')) like '%url must be a string');
+select t.chk('ai_ask: set: the url must be exactly a prisjagt.dk product page (a shop link, another prisjagt page, an extra query, a look-alike host, 19 digits, no digits)',
+  t.kset('Svar.', t.picks('{"url":"https://shop.example.dk/x?id=1"}')) like '22023%url is not valid' and t.kset('Svar.', t.picks('{"url":"https://prisjagt.dk/"}')) like '%url is not valid'
+  and t.kset('Svar.', t.picks('{"url":"https://prisjagt.dk/product.php?p=1&x=2"}')) like '%url is not valid' and t.kset('Svar.', t.picks('{"url":"https://prisjagt.dk.evil.dk/product.php?p=1"}')) like '%url is not valid'
+  and t.kset('Svar.', t.picks('{"url":"https://prisjagt.dk/product.php?p=abc"}')) like '%url is not valid' and t.kset('Svar.', t.picks(jsonb_build_object('url', 'https://prisjagt.dk/product.php?p=' || repeat('1', 19)))) like '%url is not valid'
+  and t.kset('Svar.', t.picks('{"url":"http://prisjagt.dk/product.php?p=1"}')) like '%url is not valid' and t.kset('Svar.', t.picks('{"url":"https://prisjagt.dk/search?q=x"}')) like '%url is not valid'
+  and t.kset('Svar.', t.picks('{"url":"https://prisjagt.dk/product.php?p=1#a"}')) like '%url is not valid');
 select t.chk('ai_ask: set: text with control characters, newlines, tabs, angle brackets or invisible direction marks is refused in every pick field', (
   select bool_and(t.kset('Svar.', t.picks(jsonb_build_object(f, v))) like '22023%')
     from (values ('name'), ('store'), ('why'), ('url')) a(f),
@@ -2997,9 +3012,9 @@ select t.chk('ai_ask: set: unknown id and a question that is not pending: false'
 -- a good answer, with a question that has waited more than 6 hours (it can still be answered)
 select t.chk('ai_ask: set: a good answer returns true (also for a question that waited more than 6 hours)',
   (select count(*) = 1 from public.ai_ask_list() where question = 'Sæt-test spørgsmål') and
-  t.kset('  Roborock passer bedst til hundehår.  ', t.picks('{"name":"  Roborock Q Revo  ","price":2999.456,"why":" Børster mod hår. "}')) = 'true');
+  t.kset('  Roborock passer bedst til hundehår.  ', t.picks('{"name":"  Roborock Q Revo  ","price":2999.456,"why":" Børster mod hår. ","url":"https://www.prisjagt.dk/product.php?p=12345"}')) = 'true');
 reset role;
-select t.chk('ai_ask: set: stored as a cleaned copy (trimmed, rounded), status done, answered_at now, note null',
+select t.chk('ai_ask: set: stored as a cleaned copy (trimmed, rounded, www. dropped from the url), status done, answered_at now, note null',
   (select status = 'done' and summary = 'Roborock passer bedst til hundehår.' and note is null and abs(extract(epoch from now() - answered_at)) < 60
       and picks = '[{"name":"Roborock Q Revo","url":"https://prisjagt.dk/product.php?p=12345","store":"Elgiganten","price":2999.46,"was":3999,"why":"Børster mod hår."}]'::jsonb
     from public.questions where question = 'Sæt-test spørgsmål'));
@@ -3292,6 +3307,93 @@ select t.chk('search: RLS is on for the counter and nobody but the service role 
   and has_table_privilege('service_role', 'public.discover_usage', 'update'));
 delete from public.products where name in ('sok-pj', 'sok-ny');
 delete from public.discover_usage;
+
+-- --- "Producentens butik": brand_shops is the job's own table
+select t.chk('brand: the table exists, RLS is on, nobody but the service role has rights',
+  to_regclass('public.brand_shops') is not null and (select relrowsecurity from pg_class where oid = 'public.brand_shops'::regclass)
+  and not has_table_privilege('authenticated', 'public.brand_shops', 'select') and not has_table_privilege('anon', 'public.brand_shops', 'select')
+  and not has_table_privilege('authenticated', 'public.brand_shops', 'insert') and not has_table_privilege('anon', 'public.brand_shops', 'update')
+  and has_table_privilege('service_role', 'public.brand_shops', 'insert') and has_table_privilege('service_role', 'public.brand_shops', 'update'));
+set role authenticated;
+select t.asA();
+select t.chk('brand: a signed-in person cannot read or write it', t.try($$select * from public.brand_shops$$) = 'denied' and t.try($$insert into public.brand_shops (brand, status) values ('x', 'none')$$) = 'denied');
+reset role;
+set role anon;
+select t.chk('brand: ... nor anon', t.try($$select * from public.brand_shops$$) = 'denied');
+reset role;
+set role service_role;
+select t.chk('brand: the service role keeps one row per brand: ok with a base and sitemaps, none, refused; the checks hold',
+  t.try($$insert into public.brand_shops (brand, base, sitemaps, robots, status) values ('roborock', 'https://dk.roborock.com', '["https://dk.roborock.com/sitemap.xml"]', '[[false, "/cart"]]', 'ok')$$) = 'ok'
+  and t.try($$insert into public.brand_shops (brand, status) values ('vitamix', 'none')$$) = 'ok'
+  and t.try($$insert into public.brand_shops (brand, status) values ('jbl', 'refused')$$) = 'ok'
+  and t.try($$insert into public.brand_shops (brand, status) values ('roborock', 'none')$$) = 'unique'
+  and t.try($$insert into public.brand_shops (brand, status) values ('x', 'maybe')$$) = 'check'
+  and t.try($$insert into public.brand_shops (brand, status) values ('', 'none')$$) = 'check'
+  and t.try($$insert into public.brand_shops (brand, sitemaps, status) values ('y', '{}', 'none')$$) = 'check'
+  and t.try($$insert into public.brand_shops (brand, status) values (null, 'none')$$) = 'notnull'
+  and t.try($$update public.brand_shops set status = 'none', base = null, checked_at = now() where brand = 'roborock'$$) = 'ok');
+reset role;
+delete from public.brand_shops;
+
+-- --- owner diagnostics: diag_products()
+insert into public.products (id, user_id, name, source_url, target_type, target_value, status, title, requirements, offers, verdict, check_note, last_checked, notified_price, notified_at, compare_state, compare_tries,
+                             extra_urls, extra_state, discover_state, created_at) values
+  ('00000000-0000-0000-0000-00000000d601', '00000000-0000-0000-0000-0000000000a1', 'diag-mor', 'https://www.prisjagt.dk/product.php?p=16373878?utm=hemmelig', 'price', 4100, 'tracking', 'Roborock Saros 10R', 'hvid, 256 GB',
+   '[{"store":"Elgiganten","price":5500,"inStock":true,"url":"https://prisjagt.dk/go-to-shop/1"},{"store":"Roborock","price":4049,"inStock":false,"readAt":"2026-11-18T10:00:00Z"},{"store":"Power","price":5650,"inStock":true},{"store":"Proshop","price":5600,"inStock":true},{"store":"Komplett","price":5700,"inStock":true},{"store":"Coolshop","price":5800,"inStock":true},{"store":"Lager","price":4000}]',
+   '{"level":"good","text":"x"}', 'noget', '2026-11-19T10:00:00Z', 4049, '2026-11-19T10:00:00Z', 'none', 2,
+   '["https://dk.roborock.com/products/roborock-saros-10r?utm_source=hemmelig","https://www.kampagne.dk/p/1"]',
+   '{"https://dk.roborock.com/products/roborock-saros-10r?utm_source=hemmelig":{"origin":"brand","seen":true,"fails":0,"offer":{"store":"Roborock","price":4049,"inStock":true,"at":"2026-11-19T10:00:00Z"}},"https://www.kampagne.dk/p/1":{"why":"err","fails":2}}',
+   '{"at":"2026-11-19T10:00:00Z","found":0,"added":1,"note":"ny butik","brand":{"brand":"roborock","shop":"dk.roborock.com","result":"added"}}', '2026-11-19 09:00'),
+  ('00000000-0000-0000-0000-00000000d602', '00000000-0000-0000-0000-0000000000b2', 'diag-far', 'https://shop.example.dk/hemmelig', 'price', 5, 'tracking', 'Fars hemmelige ting', 'krav', '[{"store":"X","price":9,"inStock":true}]', null, null, null, null, null, null, 0, null, null, null, '2026-11-19 11:00'),
+  ('00000000-0000-0000-0000-00000000d603', '00000000-0000-0000-0000-0000000000a1', 'diag-mor-ny', 'https://shop.example.dk/a/b/c?q=1', 'auto', null, 'pending', null, null, null, null, null, null, null, null, null, 0, null, null, null, '2026-11-19 12:00');
+create function t.mcnt() returns bigint language sql security definer as $$ select count(*) from public.products p join auth.users u on u.id = p.user_id where u.email = 'mor@familie.dk' $$;
+grant execute on function t.mcnt() to public;
+create function t.dcnt() returns text language plpgsql as $$ begin return (select count(*) from public.diag_products())::text; exception when others then return sqlerrm; end $$;
+grant execute on function t.dcnt() to public;
+select t.chk('diag: without the token nothing is returned: none, empty, wrong, a prefix (anon and signed in), with the resolver''s error', (
+  select bool_and(r) from (
+    select t.dcnt() = 'resolver: invalid or missing token' as r from (select t.tok(null)) x union all
+    select t.dcnt() = 'resolver: invalid or missing token' from (select t.tok('')) x union all
+    select t.dcnt() = 'resolver: invalid or missing token' from (select t.tok('fel')) x union all
+    select t.dcnt() = 'resolver: invalid or missing token' from (select t.tok(repeat('a', 63))) x) y));
+set role anon;
+select t.tok(null);
+select t.chk('diag: anon without a token: 42501', t.err($$select * from public.diag_products()$$) = 'resolver: invalid or missing token');
+do $$ begin perform public.diag_products(); raise exception 'no error'; exception when sqlstate '42501' then null; end $$;
+reset role;
+set role authenticated;
+select t.asA();
+select t.chk('diag: ... and a signed-in administrator without the token', t.dcnt() = 'resolver: invalid or missing token');
+reset role;
+select t.tok(repeat('a', 64));
+set role anon;
+select t.chk('diag: with the token only the administrator''s own products are returned, newest first; a non-administrator''s never',
+  (select array_agg(name order by ord) from (select name, row_number() over () as ord from public.diag_products()) z where name like 'diag-%') = array['diag-mor-ny', 'diag-mor']
+  and (select count(*) = 0 from public.diag_products() where name = 'diag-far' or title = 'Fars hemmelige ting')
+  and (select count(*) = t.mcnt() from public.diag_products()));
+select t.chk('diag: the shape: host without path, lowest in-stock price, the 5 cheapest offers with stock and stale, the shops, the states, no query strings',
+  (select host = 'prisjagt.dk' and lowest = 5500 and target_type = 'price' and target_value = 4100 and status = 'tracking' and check_note = 'noget' and title = 'Roborock Saros 10R'
+      and cheapest = '[{"store":"Lager","price":4000,"stock":false,"stale":false},{"store":"Roborock","price":4049,"stock":false,"stale":true},{"store":"Elgiganten","price":5500,"stock":true,"stale":false},{"store":"Proshop","price":5600,"stock":true,"stale":false},{"store":"Power","price":5650,"stock":true,"stale":false}]'::jsonb
+      and shops = '[{"host":"dk.roborock.com","origin":"brand","why":null,"price":4049,"seen":true},{"host":"kampagne.dk","origin":null,"why":"err","price":null,"seen":false}]'::jsonb
+      and compare_state = 'none' and compare_tries = 2 and discover_state -> 'brand' ->> 'result' = 'added' and requirements = 'hvid, 256 GB' and not has_name_options
+      and verdict_level = 'good' and notified_price = 4049 and notified_at is not null and bought_at is null and active
+    from public.diag_products() where name = 'diag-mor'));
+select t.chk('diag: a product with nothing read yet gives empty lists and nulls; no user id or e-mail column exists',
+  (select host = 'shop.example.dk' and cheapest = '[]'::jsonb and shops = '[]'::jsonb and lowest is null and verdict_level is null and discover_state is null and title is null from public.diag_products() where name = 'diag-mor-ny')
+  and not exists (select 1 from information_schema.routines r, information_schema.parameters q where r.routine_name = 'diag_products' and q.specific_name = r.specific_name and q.parameter_mode = 'OUT' and q.parameter_name ~* '(user|mail)'));
+select t.chk('diag: the secret text of the links (query strings) appears nowhere in the answer', (select count(*) = 0 from public.diag_products() d where d::text like '%hemmelig%' and d.name <> 'diag-mor' or (d.name = 'diag-mor' and d::text like '%utm_source%')));
+reset role;
+set session_replication_role = replica;      -- the cap of 40 products per person is a trigger: left out for this bulk insert only
+insert into public.products (user_id, name, target_type, target_value, created_at)
+  select '00000000-0000-0000-0000-0000000000a1', 'diag-bulk-' || g, 'price', 10, '2026-11-18'::timestamptz + g * interval '1 minute' from generate_series(1, 120) g;
+set session_replication_role = origin;
+set role anon;
+select t.chk('diag: at most 100 rows however many there are, the newest first', (select count(*) = 100 from public.diag_products()) and (select name = 'diag-mor-ny' from public.diag_products() limit 1));
+reset role;
+select t.chk('diag: the grants are the resolver''s: anon and authenticated may call it, the token decides',
+  has_function_privilege('anon', 'public.diag_products()', 'execute') and has_function_privilege('authenticated', 'public.diag_products()', 'execute'));
+delete from public.products where name like 'diag-%';
+select t.tok(null);
 
 -- 12. final whole-file run on the populated database
 \o /dev/null

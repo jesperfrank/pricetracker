@@ -7,6 +7,7 @@
 // Titles and urls of the wishes are untrusted text: they only travel as JSON values (never into a query string or markup).
 
 const PJ = require('./prisjagt');
+const { safe } = require('./log');
 const SHOP = require('./shop');
 
 const TIMEOUT_MS = 20000;
@@ -251,7 +252,7 @@ async function pickList(sb, imp, title, log) {
     const id = Array.isArray(made) && made[0] && made[0].id;
     if (id) return { listId: id, name, note: ' De er lagt på en ny liste, ' + name + '.' };
   } catch (e) {
-    log('  Import: kunne ikke oprette listen ' + name + ': ' + (e && e.message || e));
+    log('  Import: kunne ikke oprette listen: ' + safe(e));
     try { const again = same(await find()); if (again) return { listId: again.id, name: again.name, note: ' De er lagt på listen ' + again.name + '.' }; } catch (e2) { /* fall through */ }
   }
   return { listId: null, name: null, note: '' };
@@ -346,7 +347,7 @@ async function importOne(imp, deps) {
   let listNote = '', listId = null;
   if (take.length) {
     try { const pl = await addProducts(sb, imp, take, listData.title, log); listId = pl.listId; listNote = pl.note; }
-    catch (e) { log('  Import ' + imp.id + ': kunne ikke gemme varerne: ' + (e && e.message || e)); return result('error', NOTE.saveFail, found, 0); }
+    catch (e) { log('  Import ' + imp.id + ': kunne ikke gemme varerne: ' + safe(e)); return result('error', NOTE.saveFail, found, 0); }
   }
 
   const parts = [];
@@ -398,7 +399,7 @@ async function syncOne(imp, deps) {
     if (take.length) {
       let pl;
       try { pl = await addProducts(sb, imp, take, listData.title, log); }
-      catch (e) { log('  Opdatering ' + imp.id + ': kunne ikke gemme varerne: ' + (e && e.message || e)); return { ok: false, kind: 'save' }; }
+      catch (e) { log('  Opdatering ' + imp.id + ': kunne ikke gemme varerne: ' + safe(e)); return { ok: false, kind: 'save' }; }
       added = take.length;
       if (!imp.list_id && pl.listId) patch.list_id = pl.listId;
     }
@@ -431,7 +432,7 @@ async function runImports(ctx) {
     rows = await ctx.sb.select('imports', 'select=id,user_id,list_id,url&status=eq.pending&order=created_at.asc&limit=' + MAX_PER_RUN);
   } catch (e) {
     if (isMissingTable(e)) { stats.missing = true; return stats; }
-    log('Ønskelister: kunne ikke læse importer: ' + (e && e.message || e));
+    log('Ønskelister: kunne ikke læse importer: ' + safe(e));
     return stats;
   }
   const http = makeHttp({ fetch: ctx.fetch, sleep: ctx.sleep, pauseMs: ctx.pauseMs, timeoutMs: ctx.timeoutMs, deadlineAt: ctx.deadlineAt });
@@ -444,7 +445,7 @@ async function runImports(ctx) {
     try { res = await importOne(imp, deps); }
     catch (e) {
       if (e instanceof ImportError && e.kind === 'deadline') { log('Ønskelister: tidsgrænse, resten venter til næste kørsel.'); outOfTime = true; break; }
-      log('  Import ' + imp.id + ': ' + (e && e.message || e));      // a database read failed: the import stays pending, tried again next run
+      log('  Import ' + imp.id + ': ' + safe(e));      // a database read failed: the import stays pending, tried again next run
       continue;
     }
     const body = { status: res.status, note: res.note || null, found: res.found, added: res.added, done_at: nowIso() };
@@ -458,9 +459,9 @@ async function runImports(ctx) {
         if (full === body || !/42703|PGRST204|column/i.test(String(e && (e.body || e.message) || ''))) throw e;
         await ctx.sb.patch('imports', filter, body);
       }
-    } catch (e) { log('  Import ' + imp.id + ': kunne ikke gemme resultatet: ' + (e && e.message || e)); continue; }
+    } catch (e) { log('  Import ' + imp.id + ': kunne ikke gemme resultatet: ' + safe(e)); continue; }
     if (res.status === 'done') { stats.done++; stats.added += res.added || 0; } else stats.error++;
-    log('  Ønskeliste: ' + res.status + (res.added != null ? ', ' + res.added + ' tilføjet' : '') + (res.note ? ' (' + res.note + ')' : ''));
+    log('  Ønskeliste: ' + res.status + (res.added != null ? ', ' + res.added + ' tilføjet' : ''));   // the note names the person's list: not logged
   }
   if (!outOfTime) await runSyncs(ctx, deps, stats, nowIso);
   return stats;
@@ -472,7 +473,7 @@ async function runSyncs(ctx, deps, stats, nowIso) {
   let rows;
   try {
     rows = await sb.select('imports', 'select=id,user_id,list_id,url,seen,sync_fails,synced_at,title,added&status=eq.done&order=synced_at.asc.nullsfirst&limit=50');
-  } catch (e) { log('Ønskelister: kunne ikke læse opdateringer: ' + (e && e.message || e)); return; }
+  } catch (e) { log('Ønskelister: kunne ikke læse opdateringer: ' + safe(e)); return; }
   const due = (Array.isArray(rows) ? rows : []).filter((r) => {
     const at = r.synced_at ? Date.parse(r.synced_at) : NaN;
     return !isFinite(at) || now - at >= SYNC_EVERY_MS;
@@ -482,7 +483,7 @@ async function runSyncs(ctx, deps, stats, nowIso) {
     try { res = await syncOne(imp, deps); }
     catch (e) {
       if (e instanceof ImportError && e.kind === 'deadline') { log('Ønskelister: tidsgrænse, resten opdateres næste gang.'); return; }
-      log('  Opdatering ' + imp.id + ': ' + (e && e.message || e));
+      log('  Opdatering ' + imp.id + ': ' + safe(e));
       res = { ok: false, kind: 'save' };
     }
     stats.synced++;
@@ -498,7 +499,7 @@ async function runSyncs(ctx, deps, stats, nowIso) {
       stats.syncFailed++;
     }
     try { await sb.patch('imports', filter, body); }
-    catch (e) { log('  Opdatering ' + imp.id + ': kunne ikke gemme: ' + (e && e.message || e)); continue; }
+    catch (e) { log('  Opdatering ' + imp.id + ': kunne ikke gemme: ' + safe(e)); continue; }
     if (res.ok) stats.syncAdded += res.added || 0;
     log('  Ønskeliste fulgt: ' + (res.ok ? res.added + ' nye' : 'kunne ikke læses (' + res.kind + ')'));
   }

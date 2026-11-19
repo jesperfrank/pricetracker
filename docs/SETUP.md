@@ -141,9 +141,13 @@ Jobbet kan selv søge efter varen i danske butikker, uden AI. Det bruger Brave S
 1. Opret en konto på [brave.com/search/api](https://brave.com/search/api/) og vælg planen til websøgning (Search). Der følger et gratis kredit med; tjek hos Brave, hvad det rækker til og om der skal et kort på. Opret en API-nøgle under **API Keys**.
 2. Repoet > **Settings** > **Secrets and variables** > **Actions** > **New repository secret**: navn `BRAVE_API_KEY`, værdien er nøglen.
 3. Loftet er 800 kald pr. kalendermåned (konstanten `MONTHLY_CAP` i `job/lib/discover.js`). Tælleren ligger i tabellen `discover_usage`; når loftet er nået, springer jobbet søgningen over til næste måned og skriver det i loggen. Som tommelfinger er 20 varer cirka 260 kald om måneden, og 200 varer når loftet på cirka 3 uger i hver måned, så de ældste varer søges ikke hver uge.
-4. Uden nøgle virker alt andet som før; loggen siger kun "Søgning: ingen nøgle." Afviser Brave nøglen (401/403) eller kvoten er brugt (402/429), stopper søgningen for den kørsel, og loggen siger det. Nøglen skrives aldrig i loggen.
+4. Uden nøgle virker alt andet som før (også opslaget i producentens butik, se nedenfor); oversigten siger kun "ingen søgenøgle" som en kort bemærkning. Afviser Brave nøglen (401/403) eller kvoten er brugt (402/429), stopper søgningen for den kørsel, og loggen siger det. Nøglen skrives aldrig i loggen.
 
 Kør `supabase/schema.sql` igen, så databasen får feltet `discover_state` og tabellen `discover_usage`. Adressen, headeren og parametrene til Brave står samlet øverst i `job/lib/discover.js` (`BRAVE`).
+
+### Producentens egen butik
+
+Uden nøgle og uden AI slår jobbet også varen op i producentens egen danske webshop (fx dk.roborock.com), som en søgning fra USA aldrig viser. Mærket er varens første ord (eller de første to eller tre sammen: "Shaping New Tomorrow"). Butikkens adresse findes i en lille liste over butikker, der er prøvet (konstanten `ALIAS` i `job/lib/brandshop.js`), ellers gættes den. Jobbet læser først `robots.txt` og retter sig efter den, finder varens side i butikkens sitemap og tjekker siden som en anden butik (pris i kroner, sidens eget varenavn, prisen må ikke ligne en anden vare). Butikken føjes til varens ekstra butikker med mærket "producentens butik", også når den ikke er billigere end de andre eller er udsolgt. Højst 20 forespørgsler og 2 nye mærker pr. kørsel, én forespørgsel ad gangen med pause, og en butik der afviser os (403, 429, spærring i `robots.txt`) bliver aldrig forsøgt omgået. Resultatet gemmes pr. mærke i 30 dage i tabellen `brand_shops`, så et mærke slås kun op én gang om måneden. Kør `supabase/schema.sql` igen, så databasen får tabellen.
 
 ### Detaljer
 

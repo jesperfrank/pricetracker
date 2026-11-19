@@ -17,7 +17,11 @@ function makeClient(baseUrl, key, fetchImpl) {
         signal: ctl.signal,
       });
       const text = await r.text();
-      if (!r.ok) { const err = new Error(method + ' ' + path.split('?')[0] + ' -> HTTP ' + r.status + ' ' + text.slice(0, 200)); err.status = r.status; err.body = text.slice(0, 500); throw err; }
+      if (!r.ok) {
+        // the message ends up in the public log: only the error's code and message, never its details (a failing row is quoted there, names included)
+        let brief = text.slice(0, 200);
+        try { const j = JSON.parse(text); if (j && typeof j === 'object') brief = [j.code, j.message || j.msg].filter((x) => typeof x === 'string').join(' ').slice(0, 200); } catch (e) { /* not json: the text as it is */ }
+        const err = new Error(method + ' ' + path.split('?')[0].replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, ':id') + ' -> HTTP ' + r.status + ' ' + brief); err.status = r.status; err.body = text.slice(0, 500); throw err; }
       return text ? JSON.parse(text) : null;
     } finally { clearTimeout(t); }
   }

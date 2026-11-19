@@ -108,20 +108,45 @@ const MODIFIERS = new Set(['pro', 'max', 'ultra', 'plus', 'lite', 'mini', 's', '
   'absolute', 'extra', 'complete', 'animal', 'origin', 'fluffy', 'signature', 'premium', 'elite', 'advanced', 'prime']);   // Dyson V15 Detect is not V15 Detect Absolute
 // Accessories and spare parts: the main false-positive risk. A word of its own (mop, bag, dock, cover, etui, pose) or the start or end of a
 // compound (filtersæt, hepafilter, ladekabel, sidebørste, tilbehørspakke, reservedele).
-const ACC_WORDS = new Set(['mop', 'mops', 'bag', 'bags', 'dock', 'cover', 'covers', 'etui', 'pose', 'poser', 'holder', 'beskyttelse', 'panserglas', 'rem', 'skal']);
+const ACC_WORDS = new Set(['mop', 'mops', 'bag', 'bags', 'dock', 'cover', 'covers', 'etui', 'pose', 'poser', 'holder', 'beskyttelse', 'panserglas', 'rem', 'skal',
+  'accessories', 'accessory', 'zubehor', 'zubehör', 'prislusenstvi', 'příslušenství']);   // the last four: a shop in another language names its accessory pages so
+// "Roborock Saros 10R med dock" is the main product sold with its dock; "Dock til Roborock Saros 10R" is the accessory. An accessory word right
+// after one of these (at most one word between) is part of what is in the box, not what the page sells.
+const INCLUDING = new Set(['med', 'with', 'inkl', 'inklusive', 'incl', 'including', 'm']);
 const ACC_AFFIX = ['tilbehør', 'reservedel', 'filter', 'kabel', 'oplader', 'børste', 'batteri'];
 
 // Which conflicting words does this text contain? (a list of the matching words). kind 'variant': model modifiers; kind 'acc': accessories.
 function conflictsIn(ws, kind) {
   const out = [];
-  ws.forEach((w) => {
+  ws.forEach((w, i) => {
     if (kind !== 'acc' && MODIFIERS.has(w)) out.push(w);
     else if (kind === 'acc') {
+      if (INCLUDING.has(ws[i - 1]) || INCLUDING.has(ws[i - 2])) return;
       if (ACC_WORDS.has(w)) out.push(w);
       else ACC_AFFIX.forEach((a) => { if (w.length >= a.length && (w.indexOf(a) === 0 || w.slice(-a.length) === a)) out.push(w); });
     }
   });
   return out;
+}
+
+// A list of words squashed into one string, with the positions where a word starts or ends (also where letters turn into digits: "saros10r").
+function squash(cand) {
+  let squashed = '';
+  const bound = new Set([0]);
+  cand.forEach((w) => {
+    for (let i = 0; i < w.length; i++) {
+      if (i > 0 && /\p{L}/u.test(w[i - 1]) && /\d/.test(w[i])) bound.add(squashed.length);
+      squashed += w[i];
+    }
+    bound.add(squashed.length);
+  });
+  return { squashed, bound };
+}
+// Is the key in the squashed words as a whole word? (it must start and end at a boundary: "10" is not in "10r")
+function hasKey(sq, k) {
+  let at = -1;
+  while ((at = sq.squashed.indexOf(k, at + 1)) !== -1) if (sq.bound.has(at) && sq.bound.has(at + k.length)) return true;
+  return false;
 }
 
 // Does `candidate` (a search result's title, or the page's own product name) name the same product as `productTitle`?
@@ -135,21 +160,8 @@ function titleMatch(productTitle, candidate) {
   if (!keys.length) return { ok: false, reason: 'ingen nøgleord' };
   const cand = words(cleanResultText(candidate, 400));
   if (!cand.length) return { ok: false, reason: 'ingen titel' };
-  // the candidate squashed, with the positions where a word starts or ends (also where letters turn into digits: "saros10r")
-  let squashed = '';
-  const bound = new Set([0]);
-  cand.forEach((w) => {
-    for (let i = 0; i < w.length; i++) {
-      if (i > 0 && /\p{L}/u.test(w[i - 1]) && /\d/.test(w[i])) bound.add(squashed.length);
-      squashed += w[i];
-    }
-    bound.add(squashed.length);
-  });
-  for (const k of keys) {
-    let at = -1, found = false;
-    while (!found && (at = squashed.indexOf(k, at + 1)) !== -1) found = bound.has(at) && bound.has(at + k.length);
-    if (!found) return { ok: false, reason: 'mangler "' + k + '"' };
-  }
+  const sq = squash(cand);
+  for (const k of keys) if (!hasKey(sq, k)) return { ok: false, reason: 'mangler "' + k + '"' };
   const own = words(productTitle);
   const whole = words(cleanResultText(candidate, 400)), seg = words(cleanResultText(firstSegment(candidate), 400));
   // modifiers count anywhere in the title; accessory words only in the first segment (an SEO tail may mention filters and docks)
@@ -300,7 +312,7 @@ function lowestPrice(prod) {
 // A page that was read (shop.js parseShopPage result) for a candidate: {ok, price, store, reason}. The rules: a price (in kroner: the parser
 // refuses other currencies), the page's own product name passes the same title match, the price is no outlier against the product's offers,
 // the page is in stock (unknown stock counts as in stock, as everywhere), and the shop is not one the offers cover under its real name.
-function verifyPage(prod, cand, page) {
+function verifyPage(prod, cand, page, opts) {
   const row = page && Array.isArray(page.rows) ? page.rows[0] : null;
   if (!row || typeof row.price !== 'number' || !(row.price > 0)) return { ok: false, reason: 'ingen pris' };
   if (!page.title) return { ok: false, reason: 'ingen titel på siden' };
@@ -308,9 +320,9 @@ function verifyPage(prod, cand, page) {
   if (!m.ok) return { ok: false, reason: 'siden: ' + m.reason };
   const offers = Array.isArray(prod.offers) ? prod.offers : [];
   if (X.isOutlier(row.price, offers.filter((o) => o && typeof o.price === 'number').map((o) => o.price))) return { ok: false, reason: 'pris ligner en anden vare' };
-  if (row.inStock === false) return { ok: false, reason: 'ikke på lager' };
+  if (row.inStock === false && !(opts && opts.allowOutOfStock)) return { ok: false, reason: 'ikke på lager' };   // the manufacturer's shop is added even when sold out
   if (X.covered(offers, { url: cand.url, store: row.store })) return { ok: false, reason: 'med på Prisjagt' };
-  return { ok: true, price: row.price, store: row.store, url: cand.url, title: page.title };
+  return { ok: true, price: row.price, store: row.store, url: cand.url, title: page.title, inStock: row.inStock !== false };
 }
 
 function originOf(st, url) { return st && st[url] && typeof st[url] === 'object' ? st[url].origin : undefined; }
@@ -362,7 +374,7 @@ function planChange(prod, fresh, verified) {
 function nextState(fresh, change) {
   const st = Object.assign({}, fresh && fresh.extra_state && typeof fresh.extra_state === 'object' && !Array.isArray(fresh.extra_state) ? fresh.extra_state : {});
   change.remove.forEach((u) => { delete st[u]; });
-  change.add.forEach((a) => { st[a.url] = { origin: 'search' }; });
+  change.add.forEach((a) => { st[a.url] = { origin: a.origin || 'search' }; });
   return Object.keys(st).length ? st : null;
 }
 
@@ -370,7 +382,9 @@ function nextState(fresh, change) {
 
 // Is this product searched for in this run? Active, not bought, status 'tracking', has a title, has a price to beat, has an https shop link
 // (the database rule for extra_urls), and was not searched in the last 7 days. A row without the columns (an older database) never is.
-function isDue(prod, now) {
+// opts.brave: the search API is on in this run; a product that was only looked up in the manufacturer's shop before (discover_state.brave false:
+// no key, the monthly cap, a stop) is due again at once then.
+function isDue(prod, now, opts) {
   const has = (k) => Object.prototype.hasOwnProperty.call(prod, k);
   if (!has('discover_state') || !has('extra_urls') || !has('extra_state')) return false;
   if (prod.active === false || prod.bought_at || prod.status !== 'tracking') return false;
@@ -378,13 +392,14 @@ function isDue(prod, now) {
   if (typeof prod.source_url !== 'string' || !/^https:\/\//i.test(prod.source_url) || prod.source_url.length > 500) return false;
   if (lowestPrice(prod) === null) return false;
   const at = prod.discover_state && typeof prod.discover_state === 'object' ? Date.parse(prod.discover_state.at) : NaN;
+  if (opts && opts.brave && prod.discover_state && prod.discover_state.brave === false) return true;
   return !(isFinite(at) && now.getTime() - at < RESPACE_MS);
 }
 
 // Never searched first (in the order of the list), then the longest ago.
-function order(products, now) {
+function order(products, now, opts) {
   const at = (p) => { const t = p.discover_state && typeof p.discover_state === 'object' ? Date.parse(p.discover_state.at) : NaN; return isFinite(t) ? t : -Infinity; };
-  return products.filter((p) => isDue(p, now)).map((p, i) => ({ p, i })).sort((a, b) => (at(a.p) - at(b.p)) || (a.i - b.i)).map((x) => x.p);
+  return products.filter((p) => isDue(p, now, opts)).map((p, i) => ({ p, i })).sort((a, b) => (at(a.p) - at(b.p)) || (a.i - b.i)).map((x) => x.p);
 }
 
 // ---------------------------------------------------------------- the search client
@@ -458,6 +473,7 @@ async function discoverProduct(prod, deps) {
 module.exports = {
   BRAVE, MIN_GAP_MS, TIMEOUT_MS, CALLS_PER_PRODUCT, PLAN, MAX_PRODUCTS_PER_RUN, MONTHLY_CAP, RESPACE_MS, MAX_CANDIDATES, MAX_ADD, MAX_EXTRAS, MAX_PAGES_PER_RUN,
   DENY_NAMES, DK_SHOPS, MODIFIERS,
+  words, isGeneric, firstSegment, squash, hasKey, hostOf, segmentsOf, localeOf, originOf, priceOfLink,
   keyTokens, titleMatch, coreTitle, buildQueries, requirementWords, looksLikeProduct, isDanishHost, isDenied, rejectReason, candidates, dedupe,
   lowestPrice, verifyPage, planChange, nextState, isDue, order, makeSearcher, discoverProduct, cleanResultText,
 };

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <!-- This is the parent sitemap linking to additional sitemaps for products, collections and pages as shown below. The sitemap can not be edited manually, but is kept up to date in real time. -->
+  <sitemap>
+    <loc>https://dk.roborock.com/sitemap_agentic_discovery.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://dk.roborock.com/sitemap_products_1.xml?from=7767333437482&amp;to=15580580315372</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://dk.roborock.com/sitemap_pages_1.xml?from=101853986858&amp;to=166255427820</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://dk.roborock.com/sitemap_collections_1.xml?from=296882372650&amp;to=516662264044</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://dk.roborock.com/sitemap_blogs_1.xml</loc>
+  </sitemap>
+</sitemapindex>

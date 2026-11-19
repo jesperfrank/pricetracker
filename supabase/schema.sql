@@ -319,6 +319,23 @@ alter table public.discover_usage enable row level security;
 revoke all on public.discover_usage from anon, authenticated;
 grant select, insert, update, delete on public.discover_usage to service_role;
 
+-- "Producentens butik" (brand shop probe, see job/lib/brandshop.js): what the job found out about a brand's own Danish web shop, kept for 30 days
+-- (found or not found, so that a brand is probed once a month and not once per product). brand = the brand's words squashed, base = the shop's
+-- address (null when there is none), sitemaps = the sitemap addresses to read, robots = the allow / disallow rules of its robots.txt for the job
+-- ([[true, "/path"], ...]), status = 'ok' (a shop with a sitemap), 'none' (no shop found) or 'refused' (it refuses automated requests: left alone).
+-- Job only: no policy and no rights for the browser roles.
+create table if not exists public.brand_shops (
+  brand      text primary key check (char_length(brand) between 1 and 60),
+  base       text check (base is null or char_length(base) <= 500),
+  sitemaps   jsonb not null default '[]'::jsonb check (jsonb_typeof(sitemaps) = 'array'),
+  robots     jsonb check (robots is null or jsonb_typeof(robots) = 'array'),
+  status     text not null check (status in ('ok', 'none', 'refused')),
+  checked_at timestamptz not null default now()
+);
+alter table public.brand_shops enable row level security;
+revoke all on public.brand_shops from anon, authenticated;
+grant select, insert, update, delete on public.brand_shops to service_role;
+
 -- "Mente du": suggestions for a name-only product whose typed name is not exact (see resolver_suggest in the resolver section).
 -- name_options = 2 to 4 objects {name (1-120), url, price (number > 0, optional), store (1-60, optional)}, the most likely first, written
 -- by the AI agent only: products_guard keeps the browser off it and clears it when the person sets a link or changes the name. url is a
@@ -1342,6 +1359,61 @@ grant execute on function public.resolver_fail(uuid, text) to anon, authenticate
 grant execute on function public.resolver_suggest(uuid, jsonb) to anon, authenticated;
 grant execute on function public.resolver_compare(uuid, text, jsonb) to anon, authenticated;
 
+-- ---------------------------------------------------------------- owner diagnostics (for maintenance, not for the scheduled agents)
+-- diag_products(): the state of the ADMINISTRATORS' own products, so that the project lead can check the job's work (what it read, which shops
+-- it follows, what the search found) without asking the owner to look. Same token check, grants and error as resolver_list: without the
+-- token nothing is returned. Only products whose owner is an administrator (allowed_emails.is_admin), at most 100, newest first. No user ids, no
+-- e-mail addresses, nothing about anybody else's products. host = the shop's host name (no path, no query); cheapest = the 5 lowest offers
+-- [{store, price, stock, stale}] (stock = in stock, stale = the shop could not be read and this is its last known offer); shops = the extra
+-- shops [{host, origin, why, price, seen}] from extra_urls and extra_state (origin: 'search', 'brand' or null = the agent's or the person's).
+drop function if exists public.diag_products();
+create or replace function public.diag_products()
+returns table (id uuid, name text, title text, active boolean, status text, check_note text, last_checked timestamptz, host text, target_type text,
+               target_value numeric, lowest numeric, cheapest jsonb, shops jsonb, compare_state text, compare_tries integer, discover_state jsonb,
+               requirements text, has_name_options boolean, verdict_level text, notified_price numeric, notified_at timestamptz, bought_at timestamptz,
+               created_at timestamptz)
+language plpgsql
+stable
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  if not public.resolver_token_ok() then
+    raise exception 'resolver: invalid or missing token' using errcode = '42501';
+  end if;
+  return query
+    select p.id, p.name, p.title, p.active, p.status, p.check_note, p.last_checked,
+           nullif(regexp_replace(substring(p.source_url from '^https://([^/?#]+)'), '^www\.', ''), ''),
+           p.target_type, p.target_value,
+           (select min((o ->> 'price')::numeric)
+              from jsonb_array_elements(case when jsonb_typeof(p.offers) = 'array' then p.offers else '[]'::jsonb end) o
+             where jsonb_typeof(o) = 'object' and o -> 'inStock' = 'true'::jsonb and jsonb_typeof(o -> 'price') = 'number'),
+           (select coalesce(jsonb_agg(jsonb_build_object('store', left(btrim(w.o ->> 'store'), 60), 'price', (w.o ->> 'price')::numeric,
+                                                           'stock', coalesce(w.o -> 'inStock' = 'true'::jsonb, false), 'stale', w.o ? 'readAt') order by (w.o ->> 'price')::numeric, w.n), '[]'::jsonb)
+              from (select z.e as o, z.n from jsonb_array_elements(case when jsonb_typeof(p.offers) = 'array' then p.offers else '[]'::jsonb end) with ordinality as z(e, n)
+                     where jsonb_typeof(z.e) = 'object' and jsonb_typeof(z.e -> 'price') = 'number' and jsonb_typeof(z.e -> 'store') = 'string'
+                     order by (z.e ->> 'price')::numeric, z.n limit 5) w),
+           (select coalesce(jsonb_agg(jsonb_build_object('host', nullif(regexp_replace(substring(u.link from '^https://([^/?#]+)'), '^www\.', ''), ''),
+                                                           'origin', case when jsonb_typeof(p.extra_state) = 'object' then p.extra_state -> u.link ->> 'origin' end,
+                                                           'why', case when jsonb_typeof(p.extra_state) = 'object' then p.extra_state -> u.link ->> 'why' end,
+                                                           'price', case when jsonb_typeof(p.extra_state) = 'object' and jsonb_typeof(p.extra_state -> u.link -> 'offer' -> 'price') = 'number'
+                                                                         then (p.extra_state -> u.link -> 'offer' ->> 'price')::numeric end,
+                                                           'seen', case when jsonb_typeof(p.extra_state) = 'object' then coalesce((p.extra_state -> u.link ->> 'seen') = 'true', false) else false end) order by u.n), '[]'::jsonb)
+              from (select z.e #>> '{}' as link, z.n from jsonb_array_elements(case when jsonb_typeof(p.extra_urls) = 'array' then p.extra_urls else '[]'::jsonb end) with ordinality as z(e, n)
+                     where jsonb_typeof(z.e) = 'string' limit 5) u),
+           p.compare_state, p.compare_tries, p.discover_state, p.requirements, (p.name_options is not null),
+           case when jsonb_typeof(p.verdict) = 'object' then p.verdict ->> 'level' end,
+           p.notified_price, p.notified_at, p.bought_at, p.created_at
+      from public.products p
+      join auth.users au on au.id = p.user_id
+      join public.allowed_emails a on a.email = lower(au.email) and a.is_admin
+     order by p.created_at desc nulls last, p.id
+     limit 100;
+end;
+$$;
+revoke all on function public.diag_products() from public;
+grant execute on function public.diag_products() to anon, authenticated;
+
 -- ---------------------------------------------------------------- access requests
 -- A visitor asks for access on the login screen (request_access, callable without login). The owner
 -- (an admin row in allowed_emails) approves or rejects inside the site. Approving inserts the address
@@ -1924,7 +1996,8 @@ end;
 $$;
 
 -- Stores the answer for a pending product: 1 to 6 suggestions, each an object with exactly the keys kind ('similar' | 'deal'),
--- name (1-120), url (https, the products.source_url rule, 500), store (1-60), price (> 0 and < 10 million) and why (1-160), and
+-- name (1-120), url (exactly https://prisjagt.dk/product.php?p=<digits>, a leading www. is dropped: the person sees it as a link), store
+-- (1-60), price (> 0 and < 10 million) and why (1-160), and
 -- optionally was (a number above price: the normal price of a deal; null counts as absent). Text must have no control
 -- characters, no invisible direction marks and no < or >. Anything else raises 22023 and stores nothing. The stored copy is
 -- cleaned (trimmed, price and was rounded to 2 decimals). Returns true, or false when the product is not pending (any more).
@@ -1980,7 +2053,7 @@ begin
          or (k = 'name' and char_length(s) not between 1 and 120)
          or (k = 'store' and char_length(s) not between 1 and 60)
          or (k = 'why' and char_length(s) not between 1 and 160)
-         or (k = 'url' and (char_length(s) > 500 or s !~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$')) then
+         or (k = 'url' and (char_length(s) > 500 or regexp_replace(s, '^https://www\.prisjagt\.dk/', 'https://prisjagt.dk/') !~ '^https://prisjagt\.dk/product\.php\?p=[0-9]{1,18}$')) then
         raise exception 'ai_alt: item %: % is not valid', i, k using errcode = '22023';
       end if;
     end loop;
@@ -2002,7 +2075,7 @@ begin
         raise exception 'ai_alt: item %: was must be above price and below 10000000', i using errcode = '22023';
       end if;
     end if;
-    item := jsonb_build_object('kind', btrim(e ->> 'kind'), 'name', btrim(e ->> 'name'), 'url', btrim(e ->> 'url'),
+    item := jsonb_build_object('kind', btrim(e ->> 'kind'), 'name', btrim(e ->> 'name'), 'url', regexp_replace(btrim(e ->> 'url'), '^https://www\.prisjagt\.dk/', 'https://prisjagt.dk/'),
                                'store', btrim(e ->> 'store'), 'price', pr, 'why', btrim(e ->> 'why'));
     if wa is not null then item := item || jsonb_build_object('was', wa); end if;
     clean := clean || jsonb_build_array(item);
@@ -2194,7 +2267,7 @@ end;
 $$;
 
 -- Stores the answer for a pending question: p_summary (1 to 600 characters, plain text) and 1 to 5 picks, each an object with exactly
--- the keys name (1-120), url (https, the products.source_url rule, 500), store (1-60), price (> 0 and < 10 million), why (1-160)
+-- the keys name (1-120), url (exactly https://prisjagt.dk/product.php?p=<digits>, a leading www. is dropped), store (1-60), price (> 0 and < 10 million), why (1-160)
 -- and optionally was (a number above price; null counts as absent). The same strict rules as ai_alt_set: no control characters
 -- (not even a line break), no invisible direction marks and no < or > in any text. Anything else raises 22023 and stores nothing.
 -- The stored copy is cleaned (trimmed, price and was rounded to 2 decimals). Returns true, or false when the question is not pending.
@@ -2260,7 +2333,7 @@ begin
       if (k = 'name' and char_length(s) not between 1 and 120)
          or (k = 'store' and char_length(s) not between 1 and 60)
          or (k = 'why' and char_length(s) not between 1 and 160)
-         or (k = 'url' and (char_length(s) > 500 or s !~ '^https://[^/?#@:[:space:]]+\.[^/?#@:[:space:]]+([/?#][^[:space:]]*)?$')) then
+         or (k = 'url' and (char_length(s) > 500 or regexp_replace(s, '^https://www\.prisjagt\.dk/', 'https://prisjagt.dk/') !~ '^https://prisjagt\.dk/product\.php\?p=[0-9]{1,18}$')) then
         raise exception 'ai_ask: pick %: % is not valid', i, k using errcode = '22023';
       end if;
     end loop;
@@ -2282,7 +2355,7 @@ begin
         raise exception 'ai_ask: pick %: was must be above price and below 10000000', i using errcode = '22023';
       end if;
     end if;
-    item := jsonb_build_object('name', btrim(e ->> 'name'), 'url', btrim(e ->> 'url'),
+    item := jsonb_build_object('name', btrim(e ->> 'name'), 'url', regexp_replace(btrim(e ->> 'url'), '^https://www\.prisjagt\.dk/', 'https://prisjagt.dk/'),
                                'store', btrim(e ->> 'store'), 'price', pr, 'why', btrim(e ->> 'why'));
     if wa is not null then item := item || jsonb_build_object('was', wa); end if;
     clean := clean || jsonb_build_array(item);

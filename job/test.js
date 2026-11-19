@@ -544,6 +544,7 @@ function makeFake(db) {
         } else if (ownerEq && (mm[1] === 'products' || mm[1] === 'lists')) rows = rows.filter((r) => r.user_id === ownerEq[1]);   // one person's rows (the import step)
         else if (mm[1] === 'products' && /^eq\./.test(q.get('id') || '')) rows = rows.filter((r) => r.id === q.get('id').slice(3));   // one product (the search step reads the row again)
         else if (mm[1] === 'discover_usage') rows = rows.filter((r) => !q.get('month') || r.month === q.get('month').slice(3));
+        else if (mm[1] === 'brand_shops') rows = rows.filter((r) => !q.get('brand') || r.brand === q.get('brand').slice(3));
         else if (mm[1] === 'products') {
           assert.strictEqual(q.get('active'), 'eq.true'); assert.strictEqual(q.get('source_url'), 'not.is.null');
           rows = rows.filter((r) => r.active !== false && (r.source_url || db.ignoreLinkFilter));   // db.ignoreLinkFilter: a server that wrongly returns name-only rows
@@ -581,6 +582,10 @@ function makeFake(db) {
             if (db.usageFail) return reply(500, { message: 'db error' });
             if (t.some((x) => x.month === r.month)) return reply(409, { code: '23505', message: 'duplicate key' });
             t.push({ month: r.month, calls: r.calls });
+          } else if (mm[1] === 'brand_shops') {
+            if (db.brandFail) return reply(500, { message: 'db error' });
+            if (t.some((x) => x.brand === r.brand)) return reply(409, { code: '23505', message: 'duplicate key' });
+            t.push(JSON.parse(JSON.stringify(r)));
           } else if (mm[1] === 'lists') {
             assert.strictEqual(h.Prefer, 'return=representation');
             const nm = String(r.name || '').trim();
@@ -607,6 +612,11 @@ function makeFake(db) {
           if (!ok) return reply(200, []);
           row.digest_sent_at = body.digest_sent_at;
           return reply(200, h.Prefer === 'return=representation' ? [JSON.parse(JSON.stringify(row))] : undefined);
+        }
+        if (mm[1] === 'brand_shops') {
+          if (db.brandFail) return reply(500, { message: 'db error' });
+          const row = t.find((r) => r.brand === q.get('brand').slice(3)); if (row) Object.assign(row, JSON.parse(opts.body));
+          return reply(200, h.Prefer === 'return=representation' ? (row ? [JSON.parse(JSON.stringify(row))] : []) : undefined);
         }
         assert.strictEqual(h.Prefer, 'return=minimal');
         if (mm[1] === 'discover_usage') {
@@ -3356,7 +3366,7 @@ test('discover: verify a page (kroner, the page\'s own name, outlier rule, stock
   const prod = { title: 'Roborock Saros 10R', offers: [{ store: 'Elgiganten', price: 5500, inStock: true }, { store: 'Proshop', price: 5600, inStock: true }, { store: 'Power', price: 5650, inStock: true }] };
   const page = (o) => ({ title: 'Roborock Saros 10R Robotstøvsuger', rows: [Object.assign({ store: 'Kampagneshop', price: 4050, inStock: true }, o || {})] });
   const cand = { url: 'https://www.kampagne.dk/roborock-saros-10r' };
-  assert.deepStrictEqual(DS.verifyPage(prod, cand, page()), { ok: true, price: 4050, store: 'Kampagneshop', url: cand.url, title: 'Roborock Saros 10R Robotstøvsuger' });
+  assert.deepStrictEqual(DS.verifyPage(prod, cand, page()), { ok: true, price: 4050, store: 'Kampagneshop', url: cand.url, title: 'Roborock Saros 10R Robotstøvsuger', inStock: true });
   assert.strictEqual(DS.verifyPage(prod, cand, page({ price: undefined })).reason, 'ingen pris');
   assert(/mangler|tilbehør/.test(DS.verifyPage(prod, cand, Object.assign(page(), { title: 'Roborock Saros 10 robotstøvsuger' })).reason));
   assert(/filter/.test(DS.verifyPage(prod, cand, Object.assign(page(), { title: 'Roborock Saros 10R Filter sæt' })).reason), 'the search title was fine, the page says it is a filter');
@@ -3365,6 +3375,7 @@ test('discover: verify a page (kroner, the page\'s own name, outlier rule, stock
   assert.strictEqual(DS.verifyPage(prod, cand, page({ price: 2240 })).ok, true, 'exactly 40 % of the median is still fine');
   assert.strictEqual(DS.verifyPage(prod, cand, page({ price: 14100 })).reason, 'pris ligner en anden vare');
   assert.strictEqual(DS.verifyPage(prod, cand, page({ inStock: false })).reason, 'ikke på lager');
+  assert.strictEqual(DS.verifyPage(prod, cand, page({ inStock: false }), { allowOutOfStock: true }).ok, true, 'the manufacturer\'s shop is added even when sold out');
   assert.strictEqual(DS.verifyPage(prod, cand, page({ inStock: undefined })).ok, true, 'unknown stock counts as in stock');
   assert.strictEqual(DS.verifyPage(prod, cand, page({ store: 'Power' })).reason, 'med på Prisjagt', 'the real shop name of the page is among the offers');
   assert.strictEqual(DS.verifyPage({ title: 'Roborock Saros 10R', offers: [] }, cand, page({ price: 100 })).ok, true, 'without other prices there is nothing to compare with');
@@ -3515,13 +3526,14 @@ function dProduct(id, extra) {
     extra_urls: null, extra_state: null, discover_state: null, image_url: null, requirements: null,
   }, extra || {}));
 }
-function dDb() { const db = newDb(); db.discover_usage = []; return db; }
+function dDb() { const db = newDb(); db.discover_usage = []; db.brand_shops = []; return db; }
 // one run: o.brave (fake search), o.shops (html by url), o.key, o.now (iso), o.logs (array), o.sleeps (array)
 function dRun(db, o) {
   o = o || {};
   const shops = o.shops || dShops();
   const ctx = ctxFor(db, {}, Object.assign({
     braveFetch: (o.brave || dBrave(dResults())).fn, braveSleep: async (ms) => { if (o.sleeps) o.sleeps.push(ms); },
+    brandFetch: o.brandFetch || (async () => { throw new Error('fetch failed'); }),      // by default no brand shop can be reached (the brand probe finds nothing)
     getPage: async (url) => {
       ctx.fetched.push(url);
       if (url === DPJ) return clone(dPjPage());
@@ -3534,7 +3546,7 @@ function dRun(db, o) {
   return R.run(ctx).then((res) => Object.assign(res, { ctx }));
 }
 
-test('discover: the full scenario (Prisjagt lowest 5.500, 30 mixed results): exactly the Danish retailer at 4.050 is added, silent first run, the price follows on the next run', async () => {
+test('discover: the full scenario (Prisjagt lowest 5.500, 30 mixed results): exactly the Danish retailer at 4.050 is added, silent first run, the price follows on the next run and mails once (a found shop is not silent)', async () => {
   const db = dDb(); db.products.push(dProduct('D1'));
   const brave = dBrave(dResults()), logs = [], sleeps = [];
   let res = await dRun(db, { brave, logs, sleeps });
@@ -3557,14 +3569,16 @@ test('discover: the full scenario (Prisjagt lowest 5.500, 30 mixed results): exa
   assert(/Søgning: 1 vare, 3 kald, 1 ny butik\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(res.summary.length, 5);
   assert(logs.some((l) => /ny butik kampagneshop\.dk \(4050 kr\.\)/.test(l)), logs.join('\n'));
   assert(!logs.concat(res.summary).join('\n').includes(D_KEY), 'the key is never logged');
-  // next run: the shop is read through the extras machinery; its first price is silent (extraNew) but recorded; no new search for 7 days
+  // next run: the shop is read through the extras machinery; a shop the job found itself is NOT silent at its first reading: the goal (5000) is
+  // met, so there is a mail, and it says where the price comes from; no new search for 7 days
   res = await dRun(db, { brave, logs });
   assert.strictEqual(brave.calls.length, 3, 'not searched again');
   assert.strictEqual(P1().offers[0].price, 4050); assert.strictEqual(P1().offers[0].store, 'Kampagneshop');
-  assert.strictEqual(db.sent.length, 0, 'the first reading of the new shop is silent'); assert.strictEqual(P1().notified_price, 4050, 'remembered as announced');
+  assert.strictEqual(db.sent.length, 1, 'the first reading of a found shop may notify'); assert.strictEqual(P1().notified_price, 4050, 'remembered as announced');
+  assert(db.sent[0].text.includes('Fundet hos en ny butik: Kampagneshop.'), db.sent[0].text); assert(/Pris: 4\.050 kr\. hos Kampagneshop/.test(db.sent[0].text), db.sent[0].text);
   assert(P1().extra_state[D_K].seen === true && P1().extra_state[D_K].origin === 'search', 'the origin survives the extras bookkeeping');
   assert.strictEqual(P1().history.slice(-1)[0].p, 4050);
-  await dRun(db, { brave }); assert.strictEqual(db.sent.length, 0); assert.strictEqual(P1().extra_state[D_K].origin, 'search'); assert.strictEqual(P1().offers[0].price, 4050);
+  await dRun(db, { brave }); assert.strictEqual(db.sent.length, 1, 'the same price again: no second mail'); assert.strictEqual(P1().extra_state[D_K].origin, 'search'); assert.strictEqual(P1().offers[0].price, 4050);
   assert(!/Søgning/.test(res.summary.join('\n')), 'nothing searched, nothing said');
 });
 
@@ -3635,12 +3649,12 @@ test('discover: the monthly cap (800 calls, kept in discover_usage per Copenhage
   db.discover_usage.push({ month: '2026-11', calls: 799 });
   let brave = dBrave(dResults()), logs = [];
   let res = await dRun(db, { brave, logs });
-  assert.strictEqual(brave.calls.length, 0); assert(/Søgning: månedsloft nået\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(logs.filter((l) => /månedsloftet/.test(l)).length, 1);
+  assert.strictEqual(brave.calls.length, 0); assert(/Søgning: 2 varer, 0 kald, 0 nye butikker, månedsloft nået\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(logs.filter((l) => /månedsloftet/.test(l)).length, 1);
   assert.strictEqual(res.summary.length, 5); assert.strictEqual(db.products[0].status, 'tracking'); assert(db.products[0].offers.length, 'the price checks go on');
   // 797 used leaves 3: one product, then the cap
   db.discover_usage[0].calls = 797; logs = [];
   res = await dRun(db, { brave, logs });
-  assert.strictEqual(brave.calls.length, 3); assert.strictEqual(db.discover_usage[0].calls, 800); assert(/Søgning: 1 vare, 3 kald, 1 ny butik, månedsloft nået\./.test(res.summary[2]), res.summary[2]);
+  assert.strictEqual(brave.calls.length, 3); assert.strictEqual(db.discover_usage[0].calls, 800); assert(/Søgning: 2 varer, 3 kald, 1 ny butik, månedsloft nået\./.test(res.summary[2]), res.summary[2]);
   assert.strictEqual(logs.filter((l) => /månedsloftet/.test(l)).length, 1);
   assert.strictEqual(DS.MONTHLY_CAP, 800); assert.strictEqual(DS.MAX_PRODUCTS_PER_RUN * DS.CALLS_PER_PRODUCT, 12);
   // the cap of last month does not count; the month is the Copenhagen month (23:30 UTC on the 30th is already the 1st in Denmark)
@@ -3658,7 +3672,9 @@ test('discover: 401/403 (bad key), 402/429 (quota) and 5xx stop the whole discov
   for (const [code, word, rx] of cases) {
     const db = dDb(); db.products.push(dProduct('E1'), dProduct('E2')); const logs = [], brave = dBrave(dResults(), code);
     const res = await dRun(db, { brave, logs });
-    assert.strictEqual(brave.calls.length, 1, code + ': one call, no retry, the second product is not tried'); assert.strictEqual(db.products[0].discover_state, null); assert.strictEqual(db.products[1].discover_state, null);
+    assert.strictEqual(brave.calls.length, 1, code + ': one call, no retry, the second product is not tried');
+    // nothing is written from the search (it is tried again in the next run: brave false); the manufacturer's shop lookup goes on without it
+    db.products.forEach((p) => { assert.strictEqual(p.discover_state.brave, false); assert.strictEqual(p.discover_state.added, 0); assert.strictEqual(p.discover_state.found, 0); });
     assert.strictEqual(logs.filter((l) => /Søgning stoppet/.test(l)).length, 1, 'one line'); assert(logs.some((l) => rx.test(l) && /Søgning stoppet/.test(l)), logs.join('\n'));
     assert(res.summary[2].indexOf('stoppet (' + word + ')') !== -1, res.summary[2]);
     assert(!logs.concat(res.summary).join('\n').includes(D_KEY)); assert.deepStrictEqual(db.discover_usage, [{ month: '2026-11', calls: 1 }], 'the call counts'); assert.strictEqual(res.summary.length, 5);
@@ -3667,7 +3683,7 @@ test('discover: 401/403 (bad key), 402/429 (quota) and 5xx stop the whole discov
   }
   // the second page fails: the product is abandoned (no pages read, nothing written) and tried again in the next run
   const db = dDb(); db.products.push(dProduct('E3')); const brave = dBrave(dResults(), (i) => (i === 1 ? 429 : 200));
-  const res = await dRun(db, { brave }); assert.strictEqual(brave.calls.length, 2); assert.strictEqual(db.products[0].discover_state, null); assert.deepStrictEqual(res.ctx.fetched, [DPJ]); assert.deepStrictEqual(db.discover_usage, [{ month: '2026-11', calls: 2 }]);
+  const res = await dRun(db, { brave }); assert.strictEqual(brave.calls.length, 2); assert.strictEqual(db.products[0].discover_state.brave, false, 'tried again next run'); assert.deepStrictEqual(res.ctx.fetched, [DPJ]); assert.deepStrictEqual(db.discover_usage, [{ month: '2026-11', calls: 2 }]);
   // a network error ends it as well
   const db2 = dDb(); db2.products.push(dProduct('E4'), dProduct('E5')); let n = 0; const b2 = dBrave(dResults()); b2.fn = async () => { n++; throw new Error('ECONNRESET'); };
   const r2 = await dRun(db2, { brave: b2 }); assert.strictEqual(n, 1); assert(/stoppet \(fejl\)/.test(r2.summary[2]), r2.summary[2]);
@@ -3677,8 +3693,8 @@ test('discover: no key (missing, empty, blank): no search, one summary note, eve
   for (const key of [null, '', '   ']) {
     const db = dDb(); db.products.push(dProduct('K1')); const brave = dBrave(dResults()); brave.fn = async () => { throw new Error('must not be called'); };
     const logs = [], res = await dRun(db, { brave, key, logs });
-    assert(/Nye hits: 0\. Søgning: ingen nøgle\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(res.summary.length, 5); assert.strictEqual(res.stats.written, 1); assert.strictEqual(db.products[0].offers[0].price, 5500);
-    assert.strictEqual(db.products[0].discover_state, null); assert.strictEqual(logs.filter((l) => l.indexOf('Søgning') === 0 || /^ +Søgning/.test(l)).length, 0, 'only the summary line mentions it'); assert.deepStrictEqual(db.discover_usage, []);
+    assert(/Nye hits: 0\. Søgning: 1 vare, 0 kald, 0 nye butikker, ingen søgenøgle\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(res.summary.length, 5); assert.strictEqual(res.stats.written, 1); assert.strictEqual(db.products[0].offers[0].price, 5500);
+    assert.deepStrictEqual([db.products[0].discover_state.brave, db.products[0].discover_state.found, db.products[0].discover_state.brand.result], [false, 0, 'no shop'], 'only the manufacturer\'s shop was looked up'); assert.strictEqual(logs.filter((l) => l.indexOf('Søgning') === 0 || /^ +Søgning/.test(l)).length, 0, 'only the summary line mentions it'); assert.deepStrictEqual(db.discover_usage, []);
   }
   // a database without the new columns: the rows have no such keys; nothing is searched, nothing is said
   const db = dDb(); db.products.push(dProduct('K2')); delete db.products[0].discover_state; const brave = dBrave(dResults());
@@ -3686,7 +3702,11 @@ test('discover: no key (missing, empty, blank): no search, one summary note, eve
   const db1 = dDb(); db1.products.push(dProduct('K3')); delete db1.products[0].extra_state; res = await dRun(db1, { brave }); assert.strictEqual(brave.calls.length, 0);
   // a database without the counter table: nothing is searched (the cap could not be kept), one line, the rest as always
   const db2 = newDb(); db2.products.push(dProduct('K4')); const logs = [];
-  res = await dRun(db2, { brave, logs }); assert.strictEqual(brave.calls.length, 0); assert(/Søgning: tælleren mangler i databasen\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(logs.filter((l) => /discover_usage/.test(l)).length, 1);
+  res = await dRun(db2, { brave, logs }); assert.strictEqual(brave.calls.length, 0); assert(/Søgning: tælleren mangler i databasen, brandtabellen mangler\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(logs.filter((l) => /discover_usage/.test(l)).length, 1);
+  assert.strictEqual(logs.filter((l) => /brand_shops/.test(l)).length, 1); assert.strictEqual(db2.products[0].discover_state, null, 'neither source ran: nothing written');
+  // only the counter table is missing: the manufacturer's shop lookup still runs
+  const db3 = newDb(); db3.brand_shops = []; db3.products.push(dProduct('K5'));
+  res = await dRun(db3, { brave }); assert.strictEqual(brave.calls.length, 0); assert(/Søgning: 1 vare, 0 kald, 0 nye butikker, tælleren mangler i databasen\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(db3.products[0].discover_state.brand.result, 'no shop');
   assert.strictEqual(res.stats.written, 1); assert.strictEqual(res.summary.length, 5);
 });
 
@@ -3704,7 +3724,8 @@ test('discover: the requirements (colour, edition) go into the queries; a shop t
 
 test('discover: the summary line texts, and the workflow gives the job BRAVE_API_KEY', () => {
   const sum = (o) => R.discoverSummary(Object.assign({ state: '', products: 0, calls: 0, added: 0, replaced: 0, stopped: '' }, o));
-  assert.strictEqual(sum({}), ''); assert.strictEqual(sum({ state: 'nokey' }), ' Søgning: ingen nøgle.'); assert.strictEqual(sum({ state: 'cap' }), ' Søgning: månedsloft nået.');
+  assert.strictEqual(sum({}), ''); assert.strictEqual(sum({ state: 'nokey' }), ' Søgning: ingen søgenøgle.'); assert.strictEqual(sum({ products: 4, state: 'nokey', added: 1 }), ' Søgning: 4 varer, 0 kald, 1 ny butik, ingen søgenøgle.');
+  assert.strictEqual(sum({ brandTable: false }), ' Søgning: brandtabellen mangler.'); assert.strictEqual(sum({ state: 'cap' }), ' Søgning: månedsloft nået.');
   assert.strictEqual(sum({ products: 4, calls: 12, added: 2 }), ' Søgning: 4 varer, 12 kald, 2 nye butikker.'); assert.strictEqual(sum({ products: 1, calls: 3, added: 1 }), ' Søgning: 1 vare, 3 kald, 1 ny butik.');
   assert.strictEqual(sum({ products: 1, calls: 3, added: 0 }), ' Søgning: 1 vare, 3 kald, 0 nye butikker.'); assert.strictEqual(sum({ calls: 1, stopped: 'kvote' }), ' Søgning: 0 varer, 1 kald, 0 nye butikker, stoppet (kvote).');
   assert(!/[—!]/.test(sum({ products: 1, calls: 3, added: 1, state: 'cap', stopped: 'x' })));
@@ -3712,13 +3733,491 @@ test('discover: the summary line texts, and the workflow gives the job BRAVE_API
   assert(/BRAVE_API_KEY: \$\{\{ secrets\.BRAVE_API_KEY \}\}/.test(wf));
 });
 
+// ---------------------------------------------------------------- brand shop probe (lib/brandshop.js): the manufacturer's own Danish web shop
+
+const BS = require('./lib/brandshop');
+const LG = require('./lib/log');
+const XT = require('./lib/extras');
+const fxText = (n) => fs.readFileSync(path.join(FIX, n), 'utf8');
+const fxGz = (n) => zlib.gunzipSync(fs.readFileSync(path.join(FIX, n))).toString();
+const RB = 'https://dk.roborock.com', RB_PAGE = RB + '/products/roborock-saros-10r', RB_ACC = RB + '/products/roborock-sada-prislusenstvi-pro-saros-10r';
+const RB_SM = RB + '/sitemap.xml', RB_PSM = RB + '/sitemap_products_1.xml?from=7767333437482&to=15580580315372';
+const RB_NAME = 'Roborock Saros 10R robotstøvsuger med multifunktionel dockingstation 4.0';
+function bRes(status, body, headers) {
+  const buf = Buffer.isBuffer(body) ? body : Buffer.from(String(body === undefined ? '' : body));
+  return { status, ok: status >= 200 && status < 300, headers: { get: (k) => (headers && headers[String(k).toLowerCase()]) || null },
+    arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length), text: async () => buf.toString('utf8') };
+}
+// A fake web for the brand probe: url -> {status, body, headers} | Error; anything else is a 404. f.calls = [{url, ua, redirect}].
+function bFetch(sites) {
+  const f = async (url, opts) => {
+    f.calls.push({ url, ua: opts && opts.headers && opts.headers['User-Agent'], redirect: opts && opts.redirect });
+    const e = sites[url];
+    if (e instanceof Error) throw e;
+    if (!e) return bRes(404, 'nej');
+    return bRes(e.status || 200, e.body, e.headers);
+  };
+  f.calls = []; f.sites = sites; return f;
+}
+function rbSites(extra) {
+  return Object.assign({
+    [RB + '/robots.txt']: { body: fxText('brand-roborock-robots.txt') },
+    [RB_SM]: { body: fxText('brand-roborock-sitemap.xml') },
+    [RB_PSM]: { body: fxGz('brand-roborock-products.xml.gz') },
+  }, extra || {});
+}
+const rbShops = (o) => Object.assign({ [RB_PAGE]: fxGz('brand-roborock-saros-10r.html.gz'), [RB_ACC]: fxGz('brand-roborock-accessory.html.gz') }, o || {});
+const hoursLater = (h) => new Date(Date.parse('2026-11-16T10:00:00Z') + h * 3600 * 1000).toISOString();
+const daysLater = (d) => hoursLater(d * 24);
+
+test('brand shop: the brand of a title (first word, implied brands, two and three words joined, never a model word, colour or category)', () => {
+  const b = (t) => BS.brandCandidates(t).map((c) => c.brand);
+  assert.deepStrictEqual(b('Roborock Saros 10R robotstøvsuger'), ['roborocksaros', 'roborock'], 'two words joined; the third word 10R is a model word, so no three-word brand');
+  assert.deepStrictEqual(b('Shaping New Tomorrow Sustain Vase'), ['shapingnewtomorrow', 'shapingnew', 'shaping']);
+  assert.deepStrictEqual(b('Apple iPhone 16 Pro 256 GB Sort'), ['appleiphone', 'apple']);
+  assert.deepStrictEqual(b('iPhone 16 Pro'), ['apple'], 'implied by the model name'); assert.deepStrictEqual(b('Galaxy S24 Ultra'), ['samsung']);
+  assert.deepStrictEqual(b('Dyson V15 Detect Absolute'), ['dyson'], 'v15 is a model word');
+  assert.deepStrictEqual(b('New Balance 574 Sko'), ['newbalance'], 'a filler word alone is no brand, but it can be part of one');
+  assert.deepStrictEqual(b('Sort Roborock Saros 10R'), [], 'a colour first: nothing to go on'); assert.deepStrictEqual(b('Støvsuger Dyson V15'), [], 'a category word first');
+  assert.deepStrictEqual(b('LEGO Star Wars 75375 Millennium Falcon'), ['legostarwars', 'legostar', 'lego']);
+  assert.deepStrictEqual(b('Bang & Olufsen Beosound A1'), ['bangolufsenbeosound', 'bangolufsen', 'bang']); assert.deepStrictEqual(b(''), []);
+  // the guesses, in the order of the brief; each one must pass the shop URL guard
+  assert.deepStrictEqual(BS.guessBases('acme'), ['https://dk.acme.com', 'https://www.acme.dk', 'https://acme.dk', 'https://shop.acme.dk', 'https://store.acme.dk', 'https://www.acme.com/da-dk', 'https://www.acme.com/dk']);
+  assert(BS.guessBases('acme').every((u) => SHOP.validateShopUrl(u))); assert.deepStrictEqual(BS.guessBases('a b'), []);
+  assert(Object.keys(BS.ALIAS).every((k) => /^[a-z0-9]+$/.test(k) && SHOP.validateShopUrl(BS.ALIAS[k])));
+  assert.strictEqual(BS.ALIAS.roborock, 'https://dk.roborock.com'); assert.strictEqual(BS.ALIAS.dreame, 'https://dk.dreametech.com'); assert.strictEqual(BS.ALIAS.shapingnewtomorrow, 'https://shapingnewtomorrow.dk'); assert.strictEqual(BS.ALIAS.sonos, 'https://www.sonos.com/da-dk');
+  ['dyson', 'lego', 'jbl'].forEach((k) => assert(!(k in BS.ALIAS), k + ' refuses automated requests and is not in the map'));
+});
+
+test('brand shop: robots.txt (our group before "*", longest match wins, disallow all means refused) and the sitemap parser (entities, CDATA, index, image addresses)', () => {
+  const r = BS.parseRobots('User-agent: *\nDisallow: /cart\nDisallow: /search\nAllow: /search/ok\nSitemap: https://x.dk/a.xml\n\nUser-agent: BadBot\nDisallow: /\n');
+  assert.deepStrictEqual(r.sitemaps, ['https://x.dk/a.xml']);
+  assert(BS.robotsAllows(r.rules, '/products/x') && !BS.robotsAllows(r.rules, '/cart/1') && !BS.robotsAllows(r.rules, '/search?q=1') && BS.robotsAllows(r.rules, '/search/ok/1'));
+  assert(!BS.disallowsAll(r.rules));
+  assert(BS.disallowsAll(BS.parseRobots('User-agent: *\nDisallow: /\n').rules), 'disallow everything for *');
+  assert(!BS.disallowsAll(BS.parseRobots('User-agent: *\nDisallow: /\n\nUser-agent: Prisvagten-pricecheck\nDisallow: /cart\n').rules), 'a group for us wins over *');
+  assert(BS.disallowsAll(BS.parseRobots('User-agent: Prisvagten-pricecheck\nDisallow: /\n').rules));
+  assert(BS.robotsAllows(BS.parseRobots('User-agent: *\nDisallow:\n').rules, '/anything'), 'an empty Disallow allows everything');
+  assert(!BS.robotsAllows(BS.parseRobots('User-agent: *\nDisallow: /*.pdf$\n').rules, '/x/y.pdf') && BS.robotsAllows(BS.parseRobots('User-agent: *\nDisallow: /*.pdf$\n').rules, '/x/y.pdfx'));
+  assert(!BS.robotsAllows(BS.parseRobots('User-agent: *\nDisallow: /a*b\n').rules, '/a123b'));
+  const real = BS.parseRobots(fxText('brand-roborock-robots.txt'));
+  assert(BS.robotsAllows(real.rules, '/products/roborock-saros-10r') && BS.robotsAllows(real.rules, '/sitemap.xml') && !BS.disallowsAll(real.rules), 'the real robots.txt of the Roborock shop allows what we read');
+  assert.deepStrictEqual(real.sitemaps, [RB_SM]);
+  const sm = BS.parseSitemap('<?xml version="1.0"?><urlset xmlns:image="x"><url><loc>https://a.dk/p?x=1&amp;y=2</loc><image:image><image:loc>https://cdn.dk/i.jpg</image:loc></image:image></url><url><loc> <![CDATA[https://a.dk/q?z=1&w=2]]> </loc></url></urlset>');
+  assert.deepStrictEqual(sm, { kind: 'urlset', locs: ['https://a.dk/p?x=1&y=2', 'https://a.dk/q?z=1&w=2'] });
+  const idx = BS.parseSitemap(fxText('brand-roborock-sitemap.xml'));
+  assert.strictEqual(idx.kind, 'index'); assert.strictEqual(idx.locs.length, 5); assert(idx.locs.indexOf(RB_PSM) !== -1, 'the &amp; of the index is decoded');
+  const real2 = BS.parseSitemap(fxGz('brand-roborock-products.xml.gz'));
+  assert.strictEqual(real2.kind, 'urlset'); assert.strictEqual(real2.locs.filter((u) => /\/products\//.test(u)).length, 74, 'the 74 products of the real file; image addresses are no <loc>');
+  assert.strictEqual(BS.parseSitemap('<html><body>soft 404</body></html>').kind, null); assert.deepStrictEqual(BS.parseSitemap('').locs, []);
+});
+
+test('brand shop: the model tokens and the ranking of the real sitemaps (fewest extra words, whole-word tokens; accessories are not told by a word list)', () => {
+  const rb = BS.parseSitemap(fxGz('brand-roborock-products.xml.gz')).locs.filter((u) => /\/products\//.test(u));
+  const rank = (urls, title, n) => BS.rankUrls(urls, title, BS.titleWords(title).slice(0, n), 3).map((x) => x.url.replace(/^.*\/products\//, ''));
+  const top = rank(rb, 'Roborock Saros 10R', 1);
+  assert.strictEqual(top[0], 'roborock-saros-10r', 'the product itself first'); assert.strictEqual(top.length, 3);
+  assert(top.indexOf('roborock-sada-prislusenstvi-pro-saros-10r') > 0, 'the accessory kit for the Saros 10R (Czech words) is a candidate but not the first: ' + top.join(', '));
+  assert.strictEqual(rank(rb, 'Roborock Saros 10R robotstøvsuger', 1)[0], 'roborock-saros-10r', 'the longer Prisjagt title gives the same page');
+  assert(rank(rb, 'Roborock Saros 10', 1).indexOf('roborock-saros-10r') === -1, '"10" is not "10r": the 10R page is no candidate for the Saros 10');
+  assert.deepStrictEqual(BS.rankUrls(rb, 'Roborock', ['roborock'], 3), [], 'a title with nothing but the brand has no model token: skipped');
+  assert.deepStrictEqual(BS.modelTokens('Roborock Saros 10R', ['roborock']), ['saros', '10r']);
+  assert.deepStrictEqual(BS.modelTokens('Shaping New Tomorrow Sustain Vase', ['shaping', 'new', 'tomorrow']), ['sustain', 'vase']);
+  assert.deepStrictEqual(BS.slugTokens('https://dk.roborock.com/products/roborock-saros-10-r'), ['roborock', 'saros', '10r'], 'a model letter set apart from its number is joined');
+  assert.deepStrictEqual(BS.slugTokens('https://x.dk/da-dk/p/12345'), ['p', '12345'], 'the locale is no part of it; a number alone takes the segment before');
+  const dr = BS.parseSitemap(fxGz('brand-dreame-products.xml.gz')).locs.filter((u) => /\/products\//.test(u));
+  assert.strictEqual(rank(dr, 'Dreame L50 Ultra Robotstøvsuger', 1)[0], 'l50-ultra-robotstovsuger'); assert.strictEqual(rank(dr, 'Dreame X40 Ultra', 1)[0], 'x40-ultra'); assert.strictEqual(rank(dr, 'Dreame Z30', 1)[0], 'z30');
+  assert(rank(dr, 'Dreame L50 Ultra', 1).every((s) => /l50/.test(s) && /ultra/.test(s)), 'every candidate holds all model tokens');
+});
+
+test('brand shop: the matcher: the real page name of a product sold with its dock passes, accessory pages do not (docks, kits, other languages)', () => {
+  const yes = (p, c) => assert(DS.titleMatch(p, c).ok, p + ' <- ' + c + ': ' + DS.titleMatch(p, c).reason);
+  const no = (p, c) => assert(!DS.titleMatch(p, c).ok, 'should not match: ' + c);
+  yes('Roborock Saros 10R', RB_NAME); yes('Roborock Saros 10R robotstøvsuger', RB_NAME);
+  yes('Roborock Saros 10R', 'Roborock Saros 10R med dock'); yes('Roborock Saros 10R', 'Roborock Saros 10R inkl. dock'); yes('Roborock Saros 10R', 'Roborock Saros 10R with dock');
+  no('Roborock Saros 10R', 'Dock til Roborock Saros 10R'); no('Roborock Saros 10R', 'Roborock Saros 10R Dock'); no('Roborock Saros 10R', 'Roborock Saros 10R Mop');
+  no('Roborock Saros 10R', 'Roborock sada příslušenství pro Saros 10R'); no('Roborock Saros 10R', 'Roborock Saros 10R accessories'); no('Roborock Saros 10R', 'Roborock Saros 10R Zubehör');
+  const acc = SHOP.parseShopPage(fxGz('brand-roborock-accessory.html.gz'), RB_ACC);
+  assert(/tilbehør/.test(acc.title) && acc.rows[0].price === 679, acc.title);
+  assert(!DS.titleMatch('Roborock Saros 10R', acc.title).ok, 'the real accessory kit page is rejected by its own name');
+  const prod = { title: 'Roborock Saros 10R', offers: dPjPage().rows.map((r) => ({ store: r.store, price: r.price, inStock: true, url: r.url })) };
+  assert.strictEqual(DS.verifyPage(prod, { url: RB_ACC }, acc).ok, false);
+  assert(XT.isOutlier(679, [5500, 5600, 5650, 5700]), 'and 679 kr. is no price of the robot (the outlier rule)');
+  const main = SHOP.parseShopPage(fxGz('brand-roborock-saros-10r.html.gz'), RB_PAGE);
+  assert.deepStrictEqual([main.title, main.rows[0].store, main.rows[0].price, main.rows[0].inStock], [RB_NAME, 'Roborock Officiel Butik i Danmark', 4049, true]);
+  assert.strictEqual(DS.verifyPage(prod, { url: RB_PAGE }, main).ok, true);
+});
+
+test('brand shop: the real 1.4 MB Roborock page gets through the shop reader (size and time limits) and is read correctly', async () => {
+  const html = fxGz('brand-roborock-saros-10r.html.gz');
+  assert(html.length > 1.3e6 && html.length < 4000000, 'the real page is ' + html.length + ' characters, the limit is 4.000.000');
+  const seen = [];
+  const page = await SHOP.fetchShopPage(RB_PAGE, async (u, o) => { seen.push([u, o.headers['User-Agent'], o.redirect]); return { status: 200, headers: { get: () => null }, text: async () => html }; });
+  assert.strictEqual(page.rows[0].price, 4049); assert.strictEqual(page.title, RB_NAME); assert.strictEqual(seen.length, 1); assert.strictEqual(seen[0][1], PJ.UA);
+});
+
+test('brand shop: the full scenario with the real sitemap index, product sitemap and page: added as origin "brand" without a search key, the next run reads 4.049 and mails once', async () => {
+  const db = dDb(); db.products.push(dProduct('R1ABCDEF12'));
+  const bf = bFetch(rbSites()), logs = [], sleeps = [];
+  let res = await dRun(db, { key: null, brandFetch: bf, shops: rbShops(), logs, extra: { brandSleep: async (ms) => { sleeps.push(ms); } } });
+  const P1 = () => db.products[0];
+  assert.deepStrictEqual(bf.calls.map((c) => c.url), [RB + '/robots.txt', RB_SM, RB_PSM], 'robots.txt, the sitemap index, the product sitemap (the index names it; the other children are not read)');
+  assert(bf.calls.every((c) => c.ua === PJ.UA && c.redirect === 'manual'), 'honest user agent, redirects not followed blindly'); assert.deepStrictEqual(sleeps, [1100, 1100], 'a pause before every request but the first');
+  assert.deepStrictEqual(res.ctx.fetched, [DPJ, RB_PAGE], 'the Prisjagt page and the one product page; the accessory page is not read');
+  assert.deepStrictEqual(P1().extra_urls, [RB_PAGE]); assert.deepStrictEqual(P1().extra_state, { [RB_PAGE]: { origin: 'brand' } });
+  assert.deepStrictEqual(P1().discover_state, { at: '2026-11-16T10:00:00Z', found: 0, added: 1, note: 'ny butik', brave: false, brand: { brand: 'roborock', shop: 'dk.roborock.com', result: 'added' } });
+  assert.strictEqual(P1().offers[0].price, 5500, 'this run still shows the Prisjagt price'); assert.strictEqual(db.sent.length, 0);
+  assert.strictEqual(P1().source_url, DPJ); assert.strictEqual(P1().compare_state, 'none');
+  const w = db.patches.filter((x) => x.id === 'R1ABCDEF12').pop().body;
+  assert.deepStrictEqual(Object.keys(w).sort(), ['discover_state', 'extra_state', 'extra_urls'], 'never a price state, a compare state or the link');
+  assert.deepStrictEqual(db.brand_shops, [{ brand: 'roborock', base: RB, sitemaps: [RB_SM], robots: BS.parseRobots(fxText('brand-roborock-robots.txt')).rules.slice(0, 60), status: 'ok', checked_at: '2026-11-16T10:00:00Z' }]);
+  assert(/Søgning: 1 vare, 0 kald, 1 ny butik, ingen søgenøgle\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(res.summary.length, 5);
+  assert(logs.some((l) => /ny butik dk\.roborock\.com \(4049 kr\.\), producentens butik/.test(l)), logs.join('\n')); assert(logs.some((l) => /Producentbutikker: 4 forespørgsler, 1 nye mærker/.test(l)), logs.join('\n'));
+  // next run: the shop is an ordinary extra shop now. A shop the job found itself is not silent at its first reading: 4.049 meets the goal (5.000)
+  res = await dRun(db, { key: null, brandFetch: bf, shops: rbShops(), now: hoursLater(1), extra: {} });
+  assert.strictEqual(bf.calls.length, 3, 'nothing is probed again'); assert.strictEqual(P1().offers[0].price, 4049); assert.strictEqual(P1().offers[0].store, 'Roborock Officiel Butik i Danmark');
+  assert.strictEqual(db.sent.length, 1); assert.strictEqual(db.sent[0].subject, 'Prisvagten: 1 pris har ramt dit mål');
+  assert(db.sent[0].text.includes('Pris: 4.049 kr. hos Roborock Officiel Butik i Danmark'), db.sent[0].text); assert(db.sent[0].text.includes('Fundet hos en ny butik: Roborock Officiel Butik i Danmark.'), db.sent[0].text);
+  assert.strictEqual(P1().notified_price, 4049); assert(P1().extra_state[RB_PAGE].seen === true && P1().extra_state[RB_PAGE].origin === 'brand');
+  // and not again for the same price
+  await dRun(db, { key: null, brandFetch: bf, shops: rbShops(), now: hoursLater(2) }); assert.strictEqual(db.sent.length, 1); assert.strictEqual(P1().offers[0].price, 4049);
+});
+
+test('brand shop: added even when not cheaper and even when sold out (campaigns come later); a title with an accessory kit only is not "the same product"', async () => {
+  // the manufacturer sells it for 6.400 and it is sold out: added all the same, no mail, no price change
+  const db = dDb(); db.products.push(dProduct('R2ABCDEF12'));
+  const shops = { [RB_PAGE]: dShopHtml('Roborock Officiel Butik i Danmark', RB_NAME, 6400, false) };
+  await dRun(db, { key: null, brandFetch: bFetch(rbSites()), shops });
+  assert.deepStrictEqual(db.products[0].extra_urls, [RB_PAGE]); assert.strictEqual(db.products[0].extra_state[RB_PAGE].origin, 'brand'); assert.strictEqual(db.products[0].discover_state.brand.result, 'added');
+  await dRun(db, { key: null, brandFetch: bFetch(rbSites()), shops, now: hoursLater(1) });
+  assert.strictEqual(db.products[0].offers[0].price, 5500, 'the cheapest in stock is still Elgiganten'); assert(db.products[0].offers.some((o) => o.price === 6400 && o.inStock === false), 'the sold-out shop is in the list'); assert.strictEqual(db.sent.length, 0);
+  // a sitemap that only has accessories for the product: the pages are read in rank order and none is the product (name, outlier rule)
+  const db2 = dDb(); db2.products.push(dProduct('R3ABCDEF12'));
+  const sm = '<urlset>' + [RB_ACC, RB + '/products/saros-10r-tilbehorsgaveaeske-2-pak-bundle-til-kampagnepris'].map((u) => '<url><loc>' + u + '</loc></url>').join('') + '</urlset>';
+  const bf = bFetch(rbSites({ [RB_PSM]: { body: sm } }));
+  const res = await dRun(db2, { key: null, brandFetch: bf, shops: rbShops({ [RB + '/products/saros-10r-tilbehorsgaveaeske-2-pak-bundle-til-kampagnepris']: dShopHtml('Roborock', 'Saros 10R Roborock tilbehørsgaveæske', 399) }) });
+  assert.strictEqual(db2.products[0].extra_urls, null); assert.strictEqual(db2.products[0].discover_state.brand.result, 'not same product'); assert.deepStrictEqual(res.ctx.fetched, [DPJ, RB_ACC, RB + '/products/saros-10r-tilbehorsgaveaeske-2-pak-bundle-til-kampagnepris']);
+});
+
+test('brand shop: a brand that refuses (403, a robots.txt that disallows everything, a challenge page) is cached as not available and not asked again within 30 days', async () => {
+  const cases = [['robots 403', { [RB + '/robots.txt']: { status: 403, body: 'nej' } }], ['sitemap 403', { [RB_SM]: { status: 403, body: 'Forbidden' } }], ['429', { [RB + '/robots.txt']: { status: 429, body: '' } }],
+    ['disallow all', { [RB + '/robots.txt']: { body: 'User-agent: *\nDisallow: /\n' } }], ['challenge', { [RB_SM]: { body: '<html><head><title>Just a moment...</title></head><body>cf-chl</body></html>' } }]];
+  for (const [name, over] of cases) {
+    const db = dDb(); db.products.push(dProduct('F1ABCDEF12'));
+    const bf = bFetch(rbSites(over));
+    const res = await dRun(db, { key: null, brandFetch: bf, shops: rbShops() });
+    assert.strictEqual(db.products[0].discover_state.brand.result, 'refused', name); assert.strictEqual(db.products[0].extra_urls, null, name);
+    assert.deepStrictEqual(db.brand_shops.map((r) => [r.brand, r.status, r.base]), [['roborock', 'refused', null]], name); assert(!res.ctx.fetched.some((u) => u.indexOf('roborock.com') !== -1), name + ': no page of the shop is read');
+    const n = bf.calls.length; assert(n <= 2, name + ': ' + n + ' requests, no retry and no second try at another address');
+    // the product comes due again after 7 days: the brand is not asked again until 30 days have passed
+    await dRun(db, { key: null, brandFetch: bf, shops: rbShops(), now: daysLater(8) }); assert.strictEqual(bf.calls.length, n, name + ': 8 days later: cached');
+    await dRun(db, { key: null, brandFetch: bf, shops: rbShops(), now: daysLater(29) }); assert.strictEqual(bf.calls.length, n, name + ': 29 days later: cached');
+    await dRun(db, { key: null, brandFetch: bf, shops: rbShops(), now: daysLater(36) }); assert(bf.calls.length > n, name + ': 36 days later: asked again'); assert.strictEqual(db.brand_shops.length, 1, 'the row is replaced, not added');
+  }
+  // refused on the product page itself (the shop answers the sitemap but blocks the page): 'refused', the cache keeps the shop, the host is left alone for the run
+  const db = dDb(); db.products.push(dProduct('F2ABCDEF12'));
+  const res = await dRun(db, { key: null, brandFetch: bFetch(rbSites()), shops: rbShops({ [RB_PAGE]: () => { throw Object.assign(new PJ.PageError('blocked', 'HTTP 403'), { shop: true }); } }) });
+  assert.strictEqual(db.products[0].discover_state.brand.result, 'refused'); assert.strictEqual(db.brand_shops[0].status, 'ok'); assert.deepStrictEqual(res.stats.blockedHosts, ['roborock.com']);
+});
+
+test('brand shop: a brand with no shop is cached as "none" and not probed again within 30 days; the guesses are tried in order, 7 at most', async () => {
+  const db = dDb(); db.products.push(dProduct('N1ABCDEF12', { title: 'Vitamix A3500 blender', name: 'Blender' }));
+  const bf = bFetch({}), logs = [];
+  const res = await dRun(db, { key: null, brandFetch: bf, logs });
+  assert.deepStrictEqual(db.products[0].discover_state.brand, { brand: 'vitamix', shop: null, result: 'no shop' }); assert.strictEqual(db.products[0].extra_urls, null);
+  assert.deepStrictEqual(bf.calls.filter((c) => /robots\.txt$/.test(c.url)).map((c) => c.url), ['https://dk.vitamix.com/robots.txt', 'https://www.vitamix.dk/robots.txt', 'https://vitamix.dk/robots.txt', 'https://shop.vitamix.dk/robots.txt', 'https://store.vitamix.dk/robots.txt', 'https://www.vitamix.com/robots.txt'], 'the two locale addresses share one origin: one robots.txt');
+  assert(bf.calls.length <= 20 && bf.calls.length > 6, 'bounded: ' + bf.calls.length); assert.deepStrictEqual(db.brand_shops.map((r) => [r.brand, r.status]), [['vitamix', 'none']]);
+  assert(/Søgning: 1 vare, 0 kald, 0 nye butikker, ingen søgenøgle\./.test(res.summary[2]), res.summary[2]);
+  const n = bf.calls.length;
+  await dRun(db, { key: null, brandFetch: bf, now: daysLater(8) }); assert.strictEqual(bf.calls.length, n, 'cached for 30 days'); assert.strictEqual(db.products[0].discover_state.at, '2026-11-24T10:00:00Z');
+  await dRun(db, { key: null, brandFetch: bf, now: daysLater(31) }); assert(bf.calls.length > n, 'then probed again');
+  // an address that fails now and then (a 503) is no proof that there is no shop: nothing is cached for it
+  const db2 = dDb(); db2.products.push(dProduct('N2ABCDEF12', { title: 'Vitamix A3500 blender', name: 'Blender' }));
+  const sites = {}; BS.guessBases('vitamix').forEach((b) => { sites[new URL(b).origin + '/robots.txt'] = { status: 503, body: '' }; });
+  await dRun(db2, { key: null, brandFetch: bFetch(sites) }); assert.deepStrictEqual(db2.brand_shops, [], 'a server error is not cached'); assert.strictEqual(db2.products[0].discover_state.brand.result, 'no shop');
+});
+
+test('brand shop: a brand of several words (Shaping New Tomorrow -> shapingnewtomorrow, found through the list of known shops, no guessing)', async () => {
+  const SN = 'https://shapingnewtomorrow.dk';
+  const sm = '<urlset>' + ['sustain-vase', 'sustain-vase-set-af-2', 'sustain-candle-holder', 'sustain-vase-gaveaeske'].map((s) => '<url><loc>' + SN + '/products/' + s + '</loc></url>').join('') + '</urlset>';
+  const bf = bFetch({ [SN + '/robots.txt']: { body: 'User-agent: *\nDisallow: /cart\nSitemap: ' + SN + '/sitemap.xml\n' }, [SN + '/sitemap.xml']: { body: sm } });
+  const db = dDb(); db.products.push(dProduct('S1ABCDEF12', { title: 'Shaping New Tomorrow Sustain Vase', name: 'Vase' }));
+  const shops = { [SN + '/products/sustain-vase']: dShopHtml('Shaping New Tomorrow', 'Sustain Vase | Shaping New Tomorrow', 5300) };
+  const res = await dRun(db, { key: null, brandFetch: bf, shops });
+  assert.deepStrictEqual(bf.calls.map((c) => c.url), [SN + '/robots.txt', SN + '/sitemap.xml'], 'the longest brand is in the list: nothing is guessed');
+  assert.deepStrictEqual(db.products[0].discover_state.brand, { brand: 'shapingnewtomorrow', shop: 'shapingnewtomorrow.dk', result: 'added' }); assert.deepStrictEqual(db.products[0].extra_urls, [SN + '/products/sustain-vase']);
+  assert.deepStrictEqual(db.brand_shops.map((r) => r.brand), ['shapingnewtomorrow']); assert(res.ctx.fetched.indexOf(SN + '/products/sustain-vase') !== -1);
+  // a brand that is not in the list but is found by the guesses, with a locale in the base (www.<b>.com/da-dk): sitemap lines of the locale first, other locales' URLs left out
+  const AC = 'https://www.acmeco.com', f2 = bFetch({
+    [AC + '/robots.txt']: { body: 'User-agent: *\nSitemap: ' + AC + '/en-us/sitemap.xml\nSitemap: ' + AC + '/da-dk/sitemap.xml\n' },
+    [AC + '/da-dk/sitemap.xml']: { body: '<urlset><url><loc>' + AC + '/en-us/products/zeta-9</loc></url><url><loc>' + AC + '/da-dk/products/zeta-9-lampe</loc></url><url><loc>https://other.com/da-dk/products/zeta-9</loc></url></urlset>' },
+  });
+  const db2 = dDb(); db2.products.push(dProduct('S2ABCDEF12', { title: 'Acmeco Zeta 9 lampe', name: 'Lampe' }));
+  await dRun(db2, { key: null, brandFetch: f2, shops: { [AC + '/da-dk/products/zeta-9-lampe']: dShopHtml('Acmeco', 'Acmeco Zeta 9 lampe', 5800) } });
+  assert.strictEqual(db2.brand_shops[0].base, AC + '/da-dk'); assert.deepStrictEqual(db2.products[0].extra_urls, [AC + '/da-dk/products/zeta-9-lampe'], 'only the shop\'s own domain and its Danish locale');
+  assert(f2.calls.some((c) => c.url === AC + '/da-dk/sitemap.xml') && !f2.calls.some((c) => c.url === AC + '/en-us/sitemap.xml'), 'the Danish sitemap line was tried first, was usable, and the other one was not needed');
+});
+
+test('brand shop: sitemaps: an index follows at most 3 children (product ones first), .gz is unpacked, a file over 8 MB is skipped, entities in <loc>, only the shop\'s own domain', async () => {
+  const O = 'https://shop.example.dk';
+  const url = (s) => '<url><loc>' + O + '/products/' + s + '</loc></url>';
+  const kids = ['sitemap_pages_1.xml', 'sitemap_products_1.xml.gz', 'sitemap_products_2.xml', 'sitemap_blogs_1.xml', 'sitemap_products_3.xml', 'sitemap_products_4.xml', 'sitemap_products_5.xml'];
+  const index = '<sitemapindex>' + kids.map((k) => '<sitemap><loc>' + O + '/' + k + '</loc></sitemap>').join('') + '<sitemap><loc>https://evil.example.com/sitemap_products_9.xml</loc></sitemap></sitemapindex>';
+  const sites = { [O + '/sitemap.xml']: { body: index },
+    [O + '/sitemap_products_1.xml.gz']: { body: zlib.gzipSync('<urlset>' + url('alfa-1') + '<url><loc>' + O + '/products/a?x=1&amp;y=2</loc></url><url><loc>https://evil.example.com/products/alfa-1</loc></url></urlset>') },
+    [O + '/sitemap_products_2.xml']: { body: '<urlset>' + url('beta-2') + '</urlset>' },
+    [O + '/sitemap_products_3.xml']: { body: '<urlset>' + url('gamma-3') + '</urlset>' }, [O + '/sitemap_products_4.xml']: { body: '<urlset>' + url('delta-4') + '</urlset>' } };
+  const bf = bFetch(sites);
+  const run = BS.makeBrandRun({ fetch: bf, sleep: async () => {}, cache: { get: async () => null, put: async () => {} }, read: async () => ({ skip: true }) });
+  const got = await run.shopUrls({ base: O, sitemaps: [O + '/sitemap.xml'] });
+  assert.deepStrictEqual(got.urls.map((u) => u.replace(O + '/products/', '')), ['alfa-1', 'a?x=1&y=2', 'beta-2', 'gamma-3'], 'the .gz file unpacked, &amp; decoded, the foreign domain left out');
+  assert.deepStrictEqual(bf.calls.map((c) => c.url.replace(O + '/', '')), ['sitemap.xml', 'sitemap_products_1.xml.gz', 'sitemap_products_2.xml', 'sitemap_products_3.xml'], 'the index, then three product files (never the pages, blog or the other domain)');
+  // a file over 8 MB is skipped (the next one is read), and the same file is not fetched twice in a run
+  const big = '<urlset>' + url('alfa-1') + '<!--' + 'x'.repeat(BS.MAX_SITEMAP_BYTES) + '--></urlset>';
+  const f2 = bFetch({ [O + '/sitemap.xml']: { body: '<sitemapindex><sitemap><loc>' + O + '/sitemap_products_1.xml</loc></sitemap><sitemap><loc>' + O + '/sitemap_products_2.xml</loc></sitemap></sitemapindex>' }, [O + '/sitemap_products_1.xml']: { body: big }, [O + '/sitemap_products_2.xml']: { body: '<urlset>' + url('beta-2') + '</urlset>' } });
+  const r2 = BS.makeBrandRun({ fetch: f2, sleep: async () => {}, cache: { get: async () => null, put: async () => {} }, read: async () => ({ skip: true }) });
+  assert.deepStrictEqual((await r2.shopUrls({ base: O, sitemaps: [O + '/sitemap.xml'] })).urls, [O + '/products/beta-2'], 'over 8 MB: skipped'); await r2.shopUrls({ base: O, sitemaps: [O + '/sitemap.xml'] }); assert.strictEqual(f2.calls.length, 3, 'read once per run');
+  // a gzip bomb (small file, huge content) is skipped too
+  const f3 = bFetch({ [O + '/sitemap.xml']: { body: zlib.gzipSync('<urlset>' + url('a-1') + '<!--' + 'x'.repeat(BS.MAX_SITEMAP_BYTES + 10) + '--></urlset>') } });
+  const r3 = BS.makeBrandRun({ fetch: f3, sleep: async () => {}, cache: { get: async () => null, put: async () => {} }, read: async () => ({ skip: true }) });
+  assert.deepStrictEqual((await r3.shopUrls({ base: O, sitemaps: [O + '/sitemap.xml'] })).urls, []);
+  // redirects only inside the registrable domain; a redirect away is no sitemap
+  const f4 = bFetch({ [O + '/robots.txt']: { status: 301, body: '', headers: { location: 'https://evil.example.com/robots.txt' } } });
+  const r4 = BS.makeBrandRun({ fetch: f4, sleep: async () => {}, cache: { get: async () => null, put: async () => {} }, read: async () => ({ skip: true }) });
+  const p4 = await r4.probe('shop', [O]); assert.strictEqual(p4.row.status, 'none'); assert.strictEqual(f4.calls.length, 1);
+});
+
+test('brand shop: robots.txt is obeyed: a product page it disallows is not read; the guards of the shop reader apply to every address', async () => {
+  const db = dDb(); db.products.push(dProduct('G1ABCDEF12'));
+  const bf = bFetch(rbSites({ [RB + '/robots.txt']: { body: 'User-agent: *\nDisallow: /products/roborock-saros\nSitemap: ' + RB_SM + '\n' } }));
+  const res = await dRun(db, { key: null, brandFetch: bf, shops: rbShops() });
+  assert(!res.ctx.fetched.some((u) => u.indexOf('/products/roborock-saros-10r') !== -1), 'disallowed: not read'); assert.strictEqual(db.products[0].extra_urls, null);
+  assert.deepStrictEqual(db.brand_shops[0].robots, [[false, '/products/roborock-saros']], 'the rules are kept with the brand');
+  const run = BS.makeBrandRun({ fetch: bFetch({}), sleep: async () => {}, cache: { get: async () => null, put: async () => {} }, read: async () => ({ skip: true }) });
+  assert.strictEqual((await run.probe('x', ['http://localhost/', 'https://127.0.0.1/', 'https://user:pw@shop.dk/', 'https://shop.dk:8443/'])).row.status, 'none', 'addresses that do not pass validateShopUrl are never requested');
+});
+
+test('brand shop: per run at most 20 requests and 2 new brands; what does not fit is deferred (not marked, nothing cached) and goes first next time', async () => {
+  // four products, four unknown brands, every address answers 404: a brand costs 13 requests, so one and a half fit in a run
+  const mk = () => { const db = dDb(); ['Aaaaa A1 lampe', 'Bbbbb B2 lampe', 'Ccccc C3 lampe', 'Ddddd D4 lampe'].forEach((t, i) => db.products.push(dProduct('Q' + (i + 1) + 'ABCDEF12', { title: t, name: 'Lampe ' + i }))); return db; };
+  const db = mk(), bf = bFetch({});
+  let res = await dRun(db, { key: null, brandFetch: bf });
+  assert.strictEqual(bf.calls.length, 20, 'exactly the cap'); assert.deepStrictEqual(db.brand_shops.map((r) => r.brand), ['aaaaa'], 'the second brand did not fit: nothing cached for it');
+  assert.deepStrictEqual(db.products.map((p) => !!p.discover_state), [true, false, false, false], 'the others are not marked: they stay due');
+  assert(/Søgning: 1 vare, 0 kald, 0 nye butikker, ingen søgenøgle\./.test(res.summary[2]), res.summary[2]);
+  for (let i = 2; i <= 4; i++) {
+    const before = bf.calls.length; res = await dRun(db, { key: null, brandFetch: bf });
+    assert(bf.calls.length - before <= 20, 'run ' + i + ': ' + (bf.calls.length - before) + ' requests'); assert.strictEqual(db.brand_shops.length, i, 'one more brand per run'); assert.strictEqual(db.products.filter((p) => p.discover_state).length, i);
+  }
+  await dRun(db, { key: null, brandFetch: bf }); assert.strictEqual(db.brand_shops.length, 4); const n = bf.calls.length; await dRun(db, { key: null, brandFetch: bf }); assert.strictEqual(bf.calls.length, n, 'all done');
+  // the cap of two new brands: addresses that fail at once cost 6 requests a brand (the two locale addresses share one robots.txt)
+  const dead = async (u) => { dead.calls.push(u); throw new Error('fetch failed'); }; dead.calls = [];
+  const db2 = mk(); const res2 = await dRun(db2, { key: null, brandFetch: dead });
+  assert.strictEqual(db2.brand_shops.length, 2, 'two brands probed, the third waits'); assert.strictEqual(dead.calls.length, 12); assert.deepStrictEqual(db2.products.map((p) => !!p.discover_state), [true, true, false, false]);
+  assert(/Søgning: 2 varer/.test(res2.summary[2]), res2.summary[2]); assert.strictEqual(BS.MAX_REQUESTS, 20); assert.strictEqual(BS.MAX_NEW_BRANDS, 2);
+  // a brand already known costs nothing and does not count as new: a third product of a cached brand is looked up in the same run
+  const db3 = dDb(); db3.brand_shops.push({ brand: 'aaaaa', base: null, sitemaps: [], robots: null, status: 'none', checked_at: '2026-11-10T10:00:00Z' });
+  ['Aaaaa A1 lampe', 'Bbbbb B2 lampe', 'Ccccc C3 lampe', 'Aaaaa A2 bord'].forEach((t, i) => db3.products.push(dProduct('Q' + (i + 1) + 'ABCDEF12', { title: t, name: 'x' + i })));
+  const dead3 = async (u) => { dead3.calls.push(u); throw new Error('fetch failed'); }; dead3.calls = [];
+  await dRun(db3, { key: null, brandFetch: dead3 });
+  assert.deepStrictEqual(db3.products.map((p) => !!p.discover_state), [true, true, true, true], 'two new brands and two products of the known brand'); assert.strictEqual(dead3.calls.length, 12);
+});
+
+test('brand shop: 20 products that already exist (discover_state null; Prisjagt and single-shop, with and without extra shops) are all looked up within 5 runs, 4 a run', async () => {
+  const db = dDb(); db.brand_shops.push({ brand: 'roborock', base: null, sitemaps: [], robots: null, status: 'none', checked_at: '2026-11-15T10:00:00Z' });
+  const S = 'https://www.enkeltbutik.dk/saros', E1 = 'https://www.ekstra.dk/saros';
+  const shops = dShops({ [S]: dShopHtml('Enkeltbutik', 'Roborock Saros 10R', 5600), [E1]: dShopHtml('Ekstra', 'Roborock Saros 10R', 5400) });
+  for (let i = 1; i <= 20; i++) {
+    const id = 'X' + String(i).padStart(2, '0') + 'ABCDEF12';
+    if (i % 4 === 0) db.products.push(dProduct(id, { source_url: S, tracked_variants: ['shop'], variants: [{ id: 'shop', label: 'Enkeltbutik', lowest: 5600, offers: 1, sample: null }], offers: [{ store: 'Enkeltbutik', price: 5600, url: S, inStock: true, note: null, variant: 'shop' }], history: [], extra_urls: i % 8 === 0 ? [E1] : null }));
+    else db.products.push(dProduct(id, { extra_urls: i % 3 === 0 ? [E1] : null }));
+  }
+  assert(db.products.every((p) => p.discover_state === null));
+  const done = () => db.products.filter((p) => p.discover_state).length;
+  const counts = [];
+  for (let r = 0; r < 6; r++) {
+    const res = await dRun(db, { key: null, shops, now: hoursLater(r), brandFetch: bFetch({}) });
+    counts.push(done());
+    if (r < 5) assert(/Søgning: 4 varer, 0 kald, 0 nye butikker, ingen søgenøgle\./.test(res.summary[2]), res.summary[2]); else assert(!/Søgning: \d/.test(res.summary[2]) && /ingen søgenøgle/.test(res.summary[2]), res.summary[2]);
+  }
+  assert.deepStrictEqual(counts, [4, 8, 12, 16, 20, 20], '20 products take 5 runs (4 a run, hourly: 5 hours)');
+  assert(db.products.every((p) => p.discover_state.brand.result === 'no shop' && p.discover_state.brave === false));
+  assert.deepStrictEqual(db.products.filter((p) => p.extra_urls).map((p) => p.extra_urls), db.products.filter((p) => p.extra_urls).map((p) => [E1]), 'existing extra shops stay as they are');
+  // the order: never looked up first, in the order of the list
+  assert.deepStrictEqual(db.products.slice(0, 4).map((p) => p.discover_state.at), Array(4).fill('2026-11-16T10:00:00Z'));
+});
+
+test('brand shop: with a search key too: the manufacturer\'s shop and the search\'s shop are both added, the brand first, each with its origin; one mail names the cheapest', async () => {
+  const db = dDb(); db.products.push(dProduct('B1ABCDEF12'));
+  const brave = dBrave(dResults()), bf = bFetch(rbSites());
+  let res = await dRun(db, { brave, brandFetch: bf, shops: Object.assign(dShops(), rbShops()) });
+  const P1 = () => db.products[0];
+  assert.deepStrictEqual(P1().extra_urls, [RB_PAGE, D_K]); assert.deepStrictEqual(P1().extra_state, { [RB_PAGE]: { origin: 'brand' }, [D_K]: { origin: 'search' } });
+  assert.deepStrictEqual(P1().discover_state, { at: '2026-11-16T10:00:00Z', found: 29, added: 2, note: 'ny butik', brave: true, brand: { brand: 'roborock', shop: 'dk.roborock.com', result: 'added' } });
+  assert.strictEqual(brave.calls.length, 3); assert(/Søgning: 1 vare, 3 kald, 2 nye butikker\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(res.stats.discover.added, 2);
+  res = await dRun(db, { brave, brandFetch: bf, shops: Object.assign(dShops(), rbShops()), now: hoursLater(1) });
+  assert.strictEqual(P1().offers[0].price, 4049); assert.strictEqual(db.sent.length, 1, 'one mail for the product'); assert(db.sent[0].text.includes('Fundet hos en ny butik: Roborock Officiel Butik i Danmark.'), db.sent[0].text);
+  assert.strictEqual(brave.calls.length, 3); assert.strictEqual(bf.calls.length, 3);
+  // a product that was searched before the key was there (brave: false) is searched at once when the key comes, and not before
+  const db2 = dDb(); db2.products.push(dProduct('B2ABCDEF12'));
+  const b2 = dBrave(dResults()); await dRun(db2, { key: null, brave: b2, brandFetch: bFetch({}) }); assert.strictEqual(b2.calls.length, 0); assert.strictEqual(db2.products[0].discover_state.brave, false);
+  await dRun(db2, { key: null, brave: b2, brandFetch: bFetch({}), now: hoursLater(1) }); assert.strictEqual(b2.calls.length, 0, 'still no key: nothing to do for 7 days');
+  const r3 = await dRun(db2, { brave: b2, brandFetch: bFetch({}), now: hoursLater(2) }); assert.strictEqual(b2.calls.length, 3, 'the key is there: searched now'); assert.strictEqual(db2.products[0].discover_state.brave, true); assert.deepStrictEqual(db2.products[0].extra_urls, [D_K]);
+  assert(/Søgning: 1 vare, 3 kald, 1 ny butik\./.test(r3.summary[2]), r3.summary[2]);
+});
+
+test('brand shop: planBrand: added whatever the price; a full list gives way to the dearest search link that is not the cheapest, else nothing; covered shops are not added', () => {
+  const prod = { source_url: 'https://prisjagt.dk/product.php?p=1', offers: [{ store: 'A', price: 5500, inStock: true, url: 'https://prisjagt.dk/g/1' }] };
+  const v = { url: 'https://dk.shop.com/products/x', price: 9000, store: 'Shop' };
+  assert.deepStrictEqual(BS.planBrand(prod, { extra_urls: null, extra_state: null }, v), { add: [{ url: v.url, price: 9000, store: 'Shop', origin: 'brand' }], remove: [], why: null }, 'dearer than everything: added');
+  assert.strictEqual(BS.planBrand(prod, { extra_urls: ['https://www.shop.com/other'], extra_state: null }, v).why, 'covered', 'the shop is followed already');
+  assert.strictEqual(BS.planBrand(Object.assign({}, prod, { source_url: 'https://www.shop.com/p/1' }), { extra_urls: null }, v).why, 'covered', 'the product\'s own shop');
+  const H = (i) => 'https://www.h' + i + '.dk/p/' + i, five = [1, 2, 3, 4, 5].map(H);
+  const st = (o) => { const s = {}; five.forEach((u, i) => { s[u] = o[i] ? { origin: o[i], offer: { price: [5900, 6100, 5800, 6300, 5400][i] } } : { offer: { price: [5900, 6100, 5800, 6300, 5400][i] } }; }); return s; };
+  let c = BS.planBrand(prod, { extra_urls: five, extra_state: st([null, 'search', 'hand', 'search', 'search']) }, v);
+  assert.deepStrictEqual([c.add.length, c.remove], [1, [H(4)]], 'the dearest link the search found (6.300)');
+  c = BS.planBrand(prod, { extra_urls: five, extra_state: st([null, 'brand', 'hand', null, 'search']) }, v);
+  assert.deepStrictEqual([c.add, c.remove, c.why], [[], [], 'full'], 'a link of origin brand, hand or none is never replaced; the only search link (5.400) is cheaper than the product\'s own 5.500: the cheapest stays');
+  c = BS.planBrand(prod, { extra_urls: five, extra_state: st([null, 'brand', 'hand', 'search', 'search']) }, v);
+  assert.deepStrictEqual(c.remove, [H(4)], 'the dearer of the two search links (6.300, 5.400) goes');
+  assert.strictEqual(BS.planBrand(prod, { extra_urls: five, extra_state: st([null, null, null, null, null]) }, v).why, 'full');
+  // and the search never replaces a link of origin brand
+  const brandPlan = DS.planChange(prod, { extra_urls: five, extra_state: st(['brand', 'brand', 'brand', 'brand', 'brand']) }, [{ url: 'https://www.cheap.dk/p', price: 4000, store: 'Cheap' }]);
+  assert.deepStrictEqual(brandPlan, { add: [], remove: [] });
+  assert.deepStrictEqual(DS.nextState({ extra_state: { a: { origin: 'search' } } }, { remove: [], add: [{ url: 'b', origin: 'brand' }, { url: 'c' }] }), { a: { origin: 'search' }, b: { origin: 'brand' }, c: { origin: 'search' } });
+});
+
+test('brand shop: a full list in the run: the brand shop replaces the dearest search link that is not the cheapest; without a search link it is not added ("full")', async () => {
+  const H = (i) => 'https://www.h' + i + '.dk/p/' + i, prices = [5900, 6100, 5800, 6300, 5700];
+  const shops = rbShops(); prices.forEach((p, i) => { shops[H(i + 1)] = dShopHtml('Butik ' + (i + 1), 'Vare ' + (i + 1), p); });
+  const state = (origins) => { const s = {}; origins.forEach((o, i) => { s[H(i + 1)] = o ? { origin: o, seen: true, fails: 0, at: '2026-11-16T09:00:00Z' } : { seen: true, fails: 0, at: '2026-11-16T09:00:00Z' }; }); return s; };
+  const db = dDb(); db.products.push(dProduct('L1ABCDEF12', { extra_urls: [1, 2, 3, 4, 5].map(H), extra_state: state([null, 'search', 'hand', 'search', 'search']) }));
+  await dRun(db, { key: null, brandFetch: bFetch(rbSites()), shops });
+  assert.deepStrictEqual(db.products[0].extra_urls, [H(1), H(2), H(3), H(5), RB_PAGE]); assert.strictEqual(db.products[0].extra_state[H(4)], undefined); assert.strictEqual(db.products[0].extra_state[RB_PAGE].origin, 'brand');
+  assert.strictEqual(db.products[0].discover_state.brand.result, 'added');
+  const db2 = dDb(); db2.products.push(dProduct('L2ABCDEF12', { extra_urls: [1, 2, 3, 4, 5].map(H), extra_state: state([null, null, 'hand', null, 'brand']) }));
+  await dRun(db2, { key: null, brandFetch: bFetch(rbSites()), shops });
+  assert.deepStrictEqual(db2.products[0].extra_urls, [1, 2, 3, 4, 5].map(H)); assert.strictEqual(db2.products[0].discover_state.brand.result, 'full'); assert.strictEqual(db2.products[0].discover_state.added, 0);
+});
+
+test('brand shop: nothing is looked up twice for a shop that is followed or is the product\'s own; the cache can be read but not written; a failing probe never breaks the run', async () => {
+  const mkRun = (cacheRow, calls) => BS.makeBrandRun({ fetch: bFetch(rbSites()), sleep: async () => {}, now: () => new Date('2026-11-16T10:00:00Z'), cache: { get: async (b) => (b === 'roborock' ? cacheRow : null), put: async () => {} }, read: async () => ({ skip: true }), requestCap: calls });
+  const row = { brand: 'roborock', base: RB, sitemaps: [RB_SM], robots: [], status: 'ok', checked_at: '2026-11-10T10:00:00Z' };
+  const base = { title: 'Roborock Saros 10R', source_url: DPJ, extra_urls: null, offers: dPjPage().rows.map((r) => ({ store: r.store, price: r.price, url: r.url, inStock: true })) };
+  let run = mkRun(row);
+  assert.strictEqual((await run.process(Object.assign({}, base, { source_url: RB_PAGE }))).result, 'own shop', 'a single-shop product whose own shop is the brand shop'); assert.strictEqual(run.requests, 0);
+  assert.strictEqual((await run.process(Object.assign({}, base, { extra_urls: ['https://www.roborock.com/other'] }))).result, 'covered', 'an extra link in that shop already');
+  assert.strictEqual((await run.process(Object.assign({}, base, { offers: base.offers.concat([{ store: 'Roborock', price: 4100, url: 'https://prisjagt.dk/go/9', inStock: true }]) }))).result, 'covered', 'Prisjagt lists the shop under its own name');
+  assert.strictEqual((await run.process(Object.assign({}, base, { title: 'Roborock' }))).result, 'no model', 'a title with only the brand in it'); assert.strictEqual(run.requests, 0);
+  assert.strictEqual((await run.process(Object.assign({}, base, { title: null, name: '' }))).result, 'no shop');
+  // a stale row (31 days) is not used
+  run = mkRun(Object.assign({}, row, { checked_at: '2026-10-15T10:00:00Z' })); const r = await run.process(base); assert(run.requests >= 2, 'probed again: ' + run.requests); assert.strictEqual(r.deferred, true, 'no page reader in this run');
+  // the budget: a product that does not fit is deferred
+  run = mkRun(row, 2); assert.strictEqual((await run.process(base)).deferred, true); assert.strictEqual(run.requests, 2);
+  // every request fails: no shop, the run goes on
+  const db = dDb(); db.products.push(dProduct('E1ABCDEF12'), dProduct('E2ABCDEF12', { title: 'Zulu Z9 lampe' })); const logs = [];
+  const res = await dRun(db, { key: null, brandFetch: async () => { throw new TypeError('boom'); }, logs });
+  assert.strictEqual(res.stats.written, 2, 'the price checks are done'); assert(db.products.every((p) => p.discover_state && p.discover_state.brand.result === 'no shop'));
+  // a cache that cannot be written: the result is used all the same, one line in the log
+  const db2 = dDb(); db2.brandFail = true; db2.products.push(dProduct('E3ABCDEF12')); const l2 = [];
+  await dRun(db2, { key: null, brandFetch: bFetch(rbSites()), shops: rbShops(), logs: l2 });
+  assert.deepStrictEqual(db2.products[0].extra_urls, [RB_PAGE]); assert(l2.some((l) => /kunne ikke gemme roborock/.test(l)), l2.join('\n'));
+});
+
+// ---------------------------------------------------------------- a shop found by the job is not silent at its first reading (P2)
+
+test('notify: the first reading of a shop the job found (origin "brand" or "search") may make a hit and says so in the mail; links of the person or the agent stay silent', async () => {
+  const mk = (extra) => { const db = dDb(); db.products.push(dProduct('M1ABCDEF12', Object.assign({ extra_urls: [D_K], extra_state: { [D_K]: { origin: 'brand' } } }, extra || {}))); return db; };
+  const go = async (db, o) => { const res = await dRun(db, Object.assign({ key: null, brandFetch: bFetch({}) }, o || {})); return res; };
+  // brand and search: not silent
+  for (const origin of ['brand', 'search']) {
+    const db = mk({ extra_state: { [D_K]: { origin } } }); await go(db);
+    assert.strictEqual(db.sent.length, 1, origin); assert(db.sent[0].text.includes('Fundet hos en ny butik: Kampagneshop.'), db.sent[0].text); assert(db.sent[0].text.includes('Pris: 4.050 kr. hos Kampagneshop'), db.sent[0].text);
+    assert.strictEqual(db.products[0].notified_price, 4050);
+    await go(db, { now: hoursLater(1) }); assert.strictEqual(db.sent.length, 1, origin + ': the same price again: no second mail');
+  }
+  // no origin (added by the person or by the agent): silent, only remembered
+  let db = mk({ extra_state: { [D_K]: { seen: false } } }); await go(db); assert.strictEqual(db.sent.length, 0); assert.strictEqual(db.products[0].notified_price, 4050);
+  db = mk({ extra_state: null }); await go(db); assert.strictEqual(db.sent.length, 0); assert.strictEqual(db.products[0].notified_price, 4050, 'a link without any state: silent');
+  // the other rules stay: opt-in switch (recorded, no mail), bought, a goal that is not met, a price that was announced already, a lower price than the announced one
+  db = mk(); db.profiles.push({ user_id: 'u1', notify_email: false, shops_always: [], shops_exclude: [], shops_only: false }); await go(db); assert.strictEqual(db.sent.length, 0); assert.strictEqual(db.products[0].notified_price, 4050, 'recorded without a mail');
+  db = mk({ bought_at: '2026-11-01T00:00:00Z' }); await go(db); assert.strictEqual(db.sent.length, 0);
+  db = mk({ target_value: 3000 }); await go(db); assert.strictEqual(db.sent.length, 0); assert.strictEqual(db.products[0].notified_price, null, 'not a hit: nothing is announced');
+  db = mk({ notified_price: 4050, notified_at: '2026-11-16T09:00:00Z' }); await go(db); assert.strictEqual(db.sent.length, 0, 'the same price was announced already');
+  db = mk({ notified_price: 4100, notified_at: '2026-11-16T09:00:00Z' }); await go(db); assert.strictEqual(db.sent.length, 1, 'lower than the announced price'); assert.strictEqual(db.products[0].notified_price, 4050);
+  // a second reading is an ordinary hit: no "found" line
+  db = mk({ extra_state: { [D_K]: { origin: 'brand', seen: true, fails: 0, at: '2026-11-16T09:00:00Z' } } }); await go(db); assert.strictEqual(db.sent.length, 1); assert(!/Fundet hos/.test(db.sent[0].text), db.sent[0].text);
+  // the shop is not the cheapest: no found line, no mail
+  db = mk({ target_value: 5000, extra_state: { [D_K]: { origin: 'brand' } } }); const shops = dShops({ [D_K]: dShopHtml('Kampagneshop', 'Roborock Saros 10R Robotstøvsuger', 5600) });
+  await go(db, { shops }); assert.strictEqual(db.sent.length, 0); assert.strictEqual(db.products[0].offers[0].price, 5500);
+  // the mail text
+  const m = composeMail([{ name: 'Saros', price: 4049, store: 'Roborock Officiel Butik i Danmark', url: RB_PAGE, verdict: null, warning: null, reason: null, found: 'Roborock Officiel Butik i Danmark' }], 'https://example.test/');
+  assert(m.text.includes('   Fundet hos en ny butik: Roborock Officiel Butik i Danmark.\n'), m.text); assert(!/[—!]/.test(m.text));
+});
+
+// ---------------------------------------------------------------- no product names, e-mail addresses, user ids or links with a path in the public log (P3)
+
+test('logs: a full fake run with distinctive names, requirements, addresses and links: none of them is in the log, the summary or the console; products are told by an 8-character tag', async () => {
+  const NAMES = ['Prinsesse-kjole', 'Maja', 'str. 128', 'anna@example.dk', 'Anna@Example.dk', 'USR-AAAA-BBBB', 'hemmelig-sti', 'Hemmeligt spørgsmål'];
+  const db = dDb(); db.users['USR-AAAA-BBBB-CCCC'] = 'Anna@Example.dk';
+  const S = 'https://www.enkeltbutik.dk/hemmelig-sti/maja-kjole', BAD = 'https://www.fejl.dk/hemmelig-sti/a', LOW = 'https://www.lav.dk/hemmelig-sti/b';
+  const pj = dProduct('PRINS123ABC', { name: 'Prinsesse-kjole Maja', requirements: 'Maja skal bruge str. 128 til festen', user_id: 'USR-AAAA-BBBB-CCCC', extra_urls: [D_K, BAD, LOW], extra_state: { [D_K]: { origin: 'search' } }, target_value: 5000 });
+  db.products.push(pj);
+  db.products.push(dProduct('SINGLE12ABC', { name: 'Prinsesse-kjole Maja single', user_id: 'USR-AAAA-BBBB-CCCC', source_url: 'https://www.fejlbutik.dk/hemmelig-sti/maja', status: 'tracking', tracked_variants: ['shop'], offers: [{ store: 'X', price: 100, url: 'https://www.fejlbutik.dk/hemmelig-sti/maja', inStock: true, note: null, variant: 'shop' }], extra_urls: null }));
+  db.products.push(dProduct('BROKEN12ABC', { name: 'Prinsesse-kjole Maja kaput', user_id: 'USR-AAAA-BBBB-CCCC', source_url: 'https://ugyldig' }));
+  const shops = dShops({ [BAD]: () => { throw new PJ.PageError('network', 'fetch failed'); }, [LOW]: dShopHtml('Lav', 'Roborock Saros 10R', 300), 'https://www.fejlbutik.dk/hemmelig-sti/maja': () => { throw Object.assign(new PJ.PageError('blocked', 'HTTP 403'), { shop: true }); } });
+  const logs = [], con = [], saved = { log: console.log, error: console.error, warn: console.warn, info: console.info };
+  ['log', 'error', 'warn', 'info'].forEach((k) => { console[k] = (...a) => { con.push(a.join(' ')); }; });
+  let res;
+  try {
+    res = await dRun(db, { brave: dBrave(dResults()), brandFetch: bFetch(rbSites()), shops: Object.assign(rbShops(), shops), logs, extra: {
+      fetch: async (u, o) => (/api\.resend\.com/.test(u) ? { ok: false, status: 422, text: async () => JSON.stringify({ message: 'The to field anna@example.dk is not valid' }) } : makeFake(db)(u, o)) } });
+    await dRun(db, { brave: dBrave(dResults()), brandFetch: bFetch(rbSites()), shops: Object.assign(rbShops(), shops), logs, now: hoursLater(1) });
+  } finally { Object.assign(console, saved); }
+  const all = logs.concat(res.summary, con).join('\n');
+  assert(logs.length > 8, 'the run does say things: ' + logs.length + ' lines');
+  NAMES.forEach((n) => assert(all.indexOf(n) === -1, 'the log must not contain ' + n + ':\n' + all));
+  assert(!/kjole|product\.php\?p=|\/hemmelig/i.test(all), all); assert(!all.includes(D_KEY));
+  assert(logs.some((l) => /^ {2}PRINS123 /.test(l)) || logs.some((l) => /PRINS123/.test(l)), 'products are told by their tag (8 characters of the id): ' + all);
+  assert(logs.some((l) => /kampagneshop|fejl\.dk/.test(l)) || res.stats.extraFail >= 0, 'shop host names may stay');
+  assert.strictEqual(LG.tag({ id: 'PRINS123ABC' }), 'PRINS123'); assert.strictEqual(LG.tag(null), '?');
+  assert.strictEqual(LG.safe(new Error('Resend HTTP 422 to anna@example.dk, bo@x.dk')), 'Resend HTTP 422 to [adresse], [adresse]');
+  // the database client keeps the details of an error (a failing row names the product) out of its message, and ids out of the path
+  const f = async () => ({ ok: false, status: 400, text: async () => JSON.stringify({ code: '23514', message: 'new row violates check constraint', details: 'Failing row contains (Prinsesse-kjole, anna@example.dk)' }) });
+  let err; try { await makeClient('https://x.supabase.test', SERVICE_KEY, f).authUser('USR-AAAA-BBBB'); } catch (e) { err = e; }
+  try { await makeClient('https://x.supabase.test', SERVICE_KEY, f).select('products', 'id=eq.1'); } catch (e) { err = e; }
+  assert(err && /23514 new row violates check constraint/.test(err.message) && !/Prinsesse|anna@/.test(err.message), err && err.message); assert(/Prinsesse/.test(err.body), 'the body stays for the code that needs it');
+  // a guard in the sources: a log line never builds on a name, a title, requirements, a question, a user id or a source link
+  const files = ['run.js'].concat(fs.readdirSync(path.join(__dirname, 'lib')).map((n) => 'lib/' + n));
+  files.forEach((fl) => fs.readFileSync(path.join(__dirname, fl), 'utf8').split('\n').forEach((line, i) => {
+    if (!/\blog\(|console\.(log|error|warn|info)\(/.test(line)) return;
+    assert(!/\b(prod|p|r\.prod)\.name\b|userId|\.requirements|\.question|\.title\b|\.source_url|\.email\b/.test(line.replace(/mark\(r\.email[^)]*\)/, '')), fl + ':' + (i + 1) + ' logs something private: ' + line.trim());
+  }));
+});
+
+test('brand shop: a base with a locale needs its locale in the sitemap (a global sitemap does not make a shop Danish); its own sitemap is tried after the robots.txt lines that name the locale; a run out of time asks for nothing', async () => {
+  const G = 'https://www.globex.com', mk = (sites, o) => { const f = bFetch(sites); return { f, run: BS.makeBrandRun(Object.assign({ fetch: f, sleep: async () => {}, cache: { get: async () => null, put: async () => {} }, read: async () => ({ skip: true }) }, o || {})) }; };
+  const robots = { body: 'User-agent: *\nSitemap: ' + G + '/sitemap.xml\n' };
+  let x = mk({ [G + '/robots.txt']: robots, [G + '/sitemap.xml']: { body: '<urlset><url><loc>' + G + '/en-us/products/a</loc></url></urlset>' } });
+  assert.strictEqual((await x.run.probe('globex', [G + '/da-dk'])).row.status, 'none', 'the shop has a global sitemap and no Danish site');
+  x = mk({ [G + '/robots.txt']: robots, [G + '/sitemap.xml']: { body: '<urlset><url><loc>' + G + '/da-dk/products/a</loc></url></urlset>' } });
+  assert.deepStrictEqual((await x.run.probe('globex', [G + '/da-dk'])).row.sitemaps, [G + '/sitemap.xml'], 'a global sitemap that holds Danish pages is fine');
+  x = mk({ [G + '/robots.txt']: robots, [G + '/da-dk/sitemap.xml']: { body: '<urlset><url><loc>' + G + '/da-dk/shop/a</loc></url></urlset>' } });
+  const p = await x.run.probe('globex', [G + '/da-dk']);
+  assert.deepStrictEqual([p.row.status, p.row.sitemaps, x.f.calls.map((c) => c.url)], ['ok', [G + '/da-dk/sitemap.xml'], [G + '/robots.txt', G + '/da-dk/sitemap.xml']], 'the base\'s own sitemap first when the robots.txt names none for the locale (as www.sonos.com/da-dk)');
+  // out of time: nothing is requested, the product is deferred
+  x = mk(rbSites(), { expired: () => true, cache: { get: async () => ({ brand: 'roborock', base: RB, sitemaps: [RB_SM], robots: [], status: 'ok', checked_at: new Date().toISOString() }), put: async () => {} } });
+  const r = await x.run.process({ title: 'Roborock Saros 10R', source_url: DPJ, offers: [] });
+  assert.strictEqual(r.deferred, true); assert.strictEqual(x.f.calls.length, 0);
+});
+
 (async () => {
   let fail = 0;
   for (const t of tests) {
-    try { await t.fn(); console.log('ok   ' + t.name); } catch (e) { fail++; console.log('FAIL ' + t.name + '\n     ' + String(e && e.stack || e).split('\n').slice(0, 6).join('\n     ')); }
+    try { await t.fn(); console.log('ok   ' + t.name); } catch (e) { fail++; console.log('FAIL ' + t.name + '\n     ' + String(e && e.stack || e).split("\n").slice(0, 16).join('\n     ')); }
   }
   if (process.argv.includes('--live')) {
-    try { await live(); console.log('ok   live sanity fetch'); } catch (e) { fail++; console.log('FAIL live sanity fetch\n     ' + String(e && e.stack || e).split('\n').slice(0, 6).join('\n     ')); }
+    try { await live(); console.log('ok   live sanity fetch'); } catch (e) { fail++; console.log('FAIL live sanity fetch\n     ' + String(e && e.stack || e).split("\n").slice(0, 16).join('\n     ')); }
   }
   console.log(fail ? fail + ' of ' + tests.length + ' FAILED' : 'all ' + tests.length + ' tests passed');
   process.exit(fail ? 1 : 0);

@@ -42,7 +42,7 @@ direction marks. `p_picks`: an array of 1 to 5 objects with exactly these keys:
 | key | rule |
 | --- | --- |
 | `name` | text, 1 to 120 characters |
-| `url` | `https://` link, host with a dot, no port, no `user:password@`, no spaces, at most 500 characters |
+| `url` | exactly `https://prisjagt.dk/product.php?p=<digits>` (a leading `www.` is dropped when it is stored); nothing else is accepted, no shop link |
 | `store` | text, 1 to 60 characters |
 | `price` | number above 0 and below 10,000,000, in kr. |
 | `was` | optional: the normal price in kr., a number above `price`. `null` counts as absent |
@@ -112,9 +112,9 @@ about the person is included.
 curl -s "$SUPABASE_URL/rest/v1/rpc/ai_alt_set" \
   -H "apikey: $SUPABASE_PUBLISHABLE_KEY" -H "Content-Type: application/json" \
   -d '{"p_id": "5b1f0c0e-6d2a-4f55-9b0e-2f3c8a7d9e11", "p_items": [
-    {"kind": "similar", "name": "Bose QuietComfort 45", "url": "https://shop.example.dk/bose-qc45",
+    {"kind": "similar", "name": "Bose QuietComfort 45", "url": "https://prisjagt.dk/product.php?p=1234567",
      "store": "Shop A", "price": 2199, "why": "Samme klasse og lidt lettere."},
-    {"kind": "deal", "name": "Sennheiser Momentum 4", "url": "https://shop-b.example.dk/momentum-4",
+    {"kind": "deal", "name": "Sennheiser Momentum 4", "url": "https://prisjagt.dk/product.php?p=7654321",
      "store": "Shop B", "price": 1999, "was": 2499, "why": "20 % under normalprisen i dag."}]}'
 ```
 
@@ -124,7 +124,7 @@ curl -s "$SUPABASE_URL/rest/v1/rpc/ai_alt_set" \
 | --- | --- |
 | `kind` | `"similar"` (a product worth considering) or `"deal"` (same category, on a real discount right now) |
 | `name` | text, 1 to 120 characters |
-| `url` | `https://` link to the product page, host with a dot, no port, no `user:password@`, no spaces, at most 500 characters |
+| `url` | exactly `https://prisjagt.dk/product.php?p=<digits>` (a leading `www.` is dropped when it is stored); nothing else is accepted, no shop link |
 | `store` | text, 1 to 60 characters |
 | `price` | number above 0 and below 10,000,000, in kr. |
 | `was` | optional: for a deal, the normal price in kr., a number above `price`. `null` counts as absent |
@@ -149,8 +149,10 @@ Returns `true`, or `false` when the product is not waiting for an answer.
 
 - Work through the list from `ai_alt_list`, and answer every request with `ai_alt_set` or `ai_alt_fail`. A request with no answer
   is shown to the person as failed after 6 hours.
-- Suggest real products that are sold in Denmark, in kr., with a link to a product page you have actually opened. Never invent
-  a product, a price or a link. Prices must be what the page shows now.
+- Suggest real products that are sold in Denmark, in kr., with the link to their prisjagt.dk product page that you have actually
+  opened, in exactly the form `https://prisjagt.dk/product.php?p=<digits>`: the database refuses any other link (a shop link,
+  another prisjagt.dk page, an extra query). Answers stored before this rule are not touched. Never invent a product, a price
+  or a link. Prices must be what the page shows now.
 - A `deal` must be on a real discount right now: `was` is the shop's normal price or the lowest price of the last 30 days, not an
   inflated "before" price. A `similar` product needs no discount.
 - Do not suggest the same product the person already tracks (the same link or the same model).
@@ -421,3 +423,25 @@ curl -s "$SUPABASE_URL/rest/v1/rpc/resolver_variants" \
 - Colour names differ between languages and shops ("Cloud White/Green" is "hvid/grøn"). Match on meaning.
 - When none clearly matches, or the names do not express the details at all, answer `null`: the person chooses.
 - Never invent an id: use only ids from the row's `variants`.
+
+# Owner diagnostics: `diag_products` (for maintenance, not for the scheduled agents)
+
+This function is for the project lead, so that a problem can be checked (what the job read, which shops it follows, what the
+shop discovery found) without asking the owner to look at the site. The scheduled agents have no use for it and must not call it.
+It takes the same secret `x-resolver-token` as the resolver functions and fails the same way without it
+(`resolver: invalid or missing token`, 42501); the token is added by the environment's proxy, never written in a file or a command.
+
+```bash
+curl -s "$SUPABASE_URL/rest/v1/rpc/diag_products" \
+  -H "apikey: $SUPABASE_PUBLISHABLE_KEY" -H "Content-Type: application/json" -d '{}'
+```
+
+It returns at most 100 products, newest first, and ONLY products whose owner is an administrator (`allowed_emails.is_admin`):
+nothing about anybody else's products, and no user ids or e-mail addresses at all. Per product: `id`, `name`, `title`, `active`,
+`status`, `check_note`, `last_checked`, `host` (the shop's host name, no path), `target_type`, `target_value`, `lowest` (the lowest
+price in stock), `cheapest` (the 5 cheapest offers as `[{store, price, stock, stale}]`; `stale` means the shop could not be read
+and this is its last known offer), `shops` (the extra shops as `[{host, origin, why, price, seen}]`; `origin` is `search`
+for a shop found by the web search, `brand` for the manufacturer's own shop, null for the person's or the agent's link),
+`compare_state`, `compare_tries`, `discover_state` (what the last look for shops did, including `brand`: `{brand, shop, result}`
+with `result` one of `added`, `covered`, `no shop`, `no match`, `not same product`, `refused`, `own shop`, `no model`, `full`),
+`requirements`, `has_name_options`, `verdict_level`, `notified_price`, `notified_at`, `bought_at` and `created_at`.

@@ -13,12 +13,13 @@
 # 11. migrate-suggest.sql: the schema as it was before "Mente du" (schema-pre-suggest.sql), the last step on its own
 # 12. migrate-pjextra.sql: the schema as it was before extra shops for Prisjagt products / "Tilføj butik" (schema-pre-pjextra.sql), the last step on its own
 # 13. migrate-discover.sql: the schema as it was before "Butikssøgning" (schema-pre-discover.sql), the last step on its own
+# 14. migrate-brand.sql: the schema as it was before the brand shop probe / diag_products / prisjagt-only AI links (schema-pre-brand.sql), the last step on its own
 # Needs a running Postgres and psql (set PGHOST/PGPORT/PGUSER as usual): bash supabase/test/run.sh
 set -u
 here="$(cd "$(dirname "$0")" && pwd)"
 filter() { grep -E "NOTICE:  ok |FAIL|ERROR|PASSED|PASS" | sed -E "s/^psql:[^ ]+ NOTICE:  //"; }
 status=0
-for step in test migrate migrate-alt migrate-compare migrate-image migrate-tries migrate-extra migrate-requirements migrate-overview migrate-ask migrate-suggest migrate-pjextra migrate-discover; do
+for step in test migrate migrate-alt migrate-compare migrate-image migrate-tries migrate-extra migrate-requirements migrate-overview migrate-ask migrate-suggest migrate-pjextra migrate-discover migrate-brand; do
   db="pv_schema_${step//-/_}_$$"
   psql -qAt -d postgres -c "create database $db" >/dev/null || { echo "cannot create database"; exit 2; }
   export PGDATABASE="$db"
@@ -45,6 +46,8 @@ for step in test migrate migrate-alt migrate-compare migrate-image migrate-tries
     psql -q -v ON_ERROR_STOP=1 -v old="$here/schema-pre-pjextra.sql" -v new="$here/../schema.sql" -f "$here/migrate-pjextra.sql" 2>&1 | filter; rc=${PIPESTATUS[0]}
   elif [ "$step" = migrate-discover ]; then
     psql -q -v ON_ERROR_STOP=1 -v old="$here/schema-pre-discover.sql" -v new="$here/../schema.sql" -f "$here/migrate-discover.sql" 2>&1 | filter; rc=${PIPESTATUS[0]}
+  elif [ "$step" = migrate-brand ]; then
+    psql -q -v ON_ERROR_STOP=1 -v old="$here/schema-pre-brand.sql" -v new="$here/../schema.sql" -f "$here/migrate-brand.sql" 2>&1 | filter; rc=${PIPESTATUS[0]}
   elif [ "$step" = migrate-tries ]; then
     psql -q -v ON_ERROR_STOP=1 -v old="$here/schema-pre-tries.sql" -v new="$here/../schema.sql" -f "$here/migrate-tries.sql" 2>&1 | filter; rc=${PIPESTATUS[0]}
   else

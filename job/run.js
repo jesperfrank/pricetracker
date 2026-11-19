@@ -2,7 +2,7 @@
 'use strict';
 // Prisvagten price job. Runs on a schedule (GitHub Actions) with the Supabase service-role key.
 //   node job/run.js
-// Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, RESEND_API_KEY (optional), MAIL_FROM, SITE_URL, BRAVE_API_KEY (optional: shop discovery)
+// Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, RESEND_API_KEY (optional), MAIL_FROM, SITE_URL, BRAVE_API_KEY (optional: the web search of shop discovery)
 
 // Node's fetch ignores HTTPS_PROXY unless NODE_USE_ENV_PROXY=1 (Node 22.21+); only matters behind a proxy (local runs).
 if (require.main === module && !process.env.NODE_USE_ENV_PROXY && (process.env.HTTPS_PROXY || process.env.https_proxy)) {
@@ -18,6 +18,8 @@ const WB = require('./lib/wayback');
 const DS = require('./lib/discover');
 const ONSKE = require('./lib/onskeskyen');
 const D = require('./lib/digest');
+const { tag, safe, brief } = require('./lib/log');
+const BS = require('./lib/brandshop');
 const { composeMail, composeOverview, composeOwnerMail, composeApprovedMail, sendResend } = require('./lib/mail');
 const { makeClient } = require('./lib/supabase');
 
@@ -37,6 +39,7 @@ const isoNow = (d) => d.toISOString().replace(/\.\d+Z$/, 'Z');
 
 // ---------------------------------------------------------------- per-product logic (pure given a parsed page)
 
+const FOUND_ORIGINS = ['brand', 'search'];      // extra_state[link].origin of the links the job found itself (shop discovery)
 const NOTE_CURRENCY_PREFIX = 'Prisen på siden er ikke i kroner (';
 
 function shopErrorNote(e) {
@@ -57,7 +60,7 @@ function errorNote(e) {
     if (e.kind === 'layout') return 'Siden kunne ikke læses (' + e.message.slice(0, 80) + ').';
     return 'Siden kunne ikke hentes (' + e.message.slice(0, 80) + ').';
   }
-  return 'Uventet fejl: ' + String(e && e.message || e).slice(0, 80);
+  return 'Uventet fejl: ' + Stringsafe(e).slice(0, 80);
 }
 
 function variantsOut(parsed) {
@@ -134,7 +137,8 @@ function trackingPatch(prod, profile, parsed, now) {
   let goal = bought ? { hit: false, newHit: false, fields: {}, reason: null } : P.goalOutcome(prod, low, normal, iso, { verdict, history });
   // Silent: a would-be hit is only remembered (notified_price, notified_at), never announced. Only a later, lower price mails.
   // The same when the cheapest offer comes from an extra shop (products.extra_urls) that has not been read before: a newly added shop being
-  // cheaper than the one shop followed so far is no price drop (the rows carry extraNew, see runWithExtras). And for the first 24 hours after
+  // cheaper than the one shop followed so far is no price drop (the rows carry extraNew, see runWithExtras). A shop that the job found itself
+  // (origin 'brand' or 'search') is the exception: it may make a hit at its first reading, and the mail says where the price comes from. And for the first 24 hours after
   // the one-mail-per-deal rules shipped (products.notify_silent_until, set once by the schema): a hit that used to flicker and be mailed
   // again and again must not mail once more only because its notified state was cleared under the old rules.
   const quiet = prod.notify_silent_until ? Date.parse(prod.notify_silent_until) > now.getTime() : false;
@@ -148,7 +152,7 @@ function trackingPatch(prod, profile, parsed, now) {
   addImage(patch, prod, parsed);
   return {
     patch,
-    hit: goal.newHit ? { productId: prod.id, userId: prod.user_id, name: prod.name, price: low.price, store: low.store, url: low.url, verdict: verdict.text, warning, reason: goal.reason } : null,
+    hit: goal.newHit ? { productId: prod.id, userId: prod.user_id, name: prod.name, price: low.price, store: low.store, url: low.url, verdict: verdict.text, warning, reason: goal.reason, found: low.extraFound ? low.store : null } : null,
   };
 }
 
@@ -324,11 +328,11 @@ async function accessMails(ctx, sb, fetchImpl, stats, log, canMail, now) {
         if (admins.length) {   // no administrator: step 3 logs that, once per run
           await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, admins, composeOwnerMail(pending, ctx.siteUrl));
           stats.sent++; stats.accessOwner++;
-          for (const r of pending) { try { await mark(r.email, 'owner_notified_at'); } catch (e) { log('  Kunne ikke markere anmodning som meldt: ' + (e && e.message || e)); } }
+          for (const r of pending) { try { await mark(r.email, 'owner_notified_at'); } catch (e) { log('  Kunne ikke markere anmodning som meldt: ' + safe(e)); } }
         }
       }
     }
-  } catch (e) { log('Adgangsanmodninger til ejer fejlede: ' + (e && e.message || e)); }
+  } catch (e) { log('Adgangsanmodninger til ejer fejlede: ' + safe(e)); }
 
   // 2. approved requesters
   try {
@@ -345,11 +349,11 @@ async function accessMails(ctx, sb, fetchImpl, stats, log, canMail, now) {
             await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, addr, composeApprovedMail(ctx.siteUrl));
             stats.sent++; stats.accessApproved++;
             await mark(addr, 'requester_notified_at');
-          } catch (e) { log('  En godkendelsesmail fejlede: ' + (e && e.message || e)); }
+          } catch (e) { log('  En godkendelsesmail fejlede: ' + safe(e)); }
         }
       }
     }
-  } catch (e) { log('Godkendelsesmails fejlede: ' + (e && e.message || e)); }
+  } catch (e) { log('Godkendelsesmails fejlede: ' + safe(e)); }
 
   // 3. counts for the run summary (never addresses). A read error leaves them null: the summary then leaves them out.
   try {
@@ -359,13 +363,15 @@ async function accessMails(ctx, sb, fetchImpl, stats, log, canMail, now) {
   } catch (e) { /* quiet, as above */ }
 }
 
-// The search part of the run summary: ' Søgning: 4 varer, 12 kald, 2 nye butikker.' / ' Søgning: ingen nøgle.' / ' Søgning: månedsloft nået.' or ''.
+// The search part of the run summary: ' Søgning: 4 varer, 0 kald, 1 ny butik.' (calls = Brave calls: none without a key, the manufacturer's
+// shops are looked up all the same), with short suffixes ('ingen søgenøgle', 'månedsloft nået' ...), or ''.
 function discoverSummary(d) {
-  if (d.state === 'nokey') return ' Søgning: ingen nøgle.';
-  if (d.state === 'notable') return ' Søgning: tælleren mangler i databasen.';
   const parts = [];
   if (d.products || d.calls) parts.push(d.products + (d.products === 1 ? ' vare' : ' varer') + ', ' + d.calls + ' kald, ' + (d.added === 1 ? '1 ny butik' : d.added + ' nye butikker'));
+  if (d.state === 'nokey') parts.push('ingen søgenøgle');
+  if (d.state === 'notable') parts.push('tælleren mangler i databasen');
   if (d.state === 'cap') parts.push('månedsloft nået');
+  if (d.brandTable === false) parts.push('brandtabellen mangler');
   if (d.stopped) parts.push('stoppet (' + d.stopped + ')');
   return parts.length ? ' Søgning: ' + parts.join(', ') + '.' : '';
 }
@@ -389,7 +395,7 @@ async function run(ctx) {
     stats.imports = await ONSKE.runImports({ sb, fetch: ctx.onskeFetch || fetchImpl, sleep: ctx.onskeSleep || sleep, pauseMs: ctx.onskePauseMs, log, now: ctx.now || (() => now), deadlineAt: started + IMPORT_BUDGET_MS });
     if (stats.imports.pending) log('Ønskelister: ' + stats.imports.pending + ' behandlet, ' + stats.imports.done + ' færdige, ' + stats.imports.error + ' fejlede, ' + stats.imports.added + ' varer tilføjet.');
     if (stats.imports.synced) log('Ønskelister fulgt: ' + stats.imports.synced + ' læst igen, ' + stats.imports.syncAdded + ' nye varer, ' + stats.imports.syncFailed + ' kunne ikke læses.');
-  } catch (e) { log('Ønskelister: ' + (e && e.message || e)); }
+  } catch (e) { log('Ønskelister: ' + safe(e)); }
 
   // 1. load (a failure here means Supabase is unreachable: let it throw)
   // Products added by name only (source_url null) wait for a link (from the name-lookup assistant or the user):
@@ -493,7 +499,7 @@ async function run(ctx) {
       if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; carry(url); continue; }
       stats.extraPages++;
       const got = await fetchCached(url);
-      const fail = (why, code) => { stats.extraFail++; log('  ' + (prod.name || prod.id) + ' (' + hostKey + '): ' + why); next[url] = { seen: !!stt.seen, fails: (Number(stt.fails) || 0) + 1, at: iso, why: code }; };
+      const fail = (why, code) => { stats.extraFail++; log('  ' + tag(prod) + ' (' + hostKey + '): ' + why); next[url] = { seen: !!stt.seen, fails: (Number(stt.fails) || 0) + 1, at: iso, why: code }; };
       if (got.error) {
         noteBlocked(got.error, hostKey); fail(errorNote(got.error), got.error.kind === 'noprice' ? 'noprice' : 'err');
         if (X.transient(got.error)) { const row = keep(url); if (row) { carried.push(row); delete next[url].why; } }
@@ -501,7 +507,10 @@ async function run(ctx) {
       }
       const row = got.page && Array.isArray(got.page.rows) ? got.page.rows[0] : null;
       if (!row || typeof row.price !== 'number') { fail('ingen pris', 'noprice'); continue; }
-      fresh.push({ url, hostKey, stt, page: got.page, row: Object.assign({}, row, { variant: vid, url, key: url, extraNew: X.isNew(prod, stt) }) });
+      // The first reading of a link is silent (extraNew), except for a shop the job itself found and verified by the product's name (origin
+      // 'brand' or 'search'): that one is allowed to make a hit, and says so in the mail (extraFound).
+      const isNewLink = X.isNew(prod, stt), found = FOUND_ORIGINS.indexOf(stt.origin) !== -1;
+      fresh.push({ url, hostKey, stt, page: got.page, row: Object.assign({}, row, { variant: vid, url, key: url, extraNew: isNewLink && !found, extraFound: isNewLink && found }) });
     }
     return { fresh, carried, keep };
   };
@@ -533,7 +542,7 @@ async function run(ctx) {
     const kept = fresh.filter((f) => {
       if (!X.isOutlier(f.row.price, all.filter((r) => r !== f.row).map((r) => r.price))) return true;
       stats.extraDropped++;
-      log('  ' + (prod.name || prod.id) + ' (' + f.hostKey + '): prisen ' + f.row.price + ' kr. ligner en anden vare og bruges ikke.');
+      log('  ' + tag(prod) + ' (' + f.hostKey + '): prisen ' + f.row.price + ' kr. ligner en anden vare og bruges ikke.');
       next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso, why: 'outlier' };
       return false;
     });
@@ -575,7 +584,7 @@ async function run(ctx) {
     if (!hasFresh && !carried.length) {      // nothing to go on: as a plain failure of the main page (the failing extras are counted in the state)
       const err = mainErr || new PJ.PageError('layout', 'ingen butikker kunne læses');
       const note = errorNote(err);
-      log('  ' + (prod.name || prod.id) + ': ' + note);
+      log('  ' + tag(prod) + ': ' + note);
       const want = wantsCompare(prod, target, err) || wantsCompareAgain(prod, target, err, now) ? wantedPatch(prod, now) : {};
       const ep = extraPatch(null);
       if (todo === 'initial') results.push({ prod, patch: Object.assign({ status: 'error', check_note: note, last_checked: iso }, want, ep), hit: null });
@@ -627,7 +636,7 @@ async function run(ctx) {
     const drop = (f) => { next[f.url] = { seen: !!f.stt.seen, fails: 0, at: iso, why: 'dup' }; };
     const fresh1 = fresh.filter((f) => {
       if (!X.covered(base, { url: f.url, store: f.row.store })) return true;
-      log('  ' + (prod.name || prod.id) + ' (' + f.hostKey + '): butikken er med på Prisjagt, Prisjagts pris bruges.');
+      log('  ' + tag(prod) + ' (' + f.hostKey + '): butikken er med på Prisjagt, Prisjagts pris bruges.');
       drop(f); return false;
     });
     const carried1 = carried.filter((c) => {
@@ -639,7 +648,7 @@ async function run(ctx) {
     const kept = fresh1.filter((f) => {
       if (!X.isOutlier(f.row.price, all.filter((r) => r !== f.row).map((r) => r.price))) return true;
       stats.extraDropped++;
-      log('  ' + (prod.name || prod.id) + ' (' + f.hostKey + '): prisen ' + f.row.price + ' kr. ligner en anden vare og bruges ikke.');
+      log('  ' + tag(prod) + ' (' + f.hostKey + '): prisen ' + f.row.price + ' kr. ligner en anden vare og bruges ikke.');
       next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso, why: 'outlier' };
       return false;
     });
@@ -697,7 +706,7 @@ async function run(ctx) {
     const extraLinks = X.links(prod);
     if (target.shop && extraLinks.length) {
       try { await runWithExtras(prod, todo, target, extraLinks); }
-      catch (e) { stats.pageFail++; log('  ' + (prod.name || prod.id) + ': uventet fejl: ' + (e && e.stack || e)); }
+      catch (e) { stats.pageFail++; log('  ' + tag(prod) + ': uventet fejl: ' + brief(e)); }
       continue;
     }
     const url = target.url, hostKey = SHOP.registrableDomain(new URL(url).hostname);
@@ -714,7 +723,7 @@ async function run(ctx) {
         stats.pageFail++;
         noteBlocked(got.error, hostKey);
         const note = errorNote(got.error);
-        log('  ' + (prod.name || prod.id) + ': ' + note);
+        log('  ' + tag(prod) + ': ' + note);
         const want = wantsCompare(prod, target, got.error) || wantsCompareAgain(prod, target, got.error, now) ? wantedPatch(prod, now) : {};
         if (todo === 'initial') results.push({ prod, patch: Object.assign({ status: 'error', check_note: note, last_checked: isoNow(now) }, want), hit: null });
         else results.push({ prod, patch: Object.assign({ check_note: note }, want), hit: null });
@@ -739,7 +748,7 @@ async function run(ctx) {
       }
     } catch (e) {
       stats.pageFail++;
-      log('  ' + (prod.name || prod.id) + ': uventet fejl: ' + (e && e.stack || e));
+      log('  ' + tag(prod) + ': uventet fejl: ' + brief(e));
     }
   }
 
@@ -775,14 +784,14 @@ async function run(ctx) {
     backfilled++; stats.backfilled++;
     let res;
     try { res = await WB.backfill(classify(r.prod.source_url).url, { fetch: wbFetch, sleep: ctx.waybackSleep || sleep, today: P.copenhagenDate(now) }); }
-    catch (e) { log('  Internet Archive: uventet fejl for ' + (r.prod.name || r.prod.id) + ': ' + (e && e.message || e)); stats.waybackStopped = true; continue; }
+    catch (e) { log('  Internet Archive: uventet fejl for ' + tag(r.prod) + ': ' + safe(e)); stats.waybackStopped = true; continue; }
     if (res.status !== 'ok') stats.waybackStopped = true;       // 429 / 5xx / unreachable: leave the archive alone for the rest of this run
     stats.backfillPoints += res.points.length;
-    log('  ' + (r.prod.name || r.prod.id) + ': ' + res.points.length + ' ældre priser fra Internet Archive' + (res.status === 'ok' ? '.' : ' (arkivet afbrød, prøver evt. igen senere).'));
+    log('  ' + tag(r.prod) + ': ' + res.points.length + ' ældre priser fra Internet Archive' + (res.status === 'ok' ? '.' : ' (arkivet afbrød, prøver evt. igen senere).'));
     try {
       const out = applyBackfill(r, res.points, backfillState(r.prod.backfill_state, res, isoNow(now)), now);
       r.patch = out.patch; r.hit = out.hit;
-    } catch (e) { log('  Internet Archive: kunne ikke bruge priserne for ' + (r.prod.name || r.prod.id) + ': ' + (e && e.message || e)); }
+    } catch (e) { log('  Internet Archive: kunne ikke bruge priserne for ' + tag(r.prod) + ': ' + safe(e)); }
   }
 
   // 5. e-mail
@@ -805,7 +814,7 @@ async function run(ctx) {
     const addr = String(u && u.email || '').trim().toLowerCase();
     if (!addr) { stats.mailSkipped++; return null; }
     const allowed = await sb.select('allowed_emails', 'select=email&email=eq.' + encodeURIComponent(addr));
-    if (!allowed.length) { log('  Bruger ' + userId + ' står ikke i allowed_emails: ingen e-mail.'); stats.mailSkipped++; return null; }
+    if (!allowed.length) { log('  En bruger står ikke i allowed_emails: ingen e-mail.'); stats.mailSkipped++; return null; }
     return addr;
   };
 
@@ -822,7 +831,7 @@ async function run(ctx) {
       await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, addr, composeMail(rs.map((r) => r.hit), ctx.siteUrl));
       stats.sent++;
     } catch (e) {
-      log('  E-mail til bruger ' + userId + ' fejlede: ' + (e && e.message || e));
+      log('  En e-mail fejlede: ' + safe(e));
       revert(rs);
       stats.mailSkipped++;
     }
@@ -849,19 +858,19 @@ async function run(ctx) {
       }
       const claim = isoNow(now);
       const rows = await sb.patch('profiles', 'user_id=eq.' + encodeURIComponent(userId) + '&digest_sent_at=' + (sentAt ? 'eq.' + encodeURIComponent(sentAt) : 'is.null'), { digest_sent_at: claim }, true);
-      if (!Array.isArray(rows) || !rows.length) { log('  Oversigten til bruger ' + userId + ' er allerede taget af en anden kørsel.'); continue; }
+      if (!Array.isArray(rows) || !rows.length) { log('  En daglig oversigt er allerede taget af en anden kørsel.'); continue; }
       if (empty) continue;
       try {
         await sendResend(fetchImpl, ctx.resendKey, ctx.mailFrom, addr, composeOverview(ov, ctx.siteUrl));
         stats.sent++; stats.digests++;
       } catch (e) {
-        log('  Oversigten til bruger ' + userId + ' fejlede: ' + (e && e.message || e));
+        log('  En daglig oversigt fejlede: ' + safe(e));
         stats.mailSkipped++;
         try { await sb.patch('profiles', 'user_id=eq.' + encodeURIComponent(userId) + '&digest_sent_at=eq.' + encodeURIComponent(claim), { digest_sent_at: sentAt }); }
-        catch (e2) { log('  Kunne ikke give dagens oversigt tilbage: ' + (e2 && e2.message || e2)); }
+        catch (e2) { log('  Kunne ikke give dagens oversigt tilbage: ' + safe(e2)); }
       }
     } catch (e) {
-      log('  Oversigten til bruger ' + userId + ' fejlede: ' + (e && e.message || e));
+      log('  En daglig oversigt fejlede: ' + safe(e));
       stats.mailSkipped++;
     }
   }
@@ -870,91 +879,139 @@ async function run(ctx) {
   for (const r of results) {
     if (r.written || r.skipWrite) continue;
     try { await sb.patch('products', 'id=eq.' + encodeURIComponent(r.prod.id), r.patch); stats.written++; }
-    catch (e) { stats.writeFail++; log('  Kunne ikke skrive ' + (r.prod.name || r.prod.id) + ': ' + (e && e.message || e)); }
+    catch (e) { stats.writeFail++; log('  Kunne ikke skrive ' + tag(r.prod) + ': ' + safe(e)); }
   }
 
-  // The discovery step as a function (it needs the run's page reader and its list of refused hosts).
+  // The discovery step as a function (it needs the run's page reader and its list of refused hosts). Two sources of shops for a due product:
+// the manufacturer's own Danish web shop (lib/brandshop.js: no key needed, cached per brand) and the Brave search (needs BRAVE_API_KEY). A
+  // missing key, a reached monthly cap or a stop only switch the search off; the manufacturer's shop is looked up all the same.
   async function discoverShops() {
     const d = stats.discover;
     const key = String(ctx.braveKey || '').trim();
-    if (!key) { d.state = 'nokey'; return; }
     const month = P.copenhagenDate(now).slice(0, 7), iso = isoNow(now);
-    let usage;
-    try {
-      const rows = await sb.select('discover_usage', 'select=month,calls&month=eq.' + encodeURIComponent(month));
-      usage = { exists: rows.length > 0, calls: rows.length ? Number(rows[0].calls) || 0 : 0 };
-    } catch (e) { d.state = 'notable'; log('Søgning springes over: tælleren for kald (discover_usage) kan ikke læses (' + String(e && e.message || e).slice(0, 100) + ').'); return; }
-    if (usage.calls + DS.CALLS_PER_PRODUCT > DS.MONTHLY_CAP) { d.state = 'cap'; log('Søgning: månedsloftet på ' + DS.MONTHLY_CAP + ' kald er nået (' + usage.calls + '). Springer over til næste måned.'); return; }
+    let braveOn = !!key, usage = null;
+    if (!key) d.state = 'nokey';
+    else {
+      try {
+        const rows = await sb.select('discover_usage', 'select=month,calls&month=eq.' + encodeURIComponent(month));
+        usage = { exists: rows.length > 0, calls: rows.length ? Number(rows[0].calls) || 0 : 0 };
+      } catch (e) { d.state = 'notable'; braveOn = false; log('Søgning springes over: tælleren for kald (discover_usage) kan ikke læses (' + safe(e, 100) + ').'); }
+      if (usage && usage.calls + DS.CALLS_PER_PRODUCT > DS.MONTHLY_CAP) { d.state = 'cap'; braveOn = false; log('Søgning: månedsloftet på ' + DS.MONTHLY_CAP + ' kald er nået (' + usage.calls + '). Springer over til næste måned.'); }
+    }
+    // the brand cache table: without it the brands would be probed again and again, so the lookup is switched off then
+    let brandOn = true;
+    try { await sb.select('brand_shops', 'select=brand&limit=1'); }
+    catch (e) { brandOn = false; d.brandTable = false; log('Producentbutikker springes over: tabellen brand_shops kan ikke læses (' + safe(e, 100) + ').'); }
+    if (!braveOn && !brandOn) return;
     const resultOf2 = new Map(results.map((r) => [r.prod.id, r]));
-    const list = DS.order(products.map((p) => { const r = resultOf2.get(p.id); return r ? Object.assign({}, p, r.patch) : p; }), now).slice(0, DS.MAX_PRODUCTS_PER_RUN);
+    const list = DS.order(products.map((p) => { const r = resultOf2.get(p.id); return r ? Object.assign({}, p, r.patch) : p; }), now, { brave: braveOn }).slice(0, DS.MAX_PRODUCTS_PER_RUN);
     if (!list.length) return;
-    const searcher = DS.makeSearcher({ key, fetch: ctx.braveFetch || fetchImpl, sleep: ctx.braveSleep || sleep });
+    const searcher = braveOn ? DS.makeSearcher({ key, fetch: ctx.braveFetch || fetchImpl, sleep: ctx.braveSleep || sleep }) : null;
     let pagesLeft = DS.MAX_PAGES_PER_RUN;
-    const read = async (url) => {
+    const read = async (url, own) => {
       const hostKey = SHOP.registrableDomain(new URL(url).hostname);
       if (stats.blockedHosts.indexOf(hostKey) !== -1) return { skip: true };
-      if (pagesLeft <= 0 || Date.now() - started > DEADLINE_MS) return { skip: true };
-      pagesLeft--;
+      if ((!own && pagesLeft <= 0) || Date.now() - started > DEADLINE_MS) return { skip: true };
+      if (!own) pagesLeft--;
       const got = await fetchCached(url);
       if (got.error) { noteBlocked(got.error, hostKey); return { error: got.error }; }
       return { page: got.page };
     };
+    const brandRun = brandOn ? BS.makeBrandRun({
+      fetch: ctx.brandFetch || fetchImpl, sleep: ctx.brandSleep || sleep, now: () => now, log, expired: () => Date.now() - started > DEADLINE_MS - 60000,
+      read: (url) => read(url, true),
+      cache: {
+        get: async (b) => (await sb.select('brand_shops', 'select=brand,base,sitemaps,robots,status,checked_at&brand=eq.' + encodeURIComponent(b)))[0] || null,
+        put: async (row) => {
+          const body = { brand: row.brand, base: row.base, sitemaps: row.sitemaps, robots: row.robots, status: row.status, checked_at: row.checked_at };
+          const upd = await sb.patch('brand_shops', 'brand=eq.' + encodeURIComponent(row.brand), body, true);
+          if (!Array.isArray(upd) || !upd.length) await sb.insert('brand_shops', body);
+        },
+      },
+    }) : null;
     const saveUsage = async () => {
       try {
         if (usage.exists) await sb.patch('discover_usage', 'month=eq.' + encodeURIComponent(month), { calls: usage.calls });
         else { await sb.insert('discover_usage', { month, calls: usage.calls }); usage.exists = true; }
         return true;
-      } catch (e) { log('Søgning stoppet: tælleren for kald kunne ikke gemmes (' + String(e && e.message || e).slice(0, 100) + ').'); return false; }
+      } catch (e) { log('Søgning stoppet: tælleren for kald kunne ikke gemmes (' + safe(e, 100) + ').'); return false; }
+    };
+    // a change of extra_urls / extra_state in memory: the new links at the end, the replaced ones gone
+    const applyChange = (cur, change) => {
+      const gone = new Set(change.remove);
+      return { extra_urls: (Array.isArray(cur.extra_urls) ? cur.extra_urls : []).filter((u) => !gone.has(u)).concat(change.add.map((a) => a.url)), extra_state: DS.nextState(cur, change) };
     };
     for (const p of list) {
-      if (usage.calls + DS.CALLS_PER_PRODUCT > DS.MONTHLY_CAP) { d.state = 'cap'; log('Søgning: månedsloftet på ' + DS.MONTHLY_CAP + ' kald er nået. Springer over til næste måned.'); break; }
       if (Date.now() - started > DEADLINE_MS - 90000) { stats.deadline = true; break; }
-      const before = searcher.calls;
-      const res = await DS.discoverProduct(p, { searcher, read });
-      const used = searcher.calls - before;
-      usage.calls += used; d.calls += used;
-      if (!(await saveUsage())) { d.stopped = 'tæller'; break; }
-      if (res.stop) {
-        d.stopped = res.stop === 'auth' ? 'nøgle afvist' : res.stop === 'quota' ? 'kvote' : res.stop === 'server' ? 'fejl hos Brave' : 'fejl';
-        log('Søgning stoppet i denne kørsel: ' + (res.stop === 'auth' ? 'Brave afviste nøglen (HTTP ' + res.status + '). Tjek hemmeligheden BRAVE_API_KEY.'
-          : res.stop === 'quota' ? 'Brave sagde stop (HTTP ' + res.status + '): kvoten er brugt eller der kom for mange kald.'
-          : res.stop === 'server' ? 'Brave svarede med fejl (HTTP ' + res.status + ').' : 'uventet svar fra Brave (' + (res.status ? 'HTTP ' + res.status : res.reason || 'fejl') + ').'));
-        break;
+      // 1. the manufacturer's shop (no key): a result, or deferred when this run's budget is used up (the product stays due and goes first next time)
+      let bres = null;
+      if (brandRun) {
+        try { bres = await brandRun.process(p); } catch (e) { log('  Producentbutik: ' + tag(p) + ': uventet fejl: ' + brief(e)); bres = { result: 'error' }; }
+        if (bres.deferred) continue;
       }
+      // 2. the search
+      let res = null;
+      if (braveOn && usage.calls + DS.CALLS_PER_PRODUCT > DS.MONTHLY_CAP) { d.state = 'cap'; braveOn = false; log('Søgning: månedsloftet på ' + DS.MONTHLY_CAP + ' kald er nået. Springer over til næste måned.'); }
+      if (braveOn) {
+        const before = searcher.calls;
+        res = await DS.discoverProduct(p, { searcher, read });
+        const used = searcher.calls - before;
+        usage.calls += used; d.calls += used;
+        if (!(await saveUsage())) { d.stopped = 'tæller'; braveOn = false; res = null; }
+        else if (res.stop) {
+          d.stopped = res.stop === 'auth' ? 'nøgle afvist' : res.stop === 'quota' ? 'kvote' : res.stop === 'server' ? 'fejl hos Brave' : 'fejl';
+          log('Søgning stoppet i denne kørsel: ' + (res.stop === 'auth' ? 'Brave afviste nøglen (HTTP ' + res.status + '). Tjek hemmeligheden BRAVE_API_KEY.'
+            : res.stop === 'quota' ? 'Brave sagde stop (HTTP ' + res.status + '): kvoten er brugt eller der kom for mange kald.'
+            : res.stop === 'server' ? 'Brave svarede med fejl (HTTP ' + res.status + ').' : 'uventet svar fra Brave (' + (res.status ? 'HTTP ' + res.status : res.reason || 'fejl') + ').'));
+          braveOn = false; res = null;
+        }
+      }
+      if (!brandRun && !res) continue;                 // nothing was looked up for this product (the search stopped): it is tried again
       d.products++;
       // read the row again: the person may have changed the list meanwhile, and the new list must be built from what is there now
       let fresh = null;
       try { fresh = (await sb.select('products', 'select=id,source_url,requirements,active,bought_at,extra_urls,extra_state&id=eq.' + encodeURIComponent(p.id)))[0]; }
-      catch (e) { log('  Søgning: ' + (p.name || p.id) + ': kunne ikke læse varen igen (' + String(e && e.message || e).slice(0, 100) + ').'); continue; }
+      catch (e) { log('  Søgning: ' + tag(p) + ': kunne ikke læse varen igen (' + safe(e, 100) + ').'); continue; }
       if (!fresh || fresh.source_url !== p.source_url || fresh.active === false || fresh.bought_at || (fresh.requirements || null) !== (p.requirements || null)) continue;
-      const change = DS.planChange(p, fresh, res.verified);
-      const body = { discover_state: { at: iso, found: res.found, added: change.add.length, note: change.add.length ? 'ny butik' : (res.verified.length ? 'ingen billigere' : res.note) } };
-      if (change.add.length) {
-        const gone = new Set(change.remove);
-        body.extra_urls = (Array.isArray(fresh.extra_urls) ? fresh.extra_urls : []).filter((u) => !gone.has(u)).concat(change.add.map((a) => a.url));
-        body.extra_state = DS.nextState(fresh, change);
+      // 3. what to add: the manufacturer's shop first (whatever its price), then the search's shops (cheaper than every offer only)
+      let cur = { extra_urls: fresh.extra_urls, extra_state: fresh.extra_state };
+      const added = [], gone = [];
+      let brandResult = bres ? bres.result : null;
+      if (bres && bres.result === 'found') {
+        const bc = BS.planBrand(p, cur, bres.verified);
+        if (bc.add.length) { cur = applyChange(cur, bc); added.push.apply(added, bc.add); gone.push.apply(gone, bc.remove); brandResult = 'added'; }
+        else brandResult = bc.why;
       }
+      if (res) {
+        const change = DS.planChange(p, cur, res.verified);
+        if (change.add.length) { cur = applyChange(cur, change); added.push.apply(added, change.add); gone.push.apply(gone, change.remove); }
+      }
+      const body = { discover_state: { at: iso, found: res ? res.found : 0, added: added.length, note: added.length ? 'ny butik' : (res ? (res.verified.length ? 'ingen billigere' : res.note) : 'uden søgning'), brave: !!res } };
+      if (bres) body.discover_state.brand = { brand: bres.brand || null, shop: bres.shop || null, result: brandResult };
+      if (added.length) { body.extra_urls = cur.extra_urls; body.extra_state = cur.extra_state; }
       try {
         await sb.patch('products', 'id=eq.' + encodeURIComponent(p.id), body);
-        d.added += change.add.length; d.replaced += change.remove.length;
-        change.add.forEach((a) => log('  Søgning: ' + (p.name || p.id) + ': ny butik ' + X.hostOf(a.url) + ' (' + a.price + ' kr.).'));
-        change.remove.forEach((u) => log('  Søgning: ' + (p.name || p.id) + ': ' + X.hostOf(u) + ' erstattet af en billigere butik.'));
+        d.added += added.length; d.replaced += gone.length;
+        added.forEach((a) => log('  Søgning: ' + tag(p) + ': ny butik ' + X.hostOf(a.url) + ' (' + a.price + ' kr.)' + (a.origin === 'brand' ? ', producentens butik.' : '.')));
+        gone.forEach((u) => log('  Søgning: ' + tag(p) + ': ' + X.hostOf(u) + ' erstattet af en anden butik.'));
       } catch (e) {
-        log('  Søgning: kunne ikke skrive ' + (p.name || p.id) + ': ' + String(e && e.message || e).slice(0, 120));
-        try { await sb.patch('products', 'id=eq.' + encodeURIComponent(p.id), { discover_state: { at: iso, found: res.found, added: 0, note: 'skrivefejl' } }); } catch (e2) { /* tried again in a week at the latest */ }
+        log('  Søgning: kunne ikke skrive ' + tag(p) + ': ' + safe(e, 120));
+        try { await sb.patch('products', 'id=eq.' + encodeURIComponent(p.id), { discover_state: { at: iso, found: res ? res.found : 0, added: 0, note: 'skrivefejl', brave: !!res } }); } catch (e2) { /* tried again in a week at the latest */ }
       }
     }
+    if (brandRun && brandRun.requests) log('Producentbutikker: ' + brandRun.requests + ' forespørgsler, ' + brandRun.newBrands + ' nye mærker undersøgt.');
   }
 
-  // 5b. shop discovery (own step, after everything above has been written: it never delays or fails the price checks). Searches the web from
-  // Denmark for products that have a price to beat and adds a Danish shop that is cheaper than every current offer to extra_urls (the extras
-  // machinery reads it from the next run on, its first price is silent). See lib/discover.js for all the rules.
+  // 5b. shop discovery (own step, after everything above has been written: it never delays or fails the price checks). For products with a
+  // price to beat: the manufacturer's own Danish web shop (lib/brandshop.js, no key: added whatever its price) and a search of the web from
+  // Denmark (lib/discover.js, needs BRAVE_API_KEY: only a shop cheaper than every current offer). The extras machinery reads the new shops from
+  // the next run on; the first price of a shop found here is not silent (see FOUND_ORIGINS), the person's and the agent's links stay silent.
   try { await discoverShops(); }
-  catch (e) { log('Søgning: uventet fejl: ' + (e && e.message || e)); }
+  catch (e) { log('Søgning: uventet fejl: ' + safe(e)); }
 
   // access requests: e-mails to the owner(s) and to approved requesters (own step: a failure here changes nothing above)
   try { await accessMails(ctx, sb, fetchImpl, stats, log, canMail, now); }
-  catch (e) { log('Adgangsanmodninger: ' + (e && e.message || e)); }
+  catch (e) { log('Adgangsanmodninger: ' + safe(e)); }
 
   // 6. summary (5 lines)
   const summary = [

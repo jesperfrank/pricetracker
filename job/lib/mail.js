@@ -27,6 +27,7 @@ function composeMail(hits, siteUrl) {
     lines.push((i + 1) + '. ' + clean(h.name, 140));
     lines.push('   Pris: ' + fmtKr(h.price) + ' hos ' + clean(h.store, 80));
     lines.push('   Link til butikken: ' + clean(h.url, 500));
+    if (h.found) lines.push('   Fundet hos en ny butik: ' + clean(h.found, 80) + '.');
     if (h.reason) lines.push('   Derfor får du besked: ' + clean(h.reason, 300));
     else if (h.verdict) lines.push('   ' + clean(h.verdict, 300));
     if (h.warning) lines.push('   OBS: ' + clean(h.warning, 300));
