@@ -302,7 +302,7 @@ details summary { cursor: pointer; color: var(--ink2); font-size: 13px; margin-t
 .mrow .listpick { gap: 6px 8px }
 .mrow .listpick > label { color: var(--ink2); font-size: 12.5px }
 .xshops > .meta { margin-bottom: 2px }
-.xshops .xwhy { white-space: nowrap }
+.xshops .xwhy, .xshops .xfound { white-space: nowrap }
 .xshops .xadd { margin-top: 8px }
 .mrow.end { border-top-color: var(--line); margin-top: 6px; padding-bottom: 12px }
 .mrow.end .foot { gap: 8px 16px }

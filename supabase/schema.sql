@@ -297,6 +297,28 @@ alter table public.products add constraint products_extra_urls_check check (extr
 alter table public.products drop constraint if exists products_extra_state_check;
 alter table public.products add constraint products_extra_state_check check (extra_state is null or jsonb_typeof(extra_state) = 'object');
 
+-- "Butikssøgning" (shop discovery): the job searches the web from Denmark (Brave Search API) for the product in Danish shops and adds a
+-- shop that is cheaper than every current offer to extra_urls. The job writes extra_urls itself with the service role: products_guard only
+-- restricts the browser roles, and products_extra_urls_check (extra_urls_error above) is the same rule for every writer, so a link the job adds
+-- must pass it exactly as an AI-found or hand-added one (1 to 5 https links, none on prisjagt.dk, one per shop, none in the product's own shop).
+-- The origin of a link the job found is kept in extra_state[link].origin = 'search' (links without an origin are the agent's or the person's and
+-- are never replaced by the job). discover_state = {"at": "<time of the last search>", "found": n, "added": n, "note": "<short text>"} is the
+-- job's bookkeeping (one search per product per 7 days); the browser cannot write it, and a new source_url or new requirements clear it.
+alter table public.products add column if not exists discover_state jsonb;
+alter table public.products drop constraint if exists products_discover_state_check;
+alter table public.products add constraint products_discover_state_check check (discover_state is null or jsonb_typeof(discover_state) = 'object');
+
+-- Calls to the search API per calendar month (job only), so that the free credit cannot be exceeded: one row per month 'YYYY-MM'.
+-- No policy and no rights for the browser roles: only the service role reads and writes it.
+create table if not exists public.discover_usage (
+  month      text primary key check (month ~ '^[0-9]{4}-[0-9]{2}$'),
+  calls      integer not null default 0 check (calls >= 0),
+  updated_at timestamptz default now()
+);
+alter table public.discover_usage enable row level security;
+revoke all on public.discover_usage from anon, authenticated;
+grant select, insert, update, delete on public.discover_usage to service_role;
+
 -- "Mente du": suggestions for a name-only product whose typed name is not exact (see resolver_suggest in the resolver section).
 -- name_options = 2 to 4 objects {name (1-120), url, price (number > 0, optional), store (1-60, optional)}, the most likely first, written
 -- by the AI agent only: products_guard keeps the browser off it and clears it when the person sets a link or changes the name. url is a
@@ -416,7 +438,7 @@ begin
     new.digest_price := null; new.digest_at := null; new.notify_silent_until := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
     new.compare_state := null; new.compare_at := null; new.shop_url := null; new.image_url := null; new.compare_tries := 0;
-    new.extra_urls := null; new.extra_state := null; new.req_state := null; new.name_options := null;
+    new.extra_urls := null; new.extra_state := null; new.req_state := null; new.name_options := null; new.discover_state := null;
     -- bought_at / bought_price are the person's own, but the time is the server's and the person is who is signed in
     new.bought_by := null;
     if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; end if;
@@ -455,6 +477,7 @@ begin
   --    (compare_state 'done'), compare_state 'none' (the product then counts as "not found elsewhere").
   -- Anything else the browser sends is ignored.
   new.extra_state := old.extra_state;
+  new.discover_state := old.discover_state;       -- the job's search bookkeeping (see "Butikssøgning" above)
   asked_extra := new.extra_urls;
   new.extra_urls := old.extra_urls;
   if asked_extra is distinct from old.extra_urls then
@@ -536,6 +559,7 @@ begin
   --  * a Prisjagt product with 2 or more variants: req_state {"want": true}, so the agent picks the variants again (resolver_list kind 'variant').
   if new.requirements is distinct from old.requirements then
     new.req_state := null;
+    new.discover_state := null;
     if new.requirements is not null and old.source_url is not null then
       on_pj := old.source_url ~* '^https://(www\.)?prisjagt\.dk([/?#]|$)';
       if not on_pj or (old.shop_url is not null and old.compare_state = 'done') then
@@ -580,7 +604,7 @@ begin
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     new.digest_price := null; new.digest_at := null; new.image_url := null; new.compare_tries := 0;
-    new.extra_urls := null; new.extra_state := null;
+    new.extra_urls := null; new.extra_state := null; new.discover_state := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null; new.req_state := null;
     -- A new link is the person's own choice: the comparison starts over, except for going back to the original shop link after a
     -- switch to Prisjagt (exactly shop_url): that is 'none' from now on, so the product is not switched again.

@@ -86,7 +86,7 @@ I Supabase: **Project Settings** > **API** (eller *API Keys*). Noter:
 
 ## 6. GitHub: hemmeligheder og tidsplan
 
-1. Repoet > **Settings** > **Secrets and variables** > **Actions** > **New repository secret**. Opret disse fem:
+1. Repoet > **Settings** > **Secrets and variables** > **Actions** > **New repository secret**. Opret disse fem (og, hvis du vil have søgning efter billigere butikker, en sjette, `BRAVE_API_KEY`, se "Søgning efter billigere butikker" nedenfor):
 
 | Navn | Værdi |
 |---|---|
@@ -133,6 +133,17 @@ Mange varer (modelbyggersæt, tøj, mindre mærker) er ikke på Prisjagt, men s�
 ### Butikker, som Prisjagt ikke har
 
 Også varer, der følges via Prisjagt, kan få ekstra butikker: producentens egen webshop er ofte billigere, men står ikke på Prisjagt. Jobbet beder én gang navne-assistenten om at lede efter dem (en `compare`-række med `host` `prisjagt.dk` og kolonnen `shops`, som viser de butikker, Prisjagt allerede har), og under "Indstil vare" kan man selv skrive et link i "Link til varen i en butik" og trykke "Tilføj". Butikkerne læses med de samme regler som før og vises under "Butikker"; en butik, Prisjagt allerede har, bruges ikke to gange, og en side med en pris langt fra de andres vises som "anden vare?". Højst 5 ekstra butikker pr. vare, og højst 4 automatiske forsøg pr. vare. De første kørsler efter opdateringen beder om højst 10 varer ad gangen, uden mails. Kør `supabase/schema.sql` igen (`resolver_list` har en ny kolonne, `shops`), og opdatér assistentens prompt (se `docs/AI.md`).
+
+### Søgning efter billigere butikker
+
+Jobbet kan selv søge efter varen i danske butikker, uden AI. Det bruger Brave Search med land sat til Danmark og dansk sprog, så man også får kampagnesider, som en søgning fra USA ikke viser. Højst 4 varer pr. kørsel, og hver vare søges igen først efter 7 dage. For hver vare læses de første cirka 30 søgeresultater (3 kald). Kun danske butikkers produktsider kommer i betragtning (ikke Prisjagt, Pricerunner, annoncer, markedspladser eller tests), titlen skal nævne mærke og model (ikke tilbehør eller en anden model), og siden læses som en ekstra butik: pris i kroner, samme vare, på lager og ikke en pris, der er helt ved siden af. Kun en butik, der er billigere end varens laveste pris nu, tilføjes (højst 2 pr. søgning). Er listen fuld (5), kan en fundet butik erstatte den dyreste butik, som tidligere blev fundet ved søgning; links fra assistenten og dem, man selv har skrevet, røres aldrig. Butikken står under "Butikker, vi følger" med teksten "fundet ved søgning", og første aflæsning sender ingen mail.
+
+1. Opret en konto på [brave.com/search/api](https://brave.com/search/api/) og vælg planen til websøgning (Search). Der følger et gratis kredit med; tjek hos Brave, hvad det rækker til og om der skal et kort på. Opret en API-nøgle under **API Keys**.
+2. Repoet > **Settings** > **Secrets and variables** > **Actions** > **New repository secret**: navn `BRAVE_API_KEY`, værdien er nøglen.
+3. Loftet er 800 kald pr. kalendermåned (konstanten `MONTHLY_CAP` i `job/lib/discover.js`). Tælleren ligger i tabellen `discover_usage`; når loftet er nået, springer jobbet søgningen over til næste måned og skriver det i loggen. Som tommelfinger er 20 varer cirka 260 kald om måneden, og 200 varer når loftet på cirka 3 uger i hver måned, så de ældste varer søges ikke hver uge.
+4. Uden nøgle virker alt andet som før; loggen siger kun "Søgning: ingen nøgle." Afviser Brave nøglen (401/403) eller kvoten er brugt (402/429), stopper søgningen for den kørsel, og loggen siger det. Nøglen skrives aldrig i loggen.
+
+Kør `supabase/schema.sql` igen, så databasen får feltet `discover_state` og tabellen `discover_usage`. Adressen, headeren og parametrene til Brave står samlet øverst i `job/lib/discover.js` (`BRAVE`).
 
 ### Detaljer
 

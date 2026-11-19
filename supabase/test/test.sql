@@ -1022,13 +1022,13 @@ reset role;
 -- a donor row that differs from a-gave in every column but the bought ones, used to try every column
 insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
   status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id,
-  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state, requirements, req_state, notify_silent_until)
+  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state, requirements, req_state, notify_silent_until, discover_state)
 values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
   'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01',
-  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}', 'donor krav', '{"want":true}', '2001-08-08');
+  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}', 'donor krav', '{"want":true}', '2001-08-08', '{"at":"2001-09-09T00:00:00Z","added":0}');
 update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
   variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04',
-  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg', extra_urls = '["https://tredje.example.dk/gave"]', extra_state = '{"x":{"fails":3}}', requirements = 'gave krav', req_state = '{"for":"gave krav","by":"agent"}', notify_silent_until = '2002-07-07'
+  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg', extra_urls = '["https://tredje.example.dk/gave"]', extra_state = '{"x":{"fails":3}}', requirements = 'gave krav', req_state = '{"for":"gave krav","by":"agent"}', notify_silent_until = '2002-07-07', discover_state = '{"at":"2002-08-08T00:00:00Z","added":1}'
  where name = 'a-gave';
 create table t.donor as select * from public.products where name = 'donor';
 create table t.snap as select id, to_jsonb(p) as j from public.products p where name = 'a-gave';
@@ -3233,6 +3233,65 @@ delete from public.products;
 delete from public.lists where id = '00000000-0000-0000-0000-00000000aa0f';
 select set_config('request.jwt.claims', '', false);
 select t.tok(null);
+
+-- --- "Butikssøgning": the job writes extra_urls / extra_state / discover_state with the service role; the browser cannot write discover_state
+insert into public.products (id, user_id, name, source_url, target_type, target_value, status, title, requirements) values
+  ('00000000-0000-0000-0000-00000000d501', '00000000-0000-0000-0000-0000000000a1', 'sok-pj', 'https://prisjagt.dk/product.php?p=77', 'price', 100, 'tracking', 'Roborock Saros 10R', null);
+set role service_role;
+update public.products set extra_urls = '["https://www.shop-a.dk/p/1","https://shop-b.dk/p/2"]', extra_state = '{"https://shop-b.dk/p/2":{"origin":"search"}}',
+  discover_state = '{"at":"2026-11-16T10:00:00Z","found":2,"added":1,"note":"ok"}' where name = 'sok-pj';
+select t.chk('search: the job (service role) writes extra_urls, extra_state and discover_state on a Prisjagt product',
+  (select discover_state ->> 'added' = '1' and extra_state -> 'https://shop-b.dk/p/2' ->> 'origin' = 'search' and jsonb_array_length(extra_urls) = 2 from public.products where name = 'sok-pj'));
+select t.chk('search: the job''s links obey the same rule (extra_urls_error): prisjagt.dk, a second link to a shop, http, a sixth link, a bad state',
+  t.try($$update public.products set extra_urls = '["https://prisjagt.dk/product.php?p=1"]' where name = 'sok-pj'$$) = 'check'
+  and t.try($$update public.products set extra_urls = '["https://www.shop-a.dk/p/1","https://shop-a.dk/p/9"]' where name = 'sok-pj'$$) = 'check'
+  and t.try($$update public.products set extra_urls = '["http://shop-a.dk/p/1"]' where name = 'sok-pj'$$) = 'check'
+  and t.try($$update public.products set extra_urls = '["https://a1.dk/p","https://a2.dk/p","https://a3.dk/p","https://a4.dk/p","https://a5.dk/p","https://a6.dk/p"]' where name = 'sok-pj'$$) = 'check'
+  and t.try($$update public.products set discover_state = '[1]' where name = 'sok-pj'$$) = 'check');
+select t.chk('search: ... and the job changes no price state, compare state or link when it writes the shops',
+  (select source_url = 'https://prisjagt.dk/product.php?p=77' and status = 'tracking' and compare_state is null and jsonb_array_length(extra_urls) = 2 from public.products where name = 'sok-pj'));
+reset role;
+set role authenticated;
+select t.asA();
+update public.products set discover_state = '{"at":"2000-01-01T00:00:00Z","added":9}' where name = 'sok-pj';
+insert into public.products (name, target_type, target_value, discover_state) values ('sok-ny', 'price', 5, '{"added":3}');
+select t.chk('search: the browser cannot write discover_state (ignored on update, nulled on insert)',
+  (select discover_state ->> 'added' = '1' from public.products where name = 'sok-pj') and (select discover_state is null from public.products where name = 'sok-ny'));
+update public.products set extra_urls = '["https://www.shop-a.dk/p/1","https://shop-b.dk/p/2","https://www.roborock.com/dk/saros"]' where name = 'sok-pj';
+select t.chk('search: the person''s own hand-add of one link keeps extra_state and discover_state',
+  (select jsonb_array_length(extra_urls) = 3 and discover_state ->> 'added' = '1' and extra_state -> 'https://shop-b.dk/p/2' ->> 'origin' = 'search' from public.products where name = 'sok-pj'));
+update public.products set requirements = '  ' where name = 'sok-pj';
+select t.chk('search: empty requirements are no change: the search state stays', (select discover_state is not null from public.products where name = 'sok-pj'));
+update public.products set requirements = 'sort' where name = 'sok-pj';
+select t.chk('search: new requirements start the search over (discover_state cleared)', (select discover_state is null from public.products where name = 'sok-pj'));
+reset role;
+update public.products set discover_state = '{"at":"2026-11-16T10:00:00Z","found":1,"added":0,"note":"x"}' where name = 'sok-pj';
+set role authenticated;
+select t.asA();
+update public.products set source_url = 'https://shop.example.dk/saros' where name = 'sok-pj';
+select t.chk('search: a new source_url starts the search over (and drops the shops as before)',
+  (select discover_state is null and extra_urls is null and extra_state is null from public.products where name = 'sok-pj'));
+select t.chk('search: discover_usage is closed to the browser roles',
+  t.try($$select * from public.discover_usage$$) = 'denied' and t.try($$insert into public.discover_usage (month, calls) values ('2026-11', 1)$$) = 'denied');
+reset role;
+set role anon;
+select t.chk('search: ... and to anon', t.try($$select * from public.discover_usage$$) = 'denied');
+reset role;
+set role service_role;
+select t.chk('search: the service role keeps the monthly counter (one row per month, month format checked, never negative)',
+  t.try($$insert into public.discover_usage (month, calls) values ('2026-11', 3)$$) = 'ok'
+  and t.try($$update public.discover_usage set calls = calls + 3 where month = '2026-11'$$) = 'ok'
+  and t.try($$insert into public.discover_usage (month, calls) values ('2026-11', 1)$$) = 'unique'
+  and t.try($$insert into public.discover_usage (month, calls) values ('november', 1)$$) = 'check'
+  and t.try($$update public.discover_usage set calls = -1 where month = '2026-11'$$) = 'check');
+select t.chk('search: ... the count is 6', (select calls = 6 from public.discover_usage where month = '2026-11'));
+reset role;
+select t.chk('search: RLS is on for the counter and nobody but the service role has rights',
+  (select relrowsecurity from pg_class where oid = 'public.discover_usage'::regclass)
+  and not has_table_privilege('authenticated', 'public.discover_usage', 'select') and not has_table_privilege('anon', 'public.discover_usage', 'select')
+  and has_table_privilege('service_role', 'public.discover_usage', 'update'));
+delete from public.products where name in ('sok-pj', 'sok-ny');
+delete from public.discover_usage;
 
 -- 12. final whole-file run on the populated database
 \o /dev/null

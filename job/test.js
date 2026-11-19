@@ -542,6 +542,8 @@ function makeFake(db) {
           if (q.get('limit')) rows = rows.slice(0, Number(q.get('limit')));
           db.importReads = (db.importReads || 0) + 1;
         } else if (ownerEq && (mm[1] === 'products' || mm[1] === 'lists')) rows = rows.filter((r) => r.user_id === ownerEq[1]);   // one person's rows (the import step)
+        else if (mm[1] === 'products' && /^eq\./.test(q.get('id') || '')) rows = rows.filter((r) => r.id === q.get('id').slice(3));   // one product (the search step reads the row again)
+        else if (mm[1] === 'discover_usage') rows = rows.filter((r) => !q.get('month') || r.month === q.get('month').slice(3));
         else if (mm[1] === 'products') {
           assert.strictEqual(q.get('active'), 'eq.true'); assert.strictEqual(q.get('source_url'), 'not.is.null');
           rows = rows.filter((r) => r.active !== false && (r.source_url || db.ignoreLinkFilter));   // db.ignoreLinkFilter: a server that wrongly returns name-only rows
@@ -575,6 +577,10 @@ function makeFake(db) {
             if (r.source_url != null && !(r.source_url.length <= 500 && /^https:\/\/[^/?#@:\s]+\.[^/?#@:\s]+([/?#][^\s]*)?$/.test(r.source_url))) return reply(400, { code: '23514', message: 'source_url check' });
             if (r.list_id && !(db.lists || []).some((l) => l.id === r.list_id && l.user_id === r.user_id)) return reply(409, { code: '23503', message: 'Listen findes ikke.' });
             t.push(Object.assign({ id: 'np' + (db.seq = (db.seq || 0) + 1), status: 'pending', active: true, tracked_variants: null, history: null, source_url: null, list_id: null, created_at: NOW.toISOString() }, r));
+          } else if (mm[1] === 'discover_usage') {
+            if (db.usageFail) return reply(500, { message: 'db error' });
+            if (t.some((x) => x.month === r.month)) return reply(409, { code: '23505', message: 'duplicate key' });
+            t.push({ month: r.month, calls: r.calls });
           } else if (mm[1] === 'lists') {
             assert.strictEqual(h.Prefer, 'return=representation');
             const nm = String(r.name || '').trim();
@@ -603,6 +609,10 @@ function makeFake(db) {
           return reply(200, h.Prefer === 'return=representation' ? [JSON.parse(JSON.stringify(row))] : undefined);
         }
         assert.strictEqual(h.Prefer, 'return=minimal');
+        if (mm[1] === 'discover_usage') {
+          if (db.usageFail) return reply(500, { message: 'db error' });
+          const row = t.find((r) => r.month === q.get('month').slice(3)); if (row) Object.assign(row, JSON.parse(opts.body)); return reply(204);
+        }
         if (mm[1] === 'imports') {
           const id = /^eq\.(.+)$/.exec(q.get('id'))[1], body = JSON.parse(opts.body);
           const OWN = ['added', 'done_at', 'found', 'list_id', 'note', 'seen', 'status', 'sync_fails', 'synced_at', 'title'];
@@ -3213,6 +3223,493 @@ test('digest helpers: copenhagenHour and the 07:00 window follow Copenhagen time
 test('name_options ("Mente du") is the AI agent\'s and the person\'s: nothing in the job reads or writes it', () => {
   const files = ['run.js'].concat(fs.readdirSync(path.join(__dirname, 'lib')).filter((f) => /\.js$/.test(f)).map((f) => 'lib/' + f));
   for (const f of files) assert(!/name_options/.test(fs.readFileSync(path.join(__dirname, f), 'utf8')), f + ' mentions name_options');
+});
+
+// ---------------------------------------------------------------- shop discovery (lib/discover.js, step 5b of run.js)
+
+const DS = require('./lib/discover');
+
+test('discover: title match, the key tokens (brand, model numbers, model words) and the conflicting variant words', () => {
+  const keys = (t) => DS.keyTokens(t);
+  assert.deepStrictEqual(keys('Roborock Saros 10R Robotstøvsuger (sort)'), ['roborock', 'saros', '10r'], 'category words and anything in parentheses are not required');
+  assert.deepStrictEqual(keys('Dyson V15 Detect Absolute Trådløs Støvsuger'), ['dyson', 'v15', 'detect', 'absolute']);
+  assert.deepStrictEqual(keys('Adidas Stan Smith Sko Hvid'), ['adidas', 'stan', 'smith'], 'no number: the first four words, colours and categories left out');
+  assert.deepStrictEqual(keys('LEGO Star Wars 75375 Millennium Falcon'), ['lego', 'star', 'wars', '75375', 'millennium', 'falcon']);
+  assert.deepStrictEqual(keys('Apple iPhone 16 Pro 256 GB Sort'), ['iphone', '16', 'pro', '256', 'gb'], 'Apple is implied by iPhone');
+  assert.deepStrictEqual(keys('Roborock Saros 10 R | Elgiganten'), ['roborock', 'saros', '10r'], 'a model letter set apart from its number is joined');
+  const yes = (p, c) => assert(DS.titleMatch(p, c).ok, 'should match: ' + p + ' <- ' + c + ' (' + DS.titleMatch(p, c).reason + ')');
+  const no = (p, c, why) => { const m = DS.titleMatch(p, c); assert(!m.ok, 'should NOT match: ' + p + ' <- ' + c); if (why) assert(m.reason.indexOf(why) !== -1, c + ': ' + m.reason); };
+  // Roborock Saros 10R / 10 / the filter set
+  yes('Roborock Saros 10R', 'Roborock Saros 10R Robotstøvsuger - Elgiganten');
+  yes('Roborock Saros 10R', 'Roborock Saros 10 R | Netto');
+  yes('Roborock Saros 10R', 'ROBOROCK SAROS10R');
+  yes('Roborock Saros 10R', 'Roborock Saros-10R robotstøvsuger sort');
+  yes('Roborock Saros 10R', 'Roborock Saros 10R - Robotstøvsuger med filter og dock | Køb nu', 'an SEO tail after the first segment does not count');
+  no('Roborock Saros 10R', 'Roborock Saros 10 robotstøvsuger', '10r');
+  no('Roborock Saros 10', 'Roborock Saros 10R robotstøvsuger', '10');
+  no('Roborock Saros 10R', 'Roborock Saros 10R filter set', 'filter');
+  no('Roborock Saros 10R', 'Filter til Roborock Saros 10R', 'filter');
+  no('Roborock Saros 10R', 'Roborock Saros 10R hepafilter 4 stk', 'filter');
+  no('Roborock Saros 10R', 'Sidebørste til Roborock Saros 10R', 'børste');
+  no('Roborock Saros 10R', 'Roborock Saros 10R mop', 'mop');
+  no('Roborock Saros 10R', 'Roborock Saros 10R Max', 'max');
+  no('Roborock Saros 10R', 'Roborock Saros 10R Ultra robotstøvsuger', 'ultra');
+  no('Roborock Saros 10R', 'Roborock Saros 10R - refurbished', 'refurbished');
+  no('Roborock Saros 10R', 'Roborock Saros 10R brugt', 'brugt');
+  yes('Roborock Saros 10R med dock', 'Roborock Saros 10R med dock', 'the product itself names the dock');
+  yes('Roborock Saros 10R filter', 'Roborock Saros 10R Filter sæt', 'a product that is itself a filter set');
+  // LEGO
+  yes('LEGO Star Wars 75375 Millennium Falcon', 'LEGO® Star Wars™ 75375 Millennium Falcon™ | LEGO.com');
+  no('LEGO Star Wars 75375 Millennium Falcon', 'LEGO Star Wars 75376 Tantive IV', '75375');
+  no('LEGO 75375', 'LEGO Star Wars 75376 Tantive IV', '75375');
+  yes('LEGO 75375', 'LEGO Star Wars 75375 Millennium Falcon');
+  // Dyson
+  yes('Dyson V15 Detect Absolute', 'Dyson V15 Detect Absolute Støvsuger - Guld');
+  no('Dyson V15 Detect Absolute', 'Dyson V15 Detect Støvsuger', 'absolute');
+  no('Dyson V15 Detect', 'Dyson V15 Detect Absolute Støvsuger', 'absolute');
+  yes('Dyson V15 Detect', 'Dyson V15 Detect trådløs støvsuger');
+  no('Dyson V15 Detect', 'Dyson V15 Detect Fluffy', 'fluffy');
+  // shoes
+  yes('Adidas Stan Smith', 'adidas Stan Smith sneakers hvid/grøn');
+  no('Adidas Stan Smith', 'Adidas Stan Smith Lux sneakers', 'lux');
+  no('Adidas Stan Smith', 'Adidas Superstar', 'stan');
+  // phones
+  yes('Apple iPhone 16 Pro', 'iPhone 16 Pro 256GB Sort Titanium');
+  no('Apple iPhone 16 Pro', 'iPhone 16 Pro Max 256GB', 'max');
+  no('Apple iPhone 16 Pro Max', 'iPhone 16 Pro 256GB', 'max');
+  no('Apple iPhone 16', 'Apple iPhone 16 Pro 128GB', 'pro');
+  no('Apple iPhone 16', 'Apple iPhone 16e 128GB', '16');
+  no('Apple iPhone 16', 'Apple iPhone 16 silikone cover', 'cover');
+  no('Apple iPhone 16', 'Apple iPhone 16 Plus', 'plus');
+  yes('Samsung Galaxy S24', 'Galaxy S24 128GB Onyx Black');
+  no('Samsung Galaxy S24', 'Samsung Galaxy S24 FE', 'fe');
+  no('Samsung Galaxy S24', 'Samsung Galaxy S24 Ultra', 'ultra');
+  no('Samsung Galaxy S24', 'Samsung Galaxy S23', 's24');
+  // junk
+  assert(!DS.titleMatch('', 'x').ok && !DS.titleMatch('Roborock Saros 10R', '').ok && !DS.titleMatch('Roborock Saros 10R', null).ok);
+  assert(DS.titleMatch('Roborock Saros 10R', '<b>Roborock</b> Saros &amp; 10R').ok, 'tags and entities in a search result title are removed');
+});
+
+test('discover: queries from the stored title (else the name), without parentheses and marketing words, with colour or edition words from the requirements', () => {
+  assert.deepStrictEqual(DS.buildQueries({ title: 'Roborock Saros 10R Robotstøvsuger (sort) | Elgiganten', name: 'saros' }), ['Roborock Saros 10R Robotstøvsuger pris', 'Roborock Saros 10R Robotstøvsuger køb']);
+  assert.deepStrictEqual(DS.buildQueries({ title: null, name: 'Dyson V15 Detect' }), ['Dyson V15 Detect pris', 'Dyson V15 Detect køb']);
+  assert.deepStrictEqual(DS.buildQueries({ title: 'Roborock Saros 10R', requirements: 'Sort, helst med fri fragt' }), ['Roborock Saros 10R sort pris', 'Roborock Saros 10R sort køb']);
+  assert.deepStrictEqual(DS.buildQueries({ title: 'Apple iPhone 16 Pro', requirements: 'Titanium Sort 256 GB limited edition' })[0], 'Apple iPhone 16 Pro titanium sort limited edition pris', 'at most 4 extra words, "256 GB" is two words and no size');
+  assert.deepStrictEqual(DS.buildQueries({ title: 'Apple iPhone 16 Pro', requirements: 'sort 256gb' })[0], 'Apple iPhone 16 Pro sort 256gb pris');
+  assert.strictEqual(DS.buildQueries({ title: 'Roborock Saros 10R Black', requirements: 'black' })[0], 'Roborock Saros 10R Black pris', 'a colour the title holds is not repeated');
+  assert.strictEqual(DS.buildQueries({ title: 'Ny! Original Tilbud Roborock Saros 10R - Elgiganten' })[0], 'Ny! Roborock Saros 10R pris'.replace('Ny! ', ''), 'marketing words go');
+  assert.strictEqual(DS.buildQueries({ title: '   ', name: '' }), null);
+  assert.strictEqual(DS.buildQueries({ title: 'Sort Hvid' }), null, 'nothing to match on');
+  assert.strictEqual(DS.buildQueries({ title: 'En meget lang titel som ikke slutter aldrig og bliver ved og ved og ved 12345' })[0].split(' ').length, 9, 'at most 8 words and "pris"');
+});
+
+test('discover: the candidate filter (https, shop url, denylist, Danish, product page, not covered, title) with its reasons', () => {
+  const prod = { name: 'Saros', title: 'Roborock Saros 10R', source_url: 'https://prisjagt.dk/product.php?p=1', extra_urls: ['https://www.butik-a.dk/p/1'],
+    offers: [{ store: 'Elgiganten', url: 'https://prisjagt.dk/go-to-shop/1/offer/1', price: 5500 }, { store: 'Proshop', url: 'https://www.proshop.dk/Robotstoevsuger/x', price: 5600 }] };
+  const why = (url, title) => DS.rejectReason(prod, { url, title: title || 'Roborock Saros 10R' }, prod.offers);
+  assert.strictEqual(why('https://www.kampagne.dk/roborock-saros-10r'), null, 'a Danish shop with a product slug');
+  assert.strictEqual(why('https://www.kampagne.dk/roborock-saros-10r/'), null);
+  assert.strictEqual(why('https://www.kampagne.dk/robot/roborock'), null, 'two segments');
+  assert.strictEqual(why('https://www.roborock.com/dk/saros-10r'), null, 'the manufacturer: allowlist and locale segment');
+  assert.strictEqual(why('https://www.roborock.com/da-dk/p/saros-10r'), null);
+  assert.strictEqual(why('https://www.somewhere.com/dk/p/saros-10r'), null, 'a Danish locale segment on another top-level domain');
+  assert.strictEqual(why('https://www.lego.com/products/x-75375'), null, 'allowlisted shop that sells in kroner');
+  assert(/https/.test(why('http://www.kampagne.dk/roborock-saros-10r')), 'http');
+  assert(why('https://127.0.0.1/roborock-saros-10r') && why('https://user:pw@www.kampagne.dk/roborock-saros-10r') && why('https://www.kampagne.dk:8443/roborock-saros-10r') && why('ftp://kampagne.dk/x'), 'unsafe addresses never pass the shop url guard');
+  assert(why(''));
+  ['https://prisjagt.dk/product.php?p=1', 'https://www.pricerunner.dk/pl/1-2/x', 'https://www.pricerunner.com/pl/x', 'https://www.kelkoo.dk/x/saros-10r', 'https://www.idealo.de/x/saros-10r', 'https://www.dba.dk/x/saros-10r',
+    'https://www.guloggratis.dk/x/saros-10r', 'https://www.facebook.com/x/saros-10r', 'https://www.youtube.com/watch?v=abc', 'https://www.reddit.com/r/robot/comments/saros-10r', 'https://dk.trustpilot.com/review/saros-10r',
+    'https://da.wikipedia.org/wiki/saros-10r', 'https://www.amazon.de/Roborock-Saros-10R/dp/B01', 'https://www.amazon.co.uk/Roborock-Saros-10R/dp/B01', 'https://www.ebay.com/itm/saros-10r', 'https://www.ebay.dk/itm/saros-10r',
+    'https://www.aliexpress.com/item/saros-10r.html', 'https://www.temu.com/dk/saros-10r-g-1.html', 'https://www.techradar.com/dk/saros-10r'].forEach((u) => assert(/sammenligning|markedsplads/.test(why(u) || ''), 'denied: ' + u + ' -> ' + why(u)));
+  ['https://www.bestbuy.com/site/roborock-saros-10r/123.p', 'https://www.shop.co.uk/roborock-saros-10r', 'https://www.shop.de/roborock-saros-10r', 'https://www.shop.com/products/roborock-saros-10r'].forEach((u) => assert(why(u) === 'ikke dansk', 'not Danish: ' + u + ' -> ' + why(u)));
+  ['https://www.shop.dk/search?q=roborock+saros+10r', 'https://www.shop.dk/soeg/roborock-saros-10r', 'https://www.shop.dk/kategori/robotstoevsugere/roborock-saros-10r', 'https://www.shop.dk/category/robots',
+    'https://www.shop.dk/collections/roborock', 'https://www.shop.dk/brand/roborock-saros-10r', 'https://www.shop.dk/maerke/roborock', 'https://www.shop.dk/blog/test-af-roborock-saros-10r', 'https://www.shop.dk/nyheder/roborock-saros-10r',
+    'https://www.shop.dk/guide/bedste-robotstoevsuger', 'https://www.shop.dk/', 'https://www.shop.dk/?s=roborock', 'https://www.shop.dk/dk/', 'https://www.shop.dk/roborock', 'https://www.shop.dk/robotstoevsugere', 'https://www.shop.dk/katalog.pdf',
+    'https://www.shop.dk/produkter?q=roborock-saros-10r'].forEach((u) => assert(why(u) === 'ikke en produktside', 'not a product page: ' + u + ' -> ' + why(u)));
+  assert.strictEqual(why('https://www.shop.dk/collections/roborock/products/roborock-saros-10r'), null, 'a Shopify product inside a collection');
+  assert.strictEqual(why('https://www.shop.dk/roborock-saros-10r?variant=123'), null, 'a query that is no search');
+  assert.strictEqual(why('https://www.shop.dk/p12345'), null, 'a single segment with a number');
+  // not covered: the product's own shop, an extra shop already followed, a shop among the offers (by the name of its domain)
+  assert.strictEqual(why('https://prisjagt.dk/x/roborock-saros-10r'), 'sammenligning, markedsplads eller medie');
+  assert.strictEqual(why('https://www.butik-a.dk/p/2'), 'følges allerede');
+  assert.strictEqual(why('https://www.elgiganten.dk/product/roborock-saros-10r'), 'med på Prisjagt');
+  assert.strictEqual(why('https://www.proshop.dk/Robotstoevsuger/roborock-saros-10r'), 'med på Prisjagt');
+  assert.strictEqual(DS.rejectReason(Object.assign({}, prod, { source_url: 'https://www.hovedbutik.dk/vare/1' }), { url: 'https://www.hovedbutik.dk/vare/2-roborock', title: 'Roborock Saros 10R' }, []), 'varens egen butik');
+  // the title: the last gate
+  assert(/10r/.test(why('https://www.kampagne.dk/roborock-saros-10', 'Roborock Saros 10')));
+  assert(/filter/.test(why('https://www.kampagne.dk/roborock-saros-10r-filter', 'Roborock Saros 10R filter set')));
+  // candidates: search order, one per shop (also across subdomains), at most 6
+  const rs = [];
+  for (let i = 0; i < 9; i++) rs.push({ url: 'https://www.kampagne' + i + '.dk/roborock-saros-10r', title: 'Roborock Saros 10R' });
+  rs.splice(1, 0, { url: 'https://shop.kampagne0.dk/roborock-saros-10r-2', title: 'Roborock Saros 10R' });
+  const c = DS.candidates(prod, rs);
+  assert.strictEqual(c.length, 6); assert.deepStrictEqual(c.map((x) => x.url), [0, 1, 2, 3, 4, 5].map((i) => 'https://www.kampagne' + i + '.dk/roborock-saros-10r'));
+  // the same result with another tag, a slash or a fragment counts once; the first one stays
+  const dd = DS.dedupe([{ url: 'https://www.a.dk/x?utm_source=g' }, { url: 'https://a.dk/x/' }, { url: 'https://www.a.dk/x#top' }, { url: 'https://www.a.dk/x?v=2' }, { url: 'https://www.a.dk/y' }]);
+  assert.deepStrictEqual(dd.map((x) => x.url), ['https://www.a.dk/x?utm_source=g', 'https://www.a.dk/x?v=2', 'https://www.a.dk/y']);
+  // constants are what the brief says
+  ['prisjagt', 'pricerunner', 'kelkoo', 'idealo', 'dba', 'guloggratis', 'facebook', 'youtube', 'reddit', 'trustpilot', 'wikipedia', 'amazon', 'ebay', 'aliexpress', 'temu', 'techradar'].forEach((n) => assert(DS.DENY_NAMES.has(n), n));
+  ['boozt.com', 'whiteaway.com', 'lego.com', 'apple.com', 'samsung.com', 'roborock.com'].forEach((d) => assert(DS.DK_SHOPS.indexOf(d) !== -1, d));
+});
+
+test('discover: verify a page (kroner, the page\'s own name, outlier rule, stock, covered under its real name)', () => {
+  const prod = { title: 'Roborock Saros 10R', offers: [{ store: 'Elgiganten', price: 5500, inStock: true }, { store: 'Proshop', price: 5600, inStock: true }, { store: 'Power', price: 5650, inStock: true }] };
+  const page = (o) => ({ title: 'Roborock Saros 10R Robotstøvsuger', rows: [Object.assign({ store: 'Kampagneshop', price: 4050, inStock: true }, o || {})] });
+  const cand = { url: 'https://www.kampagne.dk/roborock-saros-10r' };
+  assert.deepStrictEqual(DS.verifyPage(prod, cand, page()), { ok: true, price: 4050, store: 'Kampagneshop', url: cand.url, title: 'Roborock Saros 10R Robotstøvsuger' });
+  assert.strictEqual(DS.verifyPage(prod, cand, page({ price: undefined })).reason, 'ingen pris');
+  assert(/mangler|tilbehør/.test(DS.verifyPage(prod, cand, Object.assign(page(), { title: 'Roborock Saros 10 robotstøvsuger' })).reason));
+  assert(/filter/.test(DS.verifyPage(prod, cand, Object.assign(page(), { title: 'Roborock Saros 10R Filter sæt' })).reason), 'the search title was fine, the page says it is a filter');
+  assert.strictEqual(DS.verifyPage(prod, cand, Object.assign(page(), { title: null })).reason, 'ingen titel på siden');
+  assert.strictEqual(DS.verifyPage(prod, cand, page({ price: 2000 })).reason, 'pris ligner en anden vare', 'below 40 % of the median (5600)');
+  assert.strictEqual(DS.verifyPage(prod, cand, page({ price: 2240 })).ok, true, 'exactly 40 % of the median is still fine');
+  assert.strictEqual(DS.verifyPage(prod, cand, page({ price: 14100 })).reason, 'pris ligner en anden vare');
+  assert.strictEqual(DS.verifyPage(prod, cand, page({ inStock: false })).reason, 'ikke på lager');
+  assert.strictEqual(DS.verifyPage(prod, cand, page({ inStock: undefined })).ok, true, 'unknown stock counts as in stock');
+  assert.strictEqual(DS.verifyPage(prod, cand, page({ store: 'Power' })).reason, 'med på Prisjagt', 'the real shop name of the page is among the offers');
+  assert.strictEqual(DS.verifyPage({ title: 'Roborock Saros 10R', offers: [] }, cand, page({ price: 100 })).ok, true, 'without other prices there is nothing to compare with');
+});
+
+test('discover: what to add (cheaper than the lowest price only, at most 2, lowest first) and what to replace when the list is full', () => {
+  const prod = { source_url: 'https://prisjagt.dk/product.php?p=1', offers: [{ store: 'A', price: 5500, inStock: true, url: 'https://prisjagt.dk/g/1' }, { store: 'Sold out', price: 3000, inStock: false }] };
+  const v = (host, price) => ({ url: 'https://www.' + host + '/p', price, store: host });
+  const plan = (fresh, verified, p) => DS.planChange(p || prod, fresh, verified);
+  assert.strictEqual(DS.lowestPrice(prod), 5500, 'a sold-out offer is not the lowest price');
+  assert.deepStrictEqual(plan({ extra_urls: null, extra_state: null }, [v('s1.dk', 5500), v('s2.dk', 5900)]), { add: [], remove: [] }, 'not cheaper (equal or dearer): nothing');
+  let c = plan({ extra_urls: null, extra_state: null }, [v('s1.dk', 5400), v('s2.dk', 4050), v('s3.dk', 5000), v('s4.dk', 6000)]);
+  assert.deepStrictEqual(c.add.map((a) => a.url), ['https://www.s2.dk/p', 'https://www.s3.dk/p'], 'the two lowest prices, lowest first; the dearer than the lowest offer is never added'); assert.deepStrictEqual(c.remove, []);
+  assert.deepStrictEqual(plan({ extra_urls: null, extra_state: null }, [], prod), { add: [], remove: [] });
+  assert.deepStrictEqual(plan({ extra_urls: null, extra_state: null }, [v('s1.dk', 10)], { source_url: prod.source_url, offers: [] }), { add: [], remove: [] }, 'no price to beat: nothing');
+  assert.deepStrictEqual(plan({ extra_urls: ['https://s1.dk/old'], extra_state: null }, [v('www.s1.dk', 4000)]), { add: [], remove: [] }, 'a shop that is followed already');
+  assert.deepStrictEqual(plan({ extra_urls: [], extra_state: null }, [{ url: 'https://prisjagt.dk/x', price: 1, store: 'p' }]).add.length, 0, 'never a prisjagt.dk link (own host)');
+  // a full list (5): only a link whose origin is 'search' (written by this job) may be replaced; no origin = the AI agent's or the person's = protected
+  const L5 = ['https://h1.dk/a', 'https://h2.dk/a', 'https://h3.dk/a', 'https://h4.dk/a', 'https://h5.dk/a'];
+  const PR = [6000, 5800, 5700, 5900, 5600];
+  const st = (origins, prices) => { const s = {}; L5.forEach((u, i) => { if (origins[i] !== null) s[u] = { origin: origins[i], seen: true }; if (prices && prices[i] !== undefined) (s[u] = s[u] || {}).offer = { price: prices[i] }; }); return s; };
+  c = plan({ extra_urls: L5.slice(0, 4), extra_state: st([undefined, 'hand', 'agent', 'search'], PR) }, [v('n1.dk', 4000), v('n2.dk', 4100)]);
+  assert.deepStrictEqual([c.add.map((a) => a.store), c.remove], [['n1.dk', 'n2.dk'], [L5[3]]], 'one free place, the second shop replaces the only search link (the others are protected)');
+  c = plan({ extra_urls: L5, extra_state: st([undefined, 'hand', 'agent', undefined, null], PR) }, [v('n1.dk', 4000)]);
+  assert.deepStrictEqual(c, { add: [], remove: [] }, 'a full list of links of the AI agent and of the person: nothing is replaced, nothing added');
+  assert.deepStrictEqual(plan({ extra_urls: L5, extra_state: null }, [v('n1.dk', 4000)]), { add: [], remove: [] }, 'no state at all: every link has an unknown origin');
+  c = plan({ extra_urls: L5, extra_state: st(['search', 'search', 'search', 'search', 'search'], PR) }, [v('n1.dk', 4000), v('n2.dk', 4100), v('n3.dk', 4200)]);
+  assert.deepStrictEqual([c.add.map((a) => a.store), c.remove], [['n1.dk', 'n2.dk'], [L5[0], L5[3]]], 'the most expensive search links go first (6000, then 5900), at most 2 in all');
+  c = plan({ extra_urls: L5, extra_state: st(['search', 'agent', 'agent', 'agent', 'agent'], [5500, 5800, 5700, 5900, 5600]) }, [v('n1.dk', 4000)]);
+  assert.deepStrictEqual(c, { add: [], remove: [] }, 'a search link that is the cheapest offer of the product is never replaced');
+  c = plan({ extra_urls: L5, extra_state: st(['search', 'search', 'agent', 'agent', 'agent'], [undefined, 5800]) }, [v('n1.dk', 4000)]);
+  assert.deepStrictEqual(c.remove, [L5[0]], 'a search link without a known price does not contribute: it goes first');
+  c = plan(Object.assign({}, { extra_urls: L5, extra_state: st(['search', 'agent', 'agent', 'agent', 'agent'], [undefined]) }), [v('n1.dk', 4000)], Object.assign({}, prod, { offers: prod.offers.concat([{ store: 'H1', url: L5[0], price: 5500, inStock: true }]) }));
+  assert.deepStrictEqual(c, { add: [], remove: [] }, 'its price is found in the offers list when the state has none: the cheapest stays');
+  // the new state: removed links gone, new links with their origin, the others as they were
+  const ns = DS.nextState({ extra_urls: L5, extra_state: st(['search', 'agent', 'agent', 'agent', 'agent'], PR) }, { add: [{ url: 'https://new.dk/p' }], remove: [L5[0]] });
+  assert.deepStrictEqual(Object.keys(ns).sort(), [L5[1], L5[2], L5[3], L5[4], 'https://new.dk/p'].sort());
+  assert.deepStrictEqual(ns['https://new.dk/p'], { origin: 'search' }); assert.strictEqual(ns[L5[1]].offer.price, 5800);
+  assert.strictEqual(DS.nextState({ extra_state: null }, { add: [], remove: [] }), null);
+});
+
+test('discover: which products are searched, and in which order (new first, then the longest ago; 7 days apart)', () => {
+  const n = new Date('2026-11-16T10:00:00Z'), ago = (d) => new Date(n.getTime() - d * 864e5).toISOString();
+  const base = () => ({ id: 'x', active: true, bought_at: null, status: 'tracking', title: 'Roborock Saros 10R', source_url: 'https://prisjagt.dk/product.php?p=1', offers: [{ store: 'A', price: 100, inStock: true }], extra_urls: null, extra_state: null, discover_state: null });
+  const due = (o) => DS.isDue(Object.assign(base(), o || {}), n);
+  assert(due());
+  assert(!due({ active: false }) && !due({ bought_at: ago(1) }) && !due({ status: 'choose' }) && !due({ status: 'error' }) && !due({ status: 'pending' }), 'active, not bought, tracking');
+  assert(!due({ title: null }) && !due({ title: '  ' }) && !due({ title: 'Sort' }), 'a title with something to match');
+  assert(!due({ offers: [] }) && !due({ offers: null }) && !due({ offers: [{ store: 'A', price: 100, inStock: false }] }), 'a price to beat');
+  assert(!due({ source_url: 'http://www.shop.dk/a' }) && !due({ source_url: null }), 'an https link (the database rule for extra shops)');
+  assert(due({ discover_state: { at: ago(7.01), found: 3, added: 0 } }) && !due({ discover_state: { at: ago(6.9), found: 3, added: 0 } }) && due({ discover_state: { at: 'x' } }) && due({ discover_state: {} }));
+  ['discover_state', 'extra_urls', 'extra_state'].forEach((k) => { const r = base(); delete r[k]; assert(!DS.isDue(r, n), 'a database without ' + k + ' never searches'); });
+  const mk = (id, at) => Object.assign(base(), { id, discover_state: at === null ? null : { at: ago(at) } });
+  assert.deepStrictEqual(DS.order([mk('old', 20), mk('new1', null), mk('mid', 10), mk('recent', 3), mk('new2', null), mk('older', 30)], n).map((p) => p.id), ['new1', 'new2', 'older', 'old', 'mid'], 'never searched first in list order, then the oldest; a search 3 days ago waits');
+});
+
+test('discover: the search client (one request, key in the header only, DK and da, 1.1 s apart, 15 s timeout, stops on 401/403, 402/429, 5xx, no retries)', async () => {
+  const sleeps = [], calls = [];
+  const mk = (handler, key) => DS.makeSearcher({ key: key || 'KEY-123', sleep: async (ms) => { sleeps.push(ms); }, fetch: async (url, o) => { calls.push({ url, o }); return handler(calls.length); } });
+  const ok = (n) => ({ status: 200, text: async () => JSON.stringify({ web: { results: [{ title: '<strong>A</strong> &amp; B', url: 'https://www.a.dk/p' + n, description: 'd' }, { title: 'no url' }, { title: 'C', url: ' https://www.c.dk/p ' }] } }) });
+  let s = mk(ok);
+  let r = await s.search('roborock saros 10r pris', 0);
+  assert(r.ok); assert.deepStrictEqual(r.results.map((x) => [x.title, x.url]), [['A & B', 'https://www.a.dk/p1'], ['C', 'https://www.c.dk/p']], 'tags and entities removed, entries without an address dropped');
+  const u = new URL(calls[0].url);
+  assert.strictEqual(u.origin + u.pathname, 'https://api.search.brave.com/res/v1/web/search');
+  assert.strictEqual(u.searchParams.get('q'), 'roborock saros 10r pris'); assert.strictEqual(u.searchParams.get('country'), 'DK'); assert.strictEqual(u.searchParams.get('search_lang'), 'da'); assert.strictEqual(u.searchParams.get('count'), '20');
+  assert(!u.searchParams.has('offset'), 'the first page has no offset'); assert(!/KEY-123/.test(calls[0].url), 'the key is not in the address');
+  assert.strictEqual(calls[0].o.headers['X-Subscription-Token'], 'KEY-123'); assert.strictEqual(calls[0].o.headers.Accept, 'application/json'); assert(calls[0].o.signal, 'a timeout is set');
+  assert.deepStrictEqual(sleeps, [], 'no wait before the first request');
+  await s.search('x', 1); await s.search('y', 0);
+  assert.strictEqual(new URL(calls[1].url).searchParams.get('offset'), '1'); assert.deepStrictEqual(sleeps, [1100, 1100], 'at least 1.1 s between two requests'); assert.strictEqual(s.calls, 3);
+  // stops
+  const stops = { 401: 'auth', 403: 'auth', 402: 'quota', 429: 'quota', 500: 'server', 503: 'server', 400: 'error', 422: 'error' };
+  for (const code of Object.keys(stops)) {
+    const n0 = calls.length; s = mk(() => ({ status: Number(code), text: async () => 'nej' }));
+    r = await s.search('q', 0); assert.deepStrictEqual([r.ok, r.stop, r.status], [false, stops[code], Number(code)], code); assert.strictEqual(calls.length, n0 + 1, 'no retry after ' + code);
+  }
+  s = mk(() => { throw new Error('ECONNRESET'); }); r = await s.search('q', 0); assert.deepStrictEqual([r.ok, r.stop], [false, 'error']);
+  s = mk(() => { const e = new Error('x'); e.name = 'AbortError'; throw e; }); r = await s.search('q', 0); assert.strictEqual(r.reason, 'timeout');
+  s = mk(() => ({ status: 200, text: async () => 'not json' })); r = await s.search('q', 0); assert.deepStrictEqual([r.ok, r.stop], [false, 'error']);
+  s = mk(() => ({ status: 200, text: async () => '{}' })); r = await s.search('q', 0); assert(r.ok && r.results.length === 0, 'an empty answer is no error');
+  // the one place that names the API
+  assert.strictEqual(DS.BRAVE.keyHeader, 'X-Subscription-Token'); assert.deepStrictEqual(DS.BRAVE.fixed, { country: 'DK', search_lang: 'da', count: 20 }); assert.strictEqual(DS.BRAVE.pageParam, 'offset');
+});
+
+
+
+// ---- discovery inside the run: the full scenario, with a fake search API, fake shop pages and the fake database
+const D_KEY = 'BRAVE-SECRET-KEY-777', DPJ = urlOf('roborock');
+const D_K = 'https://www.kampagneshop.dk/roborock-saros-10r-robotstovsuger';
+const sr = (url, title) => ({ title, url, description: 'beskrivelse' });
+function dResults() {
+  const p0 = [
+    sr('https://prisjagt.dk/product.php?p=16373878', 'Roborock Saros 10R - Prisjagt'),
+    sr('https://www.pricerunner.dk/pl/1-2/Robotstoevsugere/Roborock-Saros-10R', 'Roborock Saros 10R - Sammenlign priser'),
+    sr('https://www.elgiganten.dk/product/hjem/robotstoevsuger/roborock-saros-10r', 'Roborock Saros 10R Robotstøvsuger | Elgiganten'),
+    sr(D_K, 'Roborock Saros 10R Robotstøvsuger | Kampagneshop'),
+    sr('https://www.tilbehoer.dk/roborock-saros-10r-filter-saet', 'Filter sæt til Roborock Saros 10R | Tilbehør.dk'),
+    sr('https://www.robotbutik.dk/roborock-saros-10', 'Roborock Saros 10 robotstøvsuger | Robotbutik'),
+    sr('https://www.bestbuy.com/site/roborock-saros-10r/6571234.p', 'Roborock Saros 10R Robot Vacuum - Best Buy'),
+    sr('https://www.stoevsugerbutik.dk/kategori/roborock', 'Roborock robotstøvsugere | Støvsugerbutik'),
+    sr('https://www.amazon.de/Roborock-Saros-10R/dp/B0XYZ', 'Roborock Saros 10R : Amazon.de'),
+    sr('https://www.facebook.com/groups/robotstoevsuger/posts/123', 'Roborock Saros 10R - Facebook'),
+    sr('https://www.dyrbutik.dk/roborock-saros-10r', 'Roborock Saros 10R | Dyrbutik'),
+    sr('https://www.udsolgt.dk/roborock-saros-10r', 'Roborock Saros 10R | Udsolgt.dk'),
+    sr('https://www.forkert.dk/roborock-saros-10r', 'Roborock Saros 10R | Forkert.dk'),
+    sr('https://www.billig.dk/roborock-saros-10r', 'Roborock Saros 10R | Billig.dk'),
+  ];
+  for (let i = 0; p0.length < 20; i++) p0.push(sr('https://www.junk' + i + '.dk/dyson-v15-detect', 'Dyson V15 Detect Støvsuger | Junk' + i));
+  const p1 = [sr(D_K + '?utm_source=google', 'Roborock Saros 10R Robotstøvsuger | Kampagneshop')];
+  for (let i = 20; p1.length < 10; i++) p1.push(sr('https://www.junk' + i + '.dk/dyson-v15-detect', 'Dyson V15 Detect Støvsuger | Junk' + i));
+  return [p0, p1, [sr('https://www.billig.dk/roborock-saros-10r/', 'Roborock Saros 10R | Billig.dk')]];
+}
+function dBrave(pages, status) {
+  const b = { calls: [] };
+  b.fn = async (url, o) => {
+    const u = new URL(url), i = b.calls.length;
+    b.calls.push({ q: u.searchParams.get('q'), offset: u.searchParams.get('offset'), key: o.headers['X-Subscription-Token'], url });
+    const st = typeof status === 'function' ? status(i) : status;
+    if (st && st !== 200) return { status: st, text: async () => 'nej' };
+    return { status: 200, text: async () => JSON.stringify({ web: { results: pages[i % pages.length] || [] } }) };
+  };
+  return b;
+}
+function dShopHtml(site, name, price, stock) {
+  return '<html><head><title>' + name + '</title><meta property="og:site_name" content="' + site + '"><script type="application/ld+json">' + JSON.stringify({ '@context': 'https://schema.org', '@type': 'Product', name,
+    offers: { '@type': 'Offer', priceCurrency: 'DKK', price: String(price), availability: 'https://schema.org/' + (stock === false ? 'OutOfStock' : 'InStock') } }) + '</script></head><body></body></html>';
+}
+function dShops(o) {
+  return Object.assign({
+    [D_K]: dShopHtml('Kampagneshop', 'Roborock Saros 10R Robotstøvsuger', 4050),
+    'https://www.dyrbutik.dk/roborock-saros-10r': dShopHtml('Dyrbutik', 'Roborock Saros 10R', 5900),
+    'https://www.udsolgt.dk/roborock-saros-10r': dShopHtml('Udsolgt', 'Roborock Saros 10R', 3900, false),
+    'https://www.forkert.dk/roborock-saros-10r': dShopHtml('Forkert', 'Roborock Saros 10R Filter sæt', 4000),
+    'https://www.billig.dk/roborock-saros-10r': dShopHtml('Billig', 'Roborock Saros 10R', 1500),
+  }, o || {});
+}
+function dPjPage() {
+  const row = (store, price, i) => ({ key: 'o' + i, variant: '1', store, price, url: 'https://prisjagt.dk/go-to-shop/' + i + '/offer/' + i, inStock: true, stock: 'InStock', note: null, name: 'Roborock Saros 10R', saleKnown: false, sale: false });
+  return { title: 'Roborock Saros 10R', rows: [row('Elgiganten', 5500, 1), row('Proshop', 5600, 2), row('Power', 5650, 3), row('Komplett', 5700, 4)],
+    variants: [{ id: '1', label: 'Standard', lowest: 5500, offers: 4, sample: 'Roborock Saros 10R' }], history: [], note: null, shop: false, source: null, image: null };
+}
+function dProduct(id, extra) {
+  return product(id, 'u1', 'roborock', Object.assign({
+    name: 'Saros ' + id, title: 'Roborock Saros 10R', status: 'tracking', tracked_variants: ['1'], target_value: 5000, compare_state: 'none', compare_tries: 2, compare_at: '2026-11-01T09:00:00Z',
+    variants: [{ id: '1', label: 'Standard', lowest: 5500, offers: 4, sample: 'Roborock Saros 10R' }], history: [{ d: '2026-11-10', p: 5500, s: 'Elgiganten', src: 'check' }], last_checked: '2026-11-16T09:00:00Z',
+    offers: dPjPage().rows.map((r) => ({ store: r.store, price: r.price, url: r.url, inStock: true, note: null, variant: '1' })),
+    extra_urls: null, extra_state: null, discover_state: null, image_url: null, requirements: null,
+  }, extra || {}));
+}
+function dDb() { const db = newDb(); db.discover_usage = []; return db; }
+// one run: o.brave (fake search), o.shops (html by url), o.key, o.now (iso), o.logs (array), o.sleeps (array)
+function dRun(db, o) {
+  o = o || {};
+  const shops = o.shops || dShops();
+  const ctx = ctxFor(db, {}, Object.assign({
+    braveFetch: (o.brave || dBrave(dResults())).fn, braveSleep: async (ms) => { if (o.sleeps) o.sleeps.push(ms); },
+    getPage: async (url) => {
+      ctx.fetched.push(url);
+      if (url === DPJ) return clone(dPjPage());
+      const h = shops[url]; if (h === undefined) throw new PJ.PageError('notfound', 'HTTP 404');
+      if (typeof h === 'function') return h();
+      return SHOP.parseShopPage(h, url);
+    },
+    log: (l) => { if (o.logs) o.logs.push(l); },
+  }, o.key === undefined ? { braveKey: D_KEY } : (o.key === null ? {} : { braveKey: o.key }), o.now ? { now: at(o.now) } : {}, o.extra || {}));
+  return R.run(ctx).then((res) => Object.assign(res, { ctx }));
+}
+
+test('discover: the full scenario (Prisjagt lowest 5.500, 30 mixed results): exactly the Danish retailer at 4.050 is added, silent first run, the price follows on the next run', async () => {
+  const db = dDb(); db.products.push(dProduct('D1'));
+  const brave = dBrave(dResults()), logs = [], sleeps = [];
+  let res = await dRun(db, { brave, logs, sleeps });
+  const P1 = () => db.products[0];
+  // 3 API calls: 2 pages of "pris", 1 page of "køb", in Denmark, in Danish, 1.1 s apart
+  assert.deepStrictEqual(brave.calls.map((c) => [c.q, c.offset]), [['Roborock Saros 10R pris', null], ['Roborock Saros 10R pris', '1'], ['Roborock Saros 10R køb', null]]);
+  assert(brave.calls.every((c) => c.key === D_KEY && /country=DK/.test(c.url) && /search_lang=da/.test(c.url) && /count=20/.test(c.url)));
+  assert.deepStrictEqual(sleeps, [1100, 1100]);
+  // the pages that were read for the check: the candidates only (not the comparison sites, the accessory, the other model, the US page, the category page)
+  assert.deepStrictEqual(res.ctx.fetched, [DPJ, D_K, 'https://www.dyrbutik.dk/roborock-saros-10r', 'https://www.udsolgt.dk/roborock-saros-10r', 'https://www.forkert.dk/roborock-saros-10r', 'https://www.billig.dk/roborock-saros-10r']);
+  assert.deepStrictEqual(P1().extra_urls, [D_K], 'exactly the retailer: dearer, sold out, accessory page and another-product price are verified away');
+  assert.deepStrictEqual(P1().extra_state, { [D_K]: { origin: 'search' } });
+  assert.strictEqual(P1().discover_state.at, '2026-11-16T10:00:00Z'); assert.strictEqual(P1().discover_state.added, 1); assert.strictEqual(P1().discover_state.note, 'ny butik');
+  assert.strictEqual(P1().discover_state.found, 29, '31 results in all, the same page twice (a tag, a slash) counted once: 29 distinct');
+  assert.strictEqual(P1().offers[0].price, 5500, 'this run: the price is still the Prisjagt one'); assert.strictEqual(db.sent.length, 0, 'first run silent');
+  const w = db.patches.filter((x) => x.id === 'D1').pop().body;
+  assert.deepStrictEqual(Object.keys(w).sort(), ['discover_state', 'extra_state', 'extra_urls'], 'the search writes the shops and its own bookkeeping, never a price state, compare state or link');
+  assert.strictEqual(P1().source_url, DPJ); assert.strictEqual(P1().compare_state, 'none');
+  assert.deepStrictEqual(db.discover_usage, [{ month: '2026-11', calls: 3 }]);
+  assert(/Søgning: 1 vare, 3 kald, 1 ny butik\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(res.summary.length, 5);
+  assert(logs.some((l) => /ny butik kampagneshop\.dk \(4050 kr\.\)/.test(l)), logs.join('\n'));
+  assert(!logs.concat(res.summary).join('\n').includes(D_KEY), 'the key is never logged');
+  // next run: the shop is read through the extras machinery; its first price is silent (extraNew) but recorded; no new search for 7 days
+  res = await dRun(db, { brave, logs });
+  assert.strictEqual(brave.calls.length, 3, 'not searched again');
+  assert.strictEqual(P1().offers[0].price, 4050); assert.strictEqual(P1().offers[0].store, 'Kampagneshop');
+  assert.strictEqual(db.sent.length, 0, 'the first reading of the new shop is silent'); assert.strictEqual(P1().notified_price, 4050, 'remembered as announced');
+  assert(P1().extra_state[D_K].seen === true && P1().extra_state[D_K].origin === 'search', 'the origin survives the extras bookkeeping');
+  assert.strictEqual(P1().history.slice(-1)[0].p, 4050);
+  await dRun(db, { brave }); assert.strictEqual(db.sent.length, 0); assert.strictEqual(P1().extra_state[D_K].origin, 'search'); assert.strictEqual(P1().offers[0].price, 4050);
+  assert(!/Søgning/.test(res.summary.join('\n')), 'nothing searched, nothing said');
+});
+
+test('discover: nothing cheaper found: nothing is added, the list is not filled with dearer shops; again after 7 days', async () => {
+  const db = dDb(); db.products.push(dProduct('D2'));
+  const brave = dBrave(dResults()), shops = dShops({ [D_K]: dShopHtml('Kampagneshop', 'Roborock Saros 10R Robotstøvsuger', 5600) });
+  let res = await dRun(db, { brave, shops });
+  const P = () => db.products[0];
+  assert.strictEqual(P().extra_urls, null); assert.strictEqual(P().extra_state, null);
+  assert.deepStrictEqual([P().discover_state.added, P().discover_state.note], [0, 'ingen billigere']); assert(/Søgning: 1 vare, 3 kald, 0 nye butikker\./.test(res.summary[2]), res.summary[2]);
+  assert(!db.patches.filter((x) => x.id === 'D2').pop().body.extra_urls, 'no extra_urls written');
+  const day = (n) => new Date(Date.parse('2026-11-16T10:00:00Z') + n * 864e5 - 1000).toISOString();
+  await dRun(db, { brave, shops, now: day(6.9) }); assert.strictEqual(brave.calls.length, 3, 'six days later: not searched');
+  await dRun(db, { brave, shops, now: new Date(Date.parse('2026-11-16T10:00:00Z') + 7 * 864e5).toISOString() }); assert.strictEqual(brave.calls.length, 6, 'seven days later: searched again');
+  assert.strictEqual(P().discover_state.at, '2026-11-23T10:00:00Z');
+  // nothing at all in the results for the product
+  const db2 = dDb(); db2.products.push(dProduct('D3'));
+  res = await dRun(db2, { brave: dBrave([[sr('https://www.junk.dk/dyson-v15-detect', 'Dyson V15 Detect')]]) });
+  assert.deepStrictEqual([db2.products[0].discover_state.added, db2.products[0].discover_state.note], [0, 'ingen kandidater']); assert.deepStrictEqual(res.ctx.fetched, [DPJ], 'no page is read when there is no candidate');
+});
+
+test('discover: a full list (5): only a link found by the search may be replaced, the most expensive that is not the cheapest; links of unknown origin are never touched', async () => {
+  const H = (i) => 'https://www.h' + i + '.dk/p/' + i, prices = [5900, 6100, 5800, 6300, 5700];
+  const shops = dShops(); prices.forEach((p, i) => { shops[H(i + 1)] = dShopHtml('Butik ' + (i + 1), 'Vare ' + (i + 1), p); });
+  const state = (origins) => { const s = {}; origins.forEach((o, i) => { s[H(i + 1)] = o ? { origin: o, seen: true, fails: 0, at: '2026-11-16T09:00:00Z' } : { seen: true, fails: 0, at: '2026-11-16T09:00:00Z' }; }); return s; };
+  // h2, h4 and h5 are the search's; h4 (6300) is the dearest
+  const db = dDb(); db.products.push(dProduct('D4', { extra_urls: [1, 2, 3, 4, 5].map(H), extra_state: state([null, 'search', 'hand', 'search', 'search']) }));
+  const res = await dRun(db, { shops }); const P = () => db.products[0];
+  assert.deepStrictEqual(P().extra_urls, [H(1), H(2), H(3), H(5), D_K], 'h4 replaced by the cheaper shop, at the end of the list');
+  assert.strictEqual(P().extra_state[H(4)], undefined); assert.strictEqual(P().extra_state[D_K].origin, 'search');
+  assert.deepStrictEqual([H(1), H(2), H(3), H(5)].map((u) => P().extra_state[u].origin), [undefined, 'search', 'hand', 'search'], 'the origins survive the run');
+  assert(/1 ny butik/.test(res.summary[2]));
+  // no origin anywhere (the agent\'s and the person\'s links): the list stays as it is
+  const db2 = dDb(); db2.products.push(dProduct('D5', { extra_urls: [1, 2, 3, 4, 5].map(H), extra_state: state([null, null, 'hand', null, null]) }));
+  await dRun(db2, { shops }); assert.deepStrictEqual(db2.products[0].extra_urls, [1, 2, 3, 4, 5].map(H)); assert.strictEqual(db2.products[0].discover_state.added, 0);
+  // a list with room: added at the end, the others untouched, the state keeps what the extras machinery wrote
+  const db3 = dDb(); db3.products.push(dProduct('D6', { extra_urls: [H(1), H(2)], extra_state: state([null, 'hand']) }));
+  await dRun(db3, { shops }); assert.deepStrictEqual(db3.products[0].extra_urls, [H(1), H(2), D_K]); assert.strictEqual(db3.products[0].extra_state[H(2)].origin, 'hand');
+  // the person changed the list while the search ran (the row is read again before it is written): the new list is built from the fresh row
+  const db4 = dDb(); db4.products.push(dProduct('D7', { extra_urls: [H(1)], extra_state: state([null]) }));
+  const brave = dBrave(dResults()), inner = brave.fn;
+  brave.fn = async (url, o) => { if (brave.calls.length === 2) db4.products[0].extra_urls = [H(1), H(2)]; return inner(url, o); };
+  await dRun(db4, { shops, brave }); assert.deepStrictEqual(db4.products[0].extra_urls, [H(1), H(2), D_K]);
+});
+
+test('discover: at most 4 products per run (12 calls), 1.1 s apart, never searched first then the longest ago; the rest in the next run; the monthly counter follows', async () => {
+  const n = Date.parse('2026-11-16T10:00:00Z'), ago = (d) => ({ at: new Date(n - d * 864e5).toISOString(), found: 5, added: 0, note: 'x' });
+  const db = dDb();
+  [['P1', null], ['P2', ago(30)], ['P3', ago(10)], ['P4', ago(8)], ['P5', ago(2)], ['P6', null], ['P7', ago(20)]].forEach(([id, st]) => db.products.push(dProduct(id, { discover_state: st })));
+  const brave = dBrave(dResults()), sleeps = [], logs = [];
+  const searched = () => db.products.filter((p) => p.discover_state && p.discover_state.at === '2026-11-16T10:00:00Z').map((p) => p.id);
+  let res = await dRun(db, { brave, sleeps, logs });
+  assert.deepStrictEqual(searched(), ['P1', 'P2', 'P6', 'P7'], 'P1 and P6 never searched, P2 and P7 the longest ago (30 and 20 days), in the order of the list'); assert.strictEqual(brave.calls.length, 12); assert.strictEqual(sleeps.length, 11, 'a pause before each call but the first');
+  assert(sleeps.every((ms) => ms === 1100)); assert.deepStrictEqual(db.discover_usage, [{ month: '2026-11', calls: 12 }]);
+  assert(/Søgning: 4 varer, 12 kald, 4 nye butikker\./.test(res.summary[2]), res.summary[2]);
+  assert.strictEqual(res.stats.pages, 1 + 5, 'the page of the shop and of the others is read once for all products (cache); the Prisjagt page once');
+  res = await dRun(db, { brave, now: '2026-11-16T10:30:00Z' });
+  assert.deepStrictEqual(db.products.filter((p) => p.discover_state && p.discover_state.at === '2026-11-16T10:30:00Z').map((p) => p.id), ['P3', 'P4'], 'the rest: P3 (10 days) and P4 (8 days); P5 (2 days) and the searched ones wait');
+  assert.strictEqual(brave.calls.length, 18); assert.deepStrictEqual(db.discover_usage, [{ month: '2026-11', calls: 18 }]);
+  assert(/Søgning: 2 varer, 6 kald, 2 nye butikker\./.test(res.summary[2]), res.summary[2]);
+  // not searched at all: bought, still waiting for the choice of a variant, inactive (the page gives a title to any product that is read)
+  const db2 = dDb(); [{ bought_at: '2026-11-01T00:00:00Z' }, { status: 'choose', tracked_variants: null }, { active: false }].forEach((x, i) => db2.products.push(dProduct('N' + i, x)));
+  const b2 = dBrave(dResults()); await dRun(db2, { brave: b2 }); assert.strictEqual(b2.calls.length, 0);
+});
+
+test('discover: the monthly cap (800 calls, kept in discover_usage per Copenhagen month): one line in the log, skipped until next month', async () => {
+  const db = dDb(); db.products.push(dProduct('C1'), dProduct('C2'));
+  db.discover_usage.push({ month: '2026-11', calls: 799 });
+  let brave = dBrave(dResults()), logs = [];
+  let res = await dRun(db, { brave, logs });
+  assert.strictEqual(brave.calls.length, 0); assert(/Søgning: månedsloft nået\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(logs.filter((l) => /månedsloftet/.test(l)).length, 1);
+  assert.strictEqual(res.summary.length, 5); assert.strictEqual(db.products[0].status, 'tracking'); assert(db.products[0].offers.length, 'the price checks go on');
+  // 797 used leaves 3: one product, then the cap
+  db.discover_usage[0].calls = 797; logs = [];
+  res = await dRun(db, { brave, logs });
+  assert.strictEqual(brave.calls.length, 3); assert.strictEqual(db.discover_usage[0].calls, 800); assert(/Søgning: 1 vare, 3 kald, 1 ny butik, månedsloft nået\./.test(res.summary[2]), res.summary[2]);
+  assert.strictEqual(logs.filter((l) => /månedsloftet/.test(l)).length, 1);
+  assert.strictEqual(DS.MONTHLY_CAP, 800); assert.strictEqual(DS.MAX_PRODUCTS_PER_RUN * DS.CALLS_PER_PRODUCT, 12);
+  // the cap of last month does not count; the month is the Copenhagen month (23:30 UTC on the 30th is already the 1st in Denmark)
+  const db2 = dDb(); db2.products.push(dProduct('C3')); db2.discover_usage.push({ month: '2026-11', calls: 800 });
+  brave = dBrave(dResults());
+  await dRun(db2, { brave, now: '2026-11-30T23:30:00Z' });
+  assert.strictEqual(brave.calls.length, 3); assert.deepStrictEqual(db2.discover_usage, [{ month: '2026-11', calls: 800 }, { month: '2026-12', calls: 3 }]);
+  // a counter that cannot be written: the search stops (the cap could not be kept)
+  const db3 = dDb(); db3.products.push(dProduct('C4'), dProduct('C5')); db3.usageFail = true; brave = dBrave(dResults()); logs = [];
+  res = await dRun(db3, { brave, logs }); assert.strictEqual(brave.calls.length, 3, 'one product, then stop'); assert(logs.some((l) => /tælleren/.test(l))); assert(/stoppet \(tæller\)/.test(res.summary[2]), res.summary[2]);
+});
+
+test('discover: 401/403 (bad key), 402/429 (quota) and 5xx stop the whole discovery of the run at once; nothing is written for the product; the key is never logged', async () => {
+  const cases = [[401, 'nøgle afvist', /BRAVE_API_KEY/], [403, 'nøgle afvist', /BRAVE_API_KEY/], [429, 'kvote', /kvoten er brugt/], [402, 'kvote', /kvoten/], [503, 'fejl hos Brave', /HTTP 503/], [500, 'fejl hos Brave', /HTTP 500/]];
+  for (const [code, word, rx] of cases) {
+    const db = dDb(); db.products.push(dProduct('E1'), dProduct('E2')); const logs = [], brave = dBrave(dResults(), code);
+    const res = await dRun(db, { brave, logs });
+    assert.strictEqual(brave.calls.length, 1, code + ': one call, no retry, the second product is not tried'); assert.strictEqual(db.products[0].discover_state, null); assert.strictEqual(db.products[1].discover_state, null);
+    assert.strictEqual(logs.filter((l) => /Søgning stoppet/.test(l)).length, 1, 'one line'); assert(logs.some((l) => rx.test(l) && /Søgning stoppet/.test(l)), logs.join('\n'));
+    assert(res.summary[2].indexOf('stoppet (' + word + ')') !== -1, res.summary[2]);
+    assert(!logs.concat(res.summary).join('\n').includes(D_KEY)); assert.deepStrictEqual(db.discover_usage, [{ month: '2026-11', calls: 1 }], 'the call counts'); assert.strictEqual(res.summary.length, 5);
+    assert.strictEqual(res.stats.written, 2, 'the price checks are not affected'); assert.strictEqual(res.ctx.fetched.length, 1, 'no shop page is read');
+    assert.strictEqual(db.products[0].extra_urls, null);
+  }
+  // the second page fails: the product is abandoned (no pages read, nothing written) and tried again in the next run
+  const db = dDb(); db.products.push(dProduct('E3')); const brave = dBrave(dResults(), (i) => (i === 1 ? 429 : 200));
+  const res = await dRun(db, { brave }); assert.strictEqual(brave.calls.length, 2); assert.strictEqual(db.products[0].discover_state, null); assert.deepStrictEqual(res.ctx.fetched, [DPJ]); assert.deepStrictEqual(db.discover_usage, [{ month: '2026-11', calls: 2 }]);
+  // a network error ends it as well
+  const db2 = dDb(); db2.products.push(dProduct('E4'), dProduct('E5')); let n = 0; const b2 = dBrave(dResults()); b2.fn = async () => { n++; throw new Error('ECONNRESET'); };
+  const r2 = await dRun(db2, { brave: b2 }); assert.strictEqual(n, 1); assert(/stoppet \(fejl\)/.test(r2.summary[2]), r2.summary[2]);
+});
+
+test('discover: no key (missing, empty, blank): no search, one summary note, everything else as before; a database without the columns or the table', async () => {
+  for (const key of [null, '', '   ']) {
+    const db = dDb(); db.products.push(dProduct('K1')); const brave = dBrave(dResults()); brave.fn = async () => { throw new Error('must not be called'); };
+    const logs = [], res = await dRun(db, { brave, key, logs });
+    assert(/Nye hits: 0\. Søgning: ingen nøgle\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(res.summary.length, 5); assert.strictEqual(res.stats.written, 1); assert.strictEqual(db.products[0].offers[0].price, 5500);
+    assert.strictEqual(db.products[0].discover_state, null); assert.strictEqual(logs.filter((l) => l.indexOf('Søgning') === 0 || /^ +Søgning/.test(l)).length, 0, 'only the summary line mentions it'); assert.deepStrictEqual(db.discover_usage, []);
+  }
+  // a database without the new columns: the rows have no such keys; nothing is searched, nothing is said
+  const db = dDb(); db.products.push(dProduct('K2')); delete db.products[0].discover_state; const brave = dBrave(dResults());
+  let res = await dRun(db, { brave }); assert.strictEqual(brave.calls.length, 0); assert(!/Søgning/.test(res.summary.join(' '))); assert(!('discover_state' in db.products[0])); assert.strictEqual(res.stats.written, 1);
+  const db1 = dDb(); db1.products.push(dProduct('K3')); delete db1.products[0].extra_state; res = await dRun(db1, { brave }); assert.strictEqual(brave.calls.length, 0);
+  // a database without the counter table: nothing is searched (the cap could not be kept), one line, the rest as always
+  const db2 = newDb(); db2.products.push(dProduct('K4')); const logs = [];
+  res = await dRun(db2, { brave, logs }); assert.strictEqual(brave.calls.length, 0); assert(/Søgning: tælleren mangler i databasen\./.test(res.summary[2]), res.summary[2]); assert.strictEqual(logs.filter((l) => /discover_usage/.test(l)).length, 1);
+  assert.strictEqual(res.stats.written, 1); assert.strictEqual(res.summary.length, 5);
+});
+
+test('discover: the requirements (colour, edition) go into the queries; a shop that refuses us is left alone for the rest of the run', async () => {
+  const db = dDb(); db.products.push(dProduct('Q1', { requirements: 'Sort, helst fri fragt', title: 'Roborock Saros 10R Robotstøvsuger (sort)' }));
+  const brave = dBrave(dResults()); await dRun(db, { brave });
+  assert.deepStrictEqual(brave.calls.map((c) => c.q), ['Roborock Saros 10R Robotstøvsuger sort pris', 'Roborock Saros 10R Robotstøvsuger sort pris', 'Roborock Saros 10R Robotstøvsuger sort køb']);
+  // a refusing shop (403): the first product learns it, the second does not ask again; its host is in the run's list of refused hosts
+  const db2 = dDb(); db2.products.push(dProduct('Q2'), dProduct('Q3'));
+  const shops = dShops({ [D_K]: () => { throw Object.assign(new PJ.PageError('blocked', 'HTTP 403'), { shop: true }); } });
+  const res = await dRun(db2, { shops });
+  assert.strictEqual(res.ctx.fetched.filter((u) => u === D_K).length, 1); assert.deepStrictEqual(res.stats.blockedHosts, ['kampagneshop.dk']);
+  assert.deepStrictEqual(db2.products.map((p) => p.extra_urls), [null, null], 'a shop that cannot be read is not added'); assert(db2.products.every((p) => p.discover_state && p.discover_state.added === 0));
+});
+
+test('discover: the summary line texts, and the workflow gives the job BRAVE_API_KEY', () => {
+  const sum = (o) => R.discoverSummary(Object.assign({ state: '', products: 0, calls: 0, added: 0, replaced: 0, stopped: '' }, o));
+  assert.strictEqual(sum({}), ''); assert.strictEqual(sum({ state: 'nokey' }), ' Søgning: ingen nøgle.'); assert.strictEqual(sum({ state: 'cap' }), ' Søgning: månedsloft nået.');
+  assert.strictEqual(sum({ products: 4, calls: 12, added: 2 }), ' Søgning: 4 varer, 12 kald, 2 nye butikker.'); assert.strictEqual(sum({ products: 1, calls: 3, added: 1 }), ' Søgning: 1 vare, 3 kald, 1 ny butik.');
+  assert.strictEqual(sum({ products: 1, calls: 3, added: 0 }), ' Søgning: 1 vare, 3 kald, 0 nye butikker.'); assert.strictEqual(sum({ calls: 1, stopped: 'kvote' }), ' Søgning: 0 varer, 1 kald, 0 nye butikker, stoppet (kvote).');
+  assert(!/[—!]/.test(sum({ products: 1, calls: 3, added: 1, state: 'cap', stopped: 'x' })));
+  const wf = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'prices.yml'), 'utf8');
+  assert(/BRAVE_API_KEY: \$\{\{ secrets\.BRAVE_API_KEY \}\}/.test(wf));
 });
 
 (async () => {

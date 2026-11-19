@@ -2,7 +2,7 @@
 'use strict';
 // Prisvagten price job. Runs on a schedule (GitHub Actions) with the Supabase service-role key.
 //   node job/run.js
-// Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, RESEND_API_KEY (optional), MAIL_FROM, SITE_URL
+// Env: SUPABASE_URL, SUPABASE_SERVICE_KEY, RESEND_API_KEY (optional), MAIL_FROM, SITE_URL, BRAVE_API_KEY (optional: shop discovery)
 
 // Node's fetch ignores HTTPS_PROXY unless NODE_USE_ENV_PROXY=1 (Node 22.21+); only matters behind a proxy (local runs).
 if (require.main === module && !process.env.NODE_USE_ENV_PROXY && (process.env.HTTPS_PROXY || process.env.https_proxy)) {
@@ -15,6 +15,7 @@ const PJ = require('./lib/prisjagt');
 const SHOP = require('./lib/shop');
 const X = require('./lib/extras');
 const WB = require('./lib/wayback');
+const DS = require('./lib/discover');
 const ONSKE = require('./lib/onskeskyen');
 const D = require('./lib/digest');
 const { composeMail, composeOverview, composeOwnerMail, composeApprovedMail, sendResend } = require('./lib/mail');
@@ -358,6 +359,17 @@ async function accessMails(ctx, sb, fetchImpl, stats, log, canMail, now) {
   } catch (e) { /* quiet, as above */ }
 }
 
+// The search part of the run summary: ' Søgning: 4 varer, 12 kald, 2 nye butikker.' / ' Søgning: ingen nøgle.' / ' Søgning: månedsloft nået.' or ''.
+function discoverSummary(d) {
+  if (d.state === 'nokey') return ' Søgning: ingen nøgle.';
+  if (d.state === 'notable') return ' Søgning: tælleren mangler i databasen.';
+  const parts = [];
+  if (d.products || d.calls) parts.push(d.products + (d.products === 1 ? ' vare' : ' varer') + ', ' + d.calls + ' kald, ' + (d.added === 1 ? '1 ny butik' : d.added + ' nye butikker'));
+  if (d.state === 'cap') parts.push('månedsloft nået');
+  if (d.stopped) parts.push('stoppet (' + d.stopped + ')');
+  return parts.length ? ' Søgning: ' + parts.join(', ') + '.' : '';
+}
+
 // ---------------------------------------------------------------- the run
 
 async function run(ctx) {
@@ -369,7 +381,7 @@ async function run(ctx) {
   const fetchImpl = ctx.fetch || fetch;
   const sb = makeClient(ctx.supabaseUrl, ctx.serviceKey, fetchImpl);
   const started = Date.now();
-  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, accessPending: null, accessAdmins: null, written: 0, writeFail: 0, deadline: false, extraPages: 0, extraFail: 0, extraDropped: 0, digests: 0, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null };
+  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, accessPending: null, accessAdmins: null, written: 0, writeFail: 0, deadline: false, extraPages: 0, extraFail: 0, extraDropped: 0, digests: 0, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null, discover: { state: '', products: 0, calls: 0, added: 0, replaced: 0, stopped: '' } };
 
   // 0. wish-list imports (Ønskeskyen): before the price checks, so that the new products get their first price in this run.
   // Own step: it never fails the run, and it is skipped quietly when the imports table does not exist yet.
@@ -551,6 +563,7 @@ async function run(ctx) {
         if (!next[u]) return;
         const e = Object.assign({}, next[u]); delete e.offer;
         if (offerOf[u]) e.offer = offerOf[u];
+        if (e.origin === undefined && prev[u] && prev[u].origin) e.origin = prev[u].origin;   // who found the link (shop discovery) is kept
         out[u] = e;
       });
       // the main shop has an entry only to remember its last offer (it is not an extra link)
@@ -654,6 +667,7 @@ async function run(ctx) {
         if (!next[u]) return;
         const e = Object.assign({}, next[u]); delete e.offer;
         if (offerOf[u]) e.offer = offerOf[u];
+        if (e.origin === undefined && prev[u] && prev[u].origin) e.origin = prev[u].origin;   // who found the link (shop discovery) is kept
         out[u] = e;
       });
       const val = Object.keys(out).length ? out : null;
@@ -859,6 +873,85 @@ async function run(ctx) {
     catch (e) { stats.writeFail++; log('  Kunne ikke skrive ' + (r.prod.name || r.prod.id) + ': ' + (e && e.message || e)); }
   }
 
+  // The discovery step as a function (it needs the run's page reader and its list of refused hosts).
+  async function discoverShops() {
+    const d = stats.discover;
+    const key = String(ctx.braveKey || '').trim();
+    if (!key) { d.state = 'nokey'; return; }
+    const month = P.copenhagenDate(now).slice(0, 7), iso = isoNow(now);
+    let usage;
+    try {
+      const rows = await sb.select('discover_usage', 'select=month,calls&month=eq.' + encodeURIComponent(month));
+      usage = { exists: rows.length > 0, calls: rows.length ? Number(rows[0].calls) || 0 : 0 };
+    } catch (e) { d.state = 'notable'; log('Søgning springes over: tælleren for kald (discover_usage) kan ikke læses (' + String(e && e.message || e).slice(0, 100) + ').'); return; }
+    if (usage.calls + DS.CALLS_PER_PRODUCT > DS.MONTHLY_CAP) { d.state = 'cap'; log('Søgning: månedsloftet på ' + DS.MONTHLY_CAP + ' kald er nået (' + usage.calls + '). Springer over til næste måned.'); return; }
+    const resultOf2 = new Map(results.map((r) => [r.prod.id, r]));
+    const list = DS.order(products.map((p) => { const r = resultOf2.get(p.id); return r ? Object.assign({}, p, r.patch) : p; }), now).slice(0, DS.MAX_PRODUCTS_PER_RUN);
+    if (!list.length) return;
+    const searcher = DS.makeSearcher({ key, fetch: ctx.braveFetch || fetchImpl, sleep: ctx.braveSleep || sleep });
+    let pagesLeft = DS.MAX_PAGES_PER_RUN;
+    const read = async (url) => {
+      const hostKey = SHOP.registrableDomain(new URL(url).hostname);
+      if (stats.blockedHosts.indexOf(hostKey) !== -1) return { skip: true };
+      if (pagesLeft <= 0 || Date.now() - started > DEADLINE_MS) return { skip: true };
+      pagesLeft--;
+      const got = await fetchCached(url);
+      if (got.error) { noteBlocked(got.error, hostKey); return { error: got.error }; }
+      return { page: got.page };
+    };
+    const saveUsage = async () => {
+      try {
+        if (usage.exists) await sb.patch('discover_usage', 'month=eq.' + encodeURIComponent(month), { calls: usage.calls });
+        else { await sb.insert('discover_usage', { month, calls: usage.calls }); usage.exists = true; }
+        return true;
+      } catch (e) { log('Søgning stoppet: tælleren for kald kunne ikke gemmes (' + String(e && e.message || e).slice(0, 100) + ').'); return false; }
+    };
+    for (const p of list) {
+      if (usage.calls + DS.CALLS_PER_PRODUCT > DS.MONTHLY_CAP) { d.state = 'cap'; log('Søgning: månedsloftet på ' + DS.MONTHLY_CAP + ' kald er nået. Springer over til næste måned.'); break; }
+      if (Date.now() - started > DEADLINE_MS - 90000) { stats.deadline = true; break; }
+      const before = searcher.calls;
+      const res = await DS.discoverProduct(p, { searcher, read });
+      const used = searcher.calls - before;
+      usage.calls += used; d.calls += used;
+      if (!(await saveUsage())) { d.stopped = 'tæller'; break; }
+      if (res.stop) {
+        d.stopped = res.stop === 'auth' ? 'nøgle afvist' : res.stop === 'quota' ? 'kvote' : res.stop === 'server' ? 'fejl hos Brave' : 'fejl';
+        log('Søgning stoppet i denne kørsel: ' + (res.stop === 'auth' ? 'Brave afviste nøglen (HTTP ' + res.status + '). Tjek hemmeligheden BRAVE_API_KEY.'
+          : res.stop === 'quota' ? 'Brave sagde stop (HTTP ' + res.status + '): kvoten er brugt eller der kom for mange kald.'
+          : res.stop === 'server' ? 'Brave svarede med fejl (HTTP ' + res.status + ').' : 'uventet svar fra Brave (' + (res.status ? 'HTTP ' + res.status : res.reason || 'fejl') + ').'));
+        break;
+      }
+      d.products++;
+      // read the row again: the person may have changed the list meanwhile, and the new list must be built from what is there now
+      let fresh = null;
+      try { fresh = (await sb.select('products', 'select=id,source_url,requirements,active,bought_at,extra_urls,extra_state&id=eq.' + encodeURIComponent(p.id)))[0]; }
+      catch (e) { log('  Søgning: ' + (p.name || p.id) + ': kunne ikke læse varen igen (' + String(e && e.message || e).slice(0, 100) + ').'); continue; }
+      if (!fresh || fresh.source_url !== p.source_url || fresh.active === false || fresh.bought_at || (fresh.requirements || null) !== (p.requirements || null)) continue;
+      const change = DS.planChange(p, fresh, res.verified);
+      const body = { discover_state: { at: iso, found: res.found, added: change.add.length, note: change.add.length ? 'ny butik' : (res.verified.length ? 'ingen billigere' : res.note) } };
+      if (change.add.length) {
+        const gone = new Set(change.remove);
+        body.extra_urls = (Array.isArray(fresh.extra_urls) ? fresh.extra_urls : []).filter((u) => !gone.has(u)).concat(change.add.map((a) => a.url));
+        body.extra_state = DS.nextState(fresh, change);
+      }
+      try {
+        await sb.patch('products', 'id=eq.' + encodeURIComponent(p.id), body);
+        d.added += change.add.length; d.replaced += change.remove.length;
+        change.add.forEach((a) => log('  Søgning: ' + (p.name || p.id) + ': ny butik ' + X.hostOf(a.url) + ' (' + a.price + ' kr.).'));
+        change.remove.forEach((u) => log('  Søgning: ' + (p.name || p.id) + ': ' + X.hostOf(u) + ' erstattet af en billigere butik.'));
+      } catch (e) {
+        log('  Søgning: kunne ikke skrive ' + (p.name || p.id) + ': ' + String(e && e.message || e).slice(0, 120));
+        try { await sb.patch('products', 'id=eq.' + encodeURIComponent(p.id), { discover_state: { at: iso, found: res.found, added: 0, note: 'skrivefejl' } }); } catch (e2) { /* tried again in a week at the latest */ }
+      }
+    }
+  }
+
+  // 5b. shop discovery (own step, after everything above has been written: it never delays or fails the price checks). Searches the web from
+  // Denmark for products that have a price to beat and adds a Danish shop that is cheaper than every current offer to extra_urls (the extras
+  // machinery reads it from the next run on, its first price is silent). See lib/discover.js for all the rules.
+  try { await discoverShops(); }
+  catch (e) { log('Søgning: uventet fejl: ' + (e && e.message || e)); }
+
   // access requests: e-mails to the owner(s) and to approved requesters (own step: a failure here changes nothing above)
   try { await accessMails(ctx, sb, fetchImpl, stats, log, canMail, now); }
   catch (e) { log('Adgangsanmodninger: ' + (e && e.message || e)); }
@@ -867,7 +960,7 @@ async function run(ctx) {
   const summary = [
     'Produkter: ' + stats.total + ' aktive (nye: ' + stats.pending + ', følges: ' + stats.tracking + ', venter på valg: ' + stats.choose + ', fejl: ' + stats.error + ').',
     'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.extraPages ? ' (ekstra butikker: ' + stats.extraPages + ', uden pris: ' + stats.extraFail + ', forkastet som anden vare: ' + stats.extraDropped + ')' : '') + (stats.blockedHosts.length ? ' (afvist af ' + stats.blockedHosts.join(', ') + ': resten derfra sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
-    'Nye hits: ' + stats.hits + '.' + (stats.backfilled ? ' Ældre priser fra Internet Archive: ' + stats.backfillPoints + ' for ' + stats.backfilled + ' produkt(er).' : ''),
+    'Nye hits: ' + stats.hits + '.' + (stats.backfilled ? ' Ældre priser fra Internet Archive: ' + stats.backfillPoints + ' for ' + stats.backfilled + ' produkt(er).' : '') + discoverSummary(stats.discover),
     'E-mails sendt: ' + stats.sent + (stats.digests ? ' (heraf oversigter: ' + stats.digests + ')' : '') + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte' + (stats.accessPending == null ? '' : ', ' + stats.accessPending + ' venter') + (stats.accessAdmins == null ? '' : ', ' + stats.accessAdmins + (stats.accessAdmins === 1 ? ' administrator' : ' administratorer')) + '.',
     'Skrevet til databasen: ' + stats.written + ', skrivefejl: ' + stats.writeFail + '. Tid: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s.',
   ];
@@ -875,12 +968,12 @@ async function run(ctx) {
   return { stats, summary, results };
 }
 
-module.exports = { autoCompare, AUTO_COMPARE_MAX, COMPARE_EXTRAS_TRIES, run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, wantsCompareAgain, oldErrorWantsCompare, MAX_BACKFILL };
+module.exports = { discoverSummary, autoCompare, AUTO_COMPARE_MAX, COMPARE_EXTRAS_TRIES, run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, wantsCompareAgain, oldErrorWantsCompare, MAX_BACKFILL };
 
 if (require.main === module) {
   const e = process.env;
   if (!e.SUPABASE_URL || !e.SUPABASE_SERVICE_KEY) { console.error('SUPABASE_URL og SUPABASE_SERVICE_KEY skal være sat.'); process.exit(1); }
-  run({ supabaseUrl: e.SUPABASE_URL, serviceKey: e.SUPABASE_SERVICE_KEY, resendKey: e.RESEND_API_KEY, mailFrom: e.MAIL_FROM, siteUrl: e.SITE_URL })
+  run({ supabaseUrl: e.SUPABASE_URL, serviceKey: e.SUPABASE_SERVICE_KEY, braveKey: e.BRAVE_API_KEY, resendKey: e.RESEND_API_KEY, mailFrom: e.MAIL_FROM, siteUrl: e.SITE_URL })
     .then(() => process.exit(0))
     .catch((err) => { console.error('CRASH', err && err.stack || err); process.exit(1); });
 }
