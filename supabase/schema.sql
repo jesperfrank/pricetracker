@@ -448,6 +448,8 @@ declare
   old_n integer;
   new_link jsonb;
   new_host text;
+  gone_link text;
+  st jsonb;
   on_pj boolean;
   asked_retry timestamptz;
   recent timestamptz[];
@@ -501,9 +503,12 @@ begin
   --  * ADD one link at the end: the new value is exactly the old array plus one entry (an old null counts as an empty array). The entry must
   --    be an https product link of at most 500 characters (not prisjagt.dk), not in the shop of source_url, not in a shop that is in the list
   --    already, and the list may hold 5 in all (the agent's and the hand-added links share the cap). A wrong link is a Danish error. Adding
-  --    changes nothing else: not compare_state (it is no answer from the agent), not extra_state, not the prices.
+  --    changes nothing else: not compare_state (it is no answer from the agent), not the prices. The only thing it does to extra_state is
+  --    to give the new link the entry {"origin": "hand"} (the person chose that page: the job never checks its product name); the state of
+  --    the other links stays.
   --  * REMOVE one entry: the same array minus one element, same order; removing the only entry gives null and, when the agent had answered
-  --    (compare_state 'done'), compare_state 'none' (the product then counts as "not found elsewhere").
+  --    (compare_state 'done'), compare_state 'none' (the product then counts as "not found elsewhere"). Only the removed link's entry
+  --    leaves extra_state (the other links keep their state, origin included); when no link is left the state is null.
   -- Anything else the browser sends is ignored.
   new.extra_state := old.extra_state;
   new.discover_state := old.discover_state;       -- the job's search bookkeeping (see "Butikssøgning" above)
@@ -535,18 +540,25 @@ begin
         end if;
       end loop;
       new.extra_urls := asked_extra;
+      st := case when jsonb_typeof(old.extra_state) = 'object' then old.extra_state else '{}'::jsonb end;
+      new.extra_state := st || jsonb_build_object(new_link #>> '{}', jsonb_build_object('origin', 'hand'));
     elsif old.extra_urls is not null and jsonb_typeof(old.extra_urls) = 'array' then
       -- remove
       if asked_extra is null then
-        if old_n = 1 then new.extra_urls := null; end if;
+        if old_n = 1 then new.extra_urls := null; gone_link := old.extra_urls ->> 0; end if;
       elsif jsonb_typeof(asked_extra) = 'array' and old_n >= 2 and jsonb_array_length(asked_extra) = old_n - 1 then
         for i in 0 .. old_n - 1 loop
-          if old.extra_urls - i = asked_extra then new.extra_urls := asked_extra; exit; end if;
+          if old.extra_urls - i = asked_extra then new.extra_urls := asked_extra; gone_link := old.extra_urls ->> i; exit; end if;
         end loop;
       end if;
       if new.extra_urls is distinct from old.extra_urls then
-        new.extra_state := null;
         extras_gone := new.extra_urls is null;
+        -- the removed link's entry goes; the others keep theirs (seen, fails, offer, origin). No link left: no state.
+        if extras_gone or jsonb_typeof(old.extra_state) is distinct from 'object' then
+          new.extra_state := null;
+        else
+          new.extra_state := nullif(old.extra_state - gone_link, '{}'::jsonb);
+        end if;
       end if;
     end if;
   end if;
@@ -1302,6 +1314,7 @@ declare
   err text;
   shops jsonb;
   merged jsonb;
+  st jsonb;
   hosts text[];
   h text;
 begin
@@ -1338,8 +1351,17 @@ begin
       merged := merged || (shops -> i);
       hosts := hosts || h;
     end loop;
+    -- every link that is new gets {"origin": "agent"} in extra_state (the job checks the page's product name of such links, see job/lib/discover.js
+    -- identityMatch); a link that is in the list already keeps what the state holds
+    select coalesce(case when cur is null then null when jsonb_typeof(extra_state) = 'object' then extra_state end, '{}'::jsonb) into st
+      from public.products where id = p_id and active and compare_state = 'wanted' and source_url is not null;
+    for i in 0 .. jsonb_array_length(merged) - 1 loop
+      if not coalesce(st ? (merged ->> i), false) and not coalesce(cur, '[]'::jsonb) @> jsonb_build_array(merged -> i) then
+        st := st || jsonb_build_object(merged ->> i, jsonb_build_object('origin', 'agent'));
+      end if;
+    end loop;
     update public.products
-       set extra_urls = merged, extra_state = case when cur is null then null else extra_state end, compare_state = 'done', compare_at = now()
+       set extra_urls = merged, extra_state = nullif(st, '{}'::jsonb), compare_state = 'done', compare_at = now()
      where id = p_id and active and compare_state = 'wanted' and source_url is not null;
     get diagnostics n = row_count;
     return n = 1;

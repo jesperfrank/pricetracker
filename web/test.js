@@ -2426,7 +2426,7 @@ let base;
     const noCol = pj("p0", null); delete noCol.extra_urls;
     const single = row("test-dyson-v15", { id: "p6", name: "Enkelt", source_url: "https://www.hovedbutik.dk/vare/1", tracked_variants: ["shop"], variants: [{ id: "shop", label: "Hovedbutik", lowest: 450, offers: 1, sample: "Kit" }],
       offers: [{ store: "Hovedbutik", price: 450, url: "https://www.hovedbutik.dk/vare/1", inStock: true, note: null, variant: "shop" }], compare_state: "none", compare_at: ago(3), shop_url: null, extra_urls: null, extra_state: null });
-    const stale = pj("p5", [XB, XC, XD, XE], { extra_state: { [XB]: { why: "err", seen: false, fails: 2 }, [XC]: { seen: true, fails: 0 }, [XD]: { why: "outlier" }, [XE]: { why: "<img src=x onerror=alert(1)>" } },
+    const stale = pj("p5", [XB, XC, XD, XE], { extra_state: { [XB]: { why: "err", seen: false, fails: 2 }, [XC]: { seen: true, fails: 0 }, [XD]: { why: "outlier", origin: "agent", seen: true, fails: 1 }, [XE]: { why: "<img src=x onerror=alert(1)>" } },
       offers: [{ store: "Dyson", price: 3999, url: "https://prisjagt.dk/go-to-shop/1/offer/2", inStock: true, note: null, variant: "v1" }, { store: "Butik C", price: 3900, url: XC, inStock: true, note: "Fri fragt · pris fra i går", variant: "v1" }] });
     {
       const p = await open({ products: [pj("p1", null), noCol, pj("p2", [MFR], { extra_state: { [MFR]: { seen: true, fails: 0, at: ago(0), offer: { store: "Roborock", price: 4050, inStock: true, note: null, at: ago(0) } } } }), pj("p3", null, { user_id: "o9", list_id: "lx" }),
@@ -2447,7 +2447,7 @@ let base;
       check("pj extras: 'ingen pris' for a page that was read without a price", JSON.stringify(await m9.locator(".xwhy").allInnerTexts()) === JSON.stringify(["ingen pris"]));
       const m5 = body(p, "p5").locator(".xshops");
       const states = await m5.locator(".foot").evaluateAll(fs => fs.map(f => [f.querySelector("a").textContent, (f.querySelector(".xwhy") || {}).textContent || ""]));
-      check("pj extras: each link that gives no price says why, short and muted: kunne ikke læses, anden vare?; a stale offer 'pris fra i går'; nothing else is shown (ingen pris is tested below)",
+      check("pj extras: each link that gives no price says why, short and muted: kunne ikke læses, anden vare? (also for a link of origin agent that the job dropped because the page's product name is another product, without any tag); a stale offer 'pris fra i går'; nothing else is shown (ingen pris is tested below)",
         JSON.stringify(states) === JSON.stringify([["butik-b.dk", "kunne ikke læses"], ["shop.butik-c.dk", "pris fra i går"], ["butik-d.dk", "anden vare?"], ["butik-e.dk", ""]]), JSON.stringify(states));
       const found = await body(p, "p10").locator(".xshops .foot").evaluateAll(fs => fs.map(f => [f.querySelector("a").textContent, (f.querySelector(".xfound") || {}).textContent || ""]));
       check("pj extras: a shop the job found by searching has the quiet tag 'fundet ved søgning', the manufacturer's own shop 'producentens butik'; hand-added, agent-found and unknown origin show nothing new", JSON.stringify(found) === JSON.stringify([["roborock.com", "fundet ved søgning"], ["butik-b.dk", ""], ["shop.butik-c.dk", ""], ["butik-d.dk", "producentens butik"]])

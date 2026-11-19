@@ -174,6 +174,80 @@ function titleMatch(productTitle, candidate) {
   return { ok: true, reason: null };
 }
 
+// ---------------------------------------------------------------- identity of an extra shop's page (the AI agent's links)
+
+// Is the page of an extra shop that the AI agent chose (or that has no origin: stored before the origin was recorded) the same product as the
+// followed one? A LENIENT rule, separate from titleMatch (which stays strict and decides the discovery paths): shops name the same thing in
+// many ways (another language, a missing brand, a missing item number, a colour or size tail, a category word), so what is checked is only what
+// makes another product another product. productTitle = the stored title, else the name; pageName = the page's own product name
+// (extra_state[link].offer.name). Returns {ok, reason}; ok when there is nothing to compare (no page name, no product words).
+//  a. every SHORT model token of the product must be in the page name, as a whole word as titleMatch does it (squashed, "Saros 10 R" =
+//     "Saros10R", "WH-1000XM5" = "WH1000XM5"; "10" is not in "10R", "16" not in "16e"). A model token is a word with a digit that is letters+digits
+//     (m9, 10r, x50, 1000xm5) or pure digits of at most 6 characters (4, 16, 75375). Longer pure-digit words (item numbers, EAN) are optional.
+//     A lone "s" right after a model token belongs to it (M9 S is not M9).
+//  b. the page name shares the brand (the product's first key word) or at least half of the product's key words (its non-generic words:
+//     colours, category and clothing words, filler and sizes never count). Without any model token this is the whole test.
+//  c. a model modifier (MODIFIERS: pro, max, lite, lux, plus, mini ...) in one name and not in the other rejects. Left out: sizes (s, xl)
+//     and "complete" (a bundle of the same machine: Dreame X50 Ultra Complete is a Dreame X50 Ultra).
+//  d. an accessory word in the page's first segment that the product lacks rejects (titleMatch's accessory rule), and so does a first segment
+//     "<something> til <model>" whose words before "til" hold no model token of the product ("Ladestation til Roborock Saros 10R").
+const IDENTITY_SIZES = new Set(['s', 'xl']);
+const IDENTITY_IGNORED_MODS = new Set(['s', 'xl', 'complete']);
+const IDENTITY_GENERIC = new Set(['bukser', 'bukse', 'jakke', 'jacket', 'skjorte', 'trøje', 'kjole', 'shorts', 'tshirt', 'sweater', 'hoodie', 'frakke', 'strik',
+  'jeans', 'trousers', 'pants', 'shirt', 'dress', 'coat']);
+
+function identityWords(title) {
+  return words(cleanResultText(String(title == null ? '' : title).replace(/\([^)]*\)|\[[^\]]*\]/g, ' '), 400));
+}
+
+// The product's key words for the share test: its non-generic words, in order, without sizes and long numbers, at most 10.
+function identityKeys(ws) {
+  const out = [];
+  ws.forEach((w) => {
+    if (w.length < 2 || IDENTITY_SIZES.has(w) || isGeneric(w) || IDENTITY_GENERIC.has(w) || /^\d{7,}$/.test(w) || out.indexOf(w) !== -1) return;
+    out.push(w);
+  });
+  return out.slice(0, 10);
+}
+
+function identityMatch(productTitle, pageName) {
+  const ok = { ok: true, reason: null };
+  const own = identityWords(productTitle), pw = identityWords(pageName);
+  if (!own.length || !pw.length) return ok;
+  const keys = identityKeys(own);
+  const models = [];
+  own.forEach((w, i) => {
+    if (!/\d/.test(w)) return;
+    if (/^\d+$/.test(w) ? w.length > 6 : false) return;                      // an item number: optional
+    models.push(w + (own[i + 1] === 's' ? 's' : ''));
+  });
+  if (!keys.length && !models.length) return ok;
+  const sq = squash(pw);
+  for (const m of models) if (!hasKey(sq, m)) return { ok: false, reason: 'mangler modelnavn' };
+  // b. the brand or half of the key words
+  if (keys.length) {
+    const have = keys.filter((k) => hasKey(sq, k));
+    const brand = hasKey(sq, keys[0]) || (IMPLIED_BRAND[keys[0]] || []).some((w) => hasKey(sq, w));
+    if (!brand && have.length * 2 < keys.length) return { ok: false, reason: 'andet mærke og andre ord' };
+  }
+  // c. modifiers
+  const modsOf = (ws) => conflictsIn(ws, 'variant').filter((w) => !IDENTITY_IGNORED_MODS.has(w));
+  const ownMods = modsOf(own), pageMods = modsOf(pw);
+  if (pageMods.some((w) => ownMods.indexOf(w) === -1) || ownMods.some((w) => pageMods.indexOf(w) === -1)) return { ok: false, reason: 'anden variant' };
+  // d. accessories (first segment of the page name only)
+  const seg = words(cleanResultText(firstSegment(pageName), 400));
+  const sameKind = (o, w) => ACC_AFFIX.some((a) => (o.indexOf(a) === 0 || o.slice(-a.length) === a) && (w.indexOf(a) === 0 || w.slice(-a.length) === a));
+  const ownAcc = conflictsIn(own, 'acc');
+  const acc = conflictsIn(seg, 'acc').filter((w) => own.indexOf(w) === -1 && !ownAcc.some((o) => sameKind(o, w)));
+  if (acc.length) return { ok: false, reason: 'tilbehør' };
+  const til = seg.indexOf('til');
+  if (til > 0 && own.indexOf('til') === -1 && models.length) {
+    const before = squash(seg.slice(0, til)), after = squash(seg.slice(til + 1));
+    if (models.some((m) => hasKey(after, m)) && !models.some((m) => hasKey(before, m))) return { ok: false, reason: 'tilbehør' };
+  }
+  return ok;
+}
+
 // ---------------------------------------------------------------- queries
 
 // The colour / edition words (and a size like 256gb) of the requirements: at most 4, only those the title does not hold already.
@@ -473,6 +547,6 @@ module.exports = {
   BRAVE, MIN_GAP_MS, TIMEOUT_MS, CALLS_PER_PRODUCT, PLAN, MAX_PRODUCTS_PER_RUN, MONTHLY_CAP, RESPACE_MS, MAX_CANDIDATES, MAX_ADD, MAX_EXTRAS, MAX_PAGES_PER_RUN,
   DENY_NAMES, DK_SHOPS, MODIFIERS,
   words, isGeneric, firstSegment, squash, hasKey, hostOf, segmentsOf, localeOf, originOf, priceOfLink,
-  keyTokens, titleMatch, coreTitle, buildQueries, requirementWords, looksLikeProduct, isDanishHost, isDenied, rejectReason, candidates, dedupe,
+  keyTokens, titleMatch, identityMatch, coreTitle, buildQueries, requirementWords, looksLikeProduct, isDanishHost, isDenied, rejectReason, candidates, dedupe,
   lowestPrice, verifyPage, planChange, nextState, isDue, order, makeSearcher, discoverProduct, cleanResultText,
 };

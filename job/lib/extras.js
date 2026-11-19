@@ -16,6 +16,9 @@
 //             does, also when its last offer stands in for it): 'err' (the page could not be read), 'noprice' (read, no price), 'outlier'
 //             (the price is far from the other shops: probably another product), 'dup' (the shop is among the Prisjagt offers already).
 //             A stale offer is shown through the note of the offer itself ("pris fra i går").
+//     origin = who chose the link: 'agent' (resolver_compare), 'hand' (the person, products_guard), 'brand' / 'search' (the job, discovery); absent on
+//             links stored before this was recorded (they came from the agent). The page's own product name is checked against the product for
+//             'agent' and absent (DS.identityMatch, run.js sameProduct): a page of another product is dropped with why 'outlier'.
 
 const SHOP = require('./shop');
 const PRICING = require('./pricing');

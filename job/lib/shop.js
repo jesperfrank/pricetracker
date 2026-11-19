@@ -341,11 +341,38 @@ function fromMeta(metas) {
 
 // ---------------------------------------------------------------- page
 
+// Letters and digits only, lower case, æøå written out ("Tøjeksperten" = "toejeksperten"): to compare a name with a host name.
+function hostForm(s) {
+  return String(s || '').toLowerCase().replace(/æ/g, 'ae').replace(/ø/g, 'oe').replace(/å/g, 'aa').replace(/[^a-z0-9]/g, '');
+}
+
+const STORE_MAX = 40;
+// The name of the shop from a site name that may be a title with a marketing tail ("Tøjeksperten - Shop herretøj online - Hurtig levering",
+// "Xiaomi Smart Air Purifier 4 Lite - luftrenser, hvid - Babysupply.dk"). A name without a separator (" - ", " – ", " — ", " | ", " · ") is
+// a real site name and stays ("Roborock Officiel Butik i Danmark"). Otherwise the segment that best matches the host's registrable name is
+// the shop (equal, else one holds the other, at least 3 letters; a trailing .dk / .com is dropped: "Babysupply.dk" -> "Babysupply"); when no
+// segment matches, the host's registrable name with a capital first letter. At most 40 characters.
+function cleanStoreName(raw, host) {
+  const name = squeeze(raw, 200);
+  const hn = hostForm(registrable(String(host || '').replace(/^www\./i, '')).name);
+  const fallback = () => { const n = registrable(String(host || '').replace(/^www\./i, '')).name; return n ? n.charAt(0).toUpperCase() + n.slice(1) : 'Butikken'; };
+  if (!name) return fallback();
+  const segs = name.split(/\s+[-\u2013\u2014|\u00b7]\s+/).map((x) => x.trim()).filter(Boolean);
+  if (segs.length <= 1) return name.slice(0, STORE_MAX).trim() || fallback();
+  let best = null, bestScore = 0;
+  segs.forEach((sg) => {
+    const f = hostForm(sg.replace(/\.(dk|com|se|no|de|eu)$/i, ''));
+    if (f.length < 3 || !hn) return;
+    const score = f === hn ? 3 : (hn.indexOf(f) !== -1 || f.indexOf(hn) !== -1) ? 2 : 0;
+    if (score > bestScore) { best = sg; bestScore = score; }
+  });
+  if (!best) return fallback();
+  return best.replace(/\.(dk|com)$/i, '').slice(0, STORE_MAX).trim() || fallback();
+}
+
 function shopNameFor(host, metas) {
-  const og = metaFirst(metas, ['og:site_name']);
-  if (og && squeeze(og, 60)) return squeeze(og, 60);                       // decoded by parseAttrs already
-  const n = registrable(String(host || '').replace(/^www\./i, '')).name;
-  return n ? n.charAt(0).toUpperCase() + n.slice(1) : 'Butikken';
+  const og = metaFirst(metas, ['og:site_name']);                            // decoded by parseAttrs already
+  return og && squeeze(og, 200) ? cleanStoreName(og, host) : cleanStoreName('', host);
 }
 
 // returns {title, rows, variants, history, note, shop, source, image}; throws PageError('noprice' | 'currency')
@@ -415,4 +442,4 @@ async function fetchShopPage(url, fetchImpl) {
   }
 }
 
-module.exports = { SHOP_ID, parseNumber, registrable, registrableDomain, isPrisjagtHost, validateShopUrl, stockFrom, parseShopPage, fetchShopPage, MULTI_NOTE };
+module.exports = { cleanStoreName, SHOP_ID, parseNumber, registrable, registrableDomain, isPrisjagtHost, validateShopUrl, stockFrom, parseShopPage, fetchShopPage, MULTI_NOTE };

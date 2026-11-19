@@ -108,6 +108,18 @@ function offerEntry(row, page, iso) {
   return o;
 }
 
+// Is the page of this extra link the product that is followed? Only links the AI agent chose are checked, by the page's own product name against the
+// product's title (else its name), with the lenient identity rule of discover.js (identityMatch): origin 'agent' and no origin at all (everything
+// stored before the origin was recorded came from the agent). Not 'hand' (the person chose the page) and not 'brand' / 'search' (verified more
+// strictly when they were found). No page name (old state, or the parser gave none): nothing to check, true.
+function sameProduct(prod, origin, pageName) {
+  if (origin && origin !== 'agent') return true;
+  const name = X.pageName(pageName);
+  if (!name) return true;
+  const title = typeof prod.title === 'string' && prod.title.trim() ? prod.title : prod.name;
+  return DS.identityMatch(title, name).ok;
+}
+
 // The stored title is kept as it is (set once), except when it still holds HTML entities from before the pages were decoded ("Tilbeh&oslash;r"):
 // then the freshly read, decoded title replaces it (when the page gave one).
 function titleFor(prod, parsed) {
@@ -507,16 +519,19 @@ async function run(ctx) {
     const fresh = [], carried = [];
     // The last known offer of a shop that was not read this run (see above). It counts like a fresh offer for up to 24 hours after it
     // was last READ (X.lastOffer); then it is gone. Marked stale with the time it was read; kept in extra_state[url].offer.
+    const nameBlocked = new Set();
     const keep = (url) => {
       const o = X.lastOffer(prod, prev[url], url, now);
       if (!o) return null;
+      // an offer that was read from a page that is another product (a stored name that fails the identity rule) is not carried either
+      if (ls.indexOf(url) !== -1 && !sameProduct(prod, (prev[url] || {}).origin, o.name)) { nameBlocked.add(url); return null; }
       offerOf[url] = Object.assign({ store: o.store, price: o.price, inStock: o.inStock, note: o.note }, o.name ? { name: o.name } : {}, { at: new Date(o.at).toISOString().replace(/\.\d+Z$/, 'Z') });
       return { key: url, variant: vid, store: o.store, price: o.price, url, inStock: o.inStock, stock: o.inStock ? 'InStock' : 'OutOfStock', note: o.note, name: o.store, saleKnown: false, sale: false, carried: true, stale: true, readAt: o.at };
     };
     const carry = (url) => {
       const row = keep(url);
       if (row) carried.push(row);
-      if (prev[url]) next[url] = prev[url];
+      if (prev[url]) next[url] = nameBlocked.has(url) ? Object.assign({}, prev[url], { why: 'outlier' }) : prev[url];
     };
     for (const url of ls) {
       const stt = prev[url] || {}, hostKey = SHOP.registrableDomain(new URL(url).hostname);
@@ -528,11 +543,18 @@ async function run(ctx) {
       const fail = (why, code) => { stats.extraFail++; log('  ' + tag(prod) + ' (' + hostKey + '): ' + why); next[url] = { seen: !!stt.seen, fails: (Number(stt.fails) || 0) + 1, at: iso, why: code }; };
       if (got.error) {
         noteBlocked(got.error, hostKey); fail(errorNote(got.error), got.error.kind === 'noprice' ? 'noprice' : 'err');
-        if (X.transient(got.error)) { const row = keep(url); if (row) { carried.push(row); delete next[url].why; } }
+        if (X.transient(got.error)) { const row = keep(url); if (row) { carried.push(row); delete next[url].why; } else if (nameBlocked.has(url)) next[url].why = 'outlier'; }
         continue;
       }
       const row = got.page && Array.isArray(got.page.rows) ? got.page.rows[0] : null;
       if (!row || typeof row.price !== 'number') { fail('ingen pris', 'noprice'); continue; }
+      // Another product (the page's own name fails the identity rule): dropped like an outlier, shown as "anden vare?", read again next time.
+      if (!sameProduct(prod, stt.origin, got.page && got.page.title)) {
+        stats.extraDropped++;
+        log('  ' + tag(prod) + ' (' + hostKey + '): sidens varenavn passer ikke til varen og bruges ikke.');
+        next[url] = { seen: !!stt.seen, fails: (Number(stt.fails) || 0) + 1, at: iso, why: 'outlier' };
+        continue;
+      }
       // The first reading of a link is silent (extraNew), except for a shop the job itself found and verified by the product's name (origin
       // 'brand' or 'search'): that one is allowed to make a hit, and says so in the mail (extraFound).
       const isNewLink = X.isNew(prod, stt), found = FOUND_ORIGINS.indexOf(stt.origin) !== -1;

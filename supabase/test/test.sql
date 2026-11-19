@@ -2130,19 +2130,35 @@ reset role;
 create table t.exsnap as select t.snapstate('ex-own') as j;
 grant select on t.exsnap to public;
 set role authenticated; select t.asA();
-select t.chk('extra: the owner removes the middle entry: the same array minus one, order kept; the job state is dropped (the job rebuilds it), nothing else changes',
+reset role;
+update public.products set extra_state = '{"https://a.example.dk/1":{"origin":"agent","seen":true,"fails":0},"https://b.example.dk/2":{"origin":"hand","seen":true},"https://c.example.dk/3":{"origin":"agent","why":"outlier","fails":2},"https://shop.example.dk/vare":{"offer":{"store":"Shop","price":450}}}' where name = 'ex-own';
+set role authenticated; select t.asA();
+select t.chk('extra: the owner removes the middle entry: the same array minus one, order kept; only that link''s state goes (origin of the others stays), nothing else changes',
   t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://c.example.dk/3"]' where name = 'ex-own'$$) = 'ok1'
   and t.ex('ex-own') = '["https://a.example.dk/1", "https://c.example.dk/3"]'
-  and t.q($$select (extra_state is null and compare_state = 'done')::text from public.products where name = 'ex-own'$$) = 'true'
+  and t.q($$select (extra_state = '{"https://a.example.dk/1":{"origin":"agent","seen":true,"fails":0},"https://c.example.dk/3":{"origin":"agent","why":"outlier","fails":2},"https://shop.example.dk/vare":{"offer":{"store":"Shop","price":450}}}'::jsonb and compare_state = 'done')::text from public.products where name = 'ex-own'$$) = 'true'
   and t.snapstate('ex-own') = (select j from t.exsnap));
-select t.chk('extra: ... then the first, leaving one', t.err($$update public.products set extra_urls = '["https://c.example.dk/3"]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://c.example.dk/3"]');
+select t.chk('extra: ... then the first, leaving one (its state stays, the removed one is gone)', t.err($$update public.products set extra_urls = '["https://c.example.dk/3"]' where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = '["https://c.example.dk/3"]'
+  and t.q($$select (extra_state ? 'https://c.example.dk/3' and not extra_state ? 'https://a.example.dk/1')::text from public.products where name = 'ex-own'$$) = 'true');
 select t.chk('extra: removing the last entry gives null and compare_state none (compare_at now): the product counts as not found elsewhere',
   t.err($$update public.products set extra_urls = null where name = 'ex-own'$$) = 'ok1' and t.ex('ex-own') = 'null'
-  and t.q($$select (compare_state = 'none' and compare_at > now() - interval '1 minute')::text from public.products where name = 'ex-own'$$) = 'true');
+  and t.q($$select (compare_state = 'none' and compare_at > now() - interval '1 minute' and extra_state is null)::text from public.products where name = 'ex-own'$$) = 'true');
 select t.chk('extra: with one entry, an empty array or another link changes nothing; only null removes it',
   t.err($$update public.products set extra_urls = '[]' where name = 'ex-one'$$) = 'ok1' and t.ex('ex-one') = '["https://a.example.dk/1"]'
   and t.err($$update public.products set extra_urls = '["https://z.example.dk/1"]' where name = 'ex-one'$$) = 'ok1' and t.ex('ex-one') = '["https://a.example.dk/1"]'
   and t.err($$update public.products set extra_urls = null where name = 'ex-one'$$) = 'ok1' and t.ex('ex-one') = 'null');
+reset role;
+update public.products set extra_urls = '["https://a.example.dk/1","https://b.example.dk/2"]', extra_state = '{"x":{"seen":true}}', compare_state = 'done' where name = 'ex-own';
+set role authenticated; select t.asA();
+reset role;
+update public.products set extra_urls = '["https://a.example.dk/1"]', extra_state = '{"https://a.example.dk/1":{"origin":"agent","seen":true,"fails":1,"offer":{"store":"A","price":100}},"https://shop.example.dk/vare":{"offer":{"store":"Shop","price":450}}}', compare_state = 'done' where name = 'ex-own';
+set role authenticated; select t.asA();
+select t.chk('origin: the person adds one link by hand: it gets {"origin":"hand"} (no seen), the other links and the main shop keep their state',
+  t.err($$update public.products set extra_urls = '["https://a.example.dk/1","https://h.example.dk/7"]' where name = 'ex-own'$$) = 'ok1'
+  and t.q($$select (extra_state = '{"https://a.example.dk/1":{"origin":"agent","seen":true,"fails":1,"offer":{"store":"A","price":100}},"https://h.example.dk/7":{"origin":"hand"},"https://shop.example.dk/vare":{"offer":{"store":"Shop","price":450}}}'::jsonb)::text from public.products where name = 'ex-own'$$) = 'true');
+select t.chk('origin: removing the hand link again drops only its entry; a client-sent extra_state in the same update is ignored',
+  t.err($$update public.products set extra_urls = '["https://a.example.dk/1"]', extra_state = '{"zzz":{"origin":"hand"}}' where name = 'ex-own'$$) = 'ok1'
+  and t.q($$select (extra_state = '{"https://a.example.dk/1":{"origin":"agent","seen":true,"fails":1,"offer":{"store":"A","price":100}},"https://shop.example.dk/vare":{"offer":{"store":"Shop","price":450}}}'::jsonb)::text from public.products where name = 'ex-own'$$) = 'true');
 reset role;
 update public.products set extra_urls = '["https://a.example.dk/1","https://b.example.dk/2"]', extra_state = '{"x":{"seen":true}}', compare_state = 'done' where name = 'ex-own';
 set role authenticated; select t.asA();
@@ -2221,7 +2237,7 @@ set role anon;
 select t.chk('extra shops: a good answer (links trimmed) returns true: the product keeps its link, extra_urls is set, compare_state done, compare_at now',
   t.rs3('sh-w1', null, '[" https://a.example.dk/vare?id=1 ", "https://www.b.example.dk/2"]') = 'true'
   and t.ex('sh-w1') = '["https://a.example.dk/vare?id=1", "https://www.b.example.dk/2"]'
-  and t.q($$select (compare_state = 'done' and compare_at > now() - interval '1 minute' and source_url = 'https://www.shop.example.dk/vare/1' and shop_url is null and extra_state is null)::text from public.products where name = 'sh-w1'$$) = 'true');
+  and t.q($$select (compare_state = 'done' and compare_at > now() - interval '1 minute' and source_url = 'https://www.shop.example.dk/vare/1' and shop_url is null and extra_state = '{"https://a.example.dk/vare?id=1":{"origin":"agent"},"https://www.b.example.dk/2":{"origin":"agent"}}'::jsonb)::text from public.products where name = 'sh-w1'$$) = 'true');
 select t.chk('extra shops: ... the job-written state is NOT reset: every other column is exactly as it was (price, history, offers, title, check, notification, picture ...)',
   t.snapstate('sh-w1') = (select j from t.exsnap2));
 select t.chk('extra shops: ... a second answer for the same product (no longer waiting) returns false and changes nothing',
@@ -2287,7 +2303,7 @@ grant select on t.hxsnap to public;
 set role authenticated; select t.asA();
 select t.chk('add: the owner adds one link to a product that follows one shop (null -> 1): extra_urls set, nothing else changes, compare_state stays',
   t.ca('hx-single', 'https://hand.example.dk/vare?id=1') = 'ok1' and t.ex('hx-single') = '["https://hand.example.dk/vare?id=1"]'
-  and t.snapstate('hx-single') = (select j from t.hxsnap) and t.q($$select (compare_state = 'none' and extra_state is null)::text from public.products where name = 'hx-single'$$) = 'true');
+  and t.snapstate('hx-single') = (select j from t.hxsnap) and t.q($$select (compare_state = 'none' and extra_state = '{"https://hand.example.dk/vare?id=1":{"origin":"hand"}}'::jsonb)::text from public.products where name = 'hx-single'$$) = 'true');
 select t.chk('add: ... the same on a Prisjagt product (null -> 1); compare_state null stays null, no price state reset',
   t.ca('hx-pj', 'https://www.roborock.com/dk/saros') = 'ok1' and t.ex('hx-pj') = '["https://www.roborock.com/dk/saros"]'
   and t.snapstate('hx-pj') = (select k from t.hxsnap) and t.q($$select (compare_state is null and compare_at is null and status = 'tracking' and offers is not null and history is not null)::text from public.products where name = 'hx-pj'$$) = 'true');
@@ -2333,7 +2349,7 @@ select t.chk('add: a product without a link has nothing to add shops to (Danish 
   t.ca('hx-name', 'https://x.example.dk/1') like 'Varen følges ikke endnu%');
 select t.chk('add: a client-sent compare_state or extra_state in the same update is ignored',
   t.err($$update public.products set extra_urls = extra_urls || '["https://g.example.dk/1"]'::jsonb, compare_state = 'done', extra_state = '{"x":{"fails":9}}' where name = 'hx-wanted2'$$) = 'ok1'
-  and t.q($$select (compare_state = 'wanted' and extra_state is null and jsonb_array_length(extra_urls) = 2)::text from public.products where name = 'hx-wanted2'$$) = 'true');
+  and t.q($$select (compare_state = 'wanted' and extra_state = '{"https://hand.example.dk/1":{"origin":"hand"},"https://g.example.dk/1":{"origin":"hand"}}'::jsonb and jsonb_array_length(extra_urls) = 2)::text from public.products where name = 'hx-wanted2'$$) = 'true');
 select t.asB();
 select t.chk('add: a member of the shared list (B) cannot add to A''s product (the whole-row check)',
   t.err($$update public.products set extra_urls = extra_urls || '["https://h.example.dk/1"]'::jsonb where name = 'hx-single'$$) like 'Kun den, der har tilføjet%');
@@ -2400,11 +2416,14 @@ select t.chk('merge: the agent''s answer is added after the hand-added link; the
   t.rs3('mg-1', null, '["https://www.HAND.example.dk/other", "https://www.roborock.com/dk/x"]') = 'true'
   and t.ex('mg-1') = '["https://hand.example.dk/1", "https://www.roborock.com/dk/x"]'
   and t.q($$select (extra_state -> 'https://hand.example.dk/1' ->> 'seen' = 'true' and compare_state = 'done')::text from public.products where name = 'mg-1'$$) = 'true');
+select t.chk('origin: the agent''s new link gets origin agent in extra_state; the existing hand link keeps its state (no origin added); a skipped shop gets no entry',
+  t.q($$select (extra_state = '{"https://hand.example.dk/1":{"seen":true,"fails":0,"at":"2026-11-10T10:00:00Z"},"https://www.roborock.com/dk/x":{"origin":"agent"}}'::jsonb)::text from public.products where name = 'mg-1'$$) = 'true');
 select t.chk('merge: the list is cut at 5 in all, old links first, the agent''s order kept; only the shops that fit are added',
   t.rs3('mg-2', null, '["https://d.example.dk/4", "https://e.example.dk/5", "https://f.example.dk/6"]') = 'true'
   and t.ex('mg-2') = '["https://hand.example.dk/1", "https://b.example.dk/2", "https://c.example.dk/3", "https://d.example.dk/4", "https://e.example.dk/5"]');
 select t.chk('merge: a single-shop product without links gets the agent''s links as before',
-  t.rs3('mg-3', null, '["https://a.example.dk/1"]') = 'true' and t.ex('mg-3') = '["https://a.example.dk/1"]');
+  t.rs3('mg-3', null, '["https://a.example.dk/1"]') = 'true' and t.ex('mg-3') = '["https://a.example.dk/1"]'
+  and t.q($$select (extra_state = '{"https://a.example.dk/1":{"origin":"agent"}}'::jsonb)::text from public.products where name = 'mg-3'$$) = 'true');
 reset role;
 
 -- ---- resolver_list: the `shops` column
