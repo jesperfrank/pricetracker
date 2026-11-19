@@ -444,7 +444,7 @@ function makeBrandRun(opts) {
     if (prod.source_url && SHOP.registrableDomain(DS.hostOf(prod.source_url)) === bp.domain) return out('own shop');
     if ((Array.isArray(prod.extra_urls) ? prod.extra_urls : []).some((e) => SHOP.registrableDomain(DS.hostOf(e)) === bp.domain)) return out('covered');
     const offers = Array.isArray(prod.offers) ? prod.offers : [];
-    if (X.covered(offers, { url: row.base, store: '' })) return out('covered');
+    if (X.covered(offers, { url: row.base, store: '' }) || X.brandListed(offers, used.brand)) return out('covered');
     // 4. the model tokens and the product's URLs in the sitemaps
     const brandWords = titleWords(title).slice(0, used.n);
     if (!modelTokens(title, brandWords).length) return out('no model');

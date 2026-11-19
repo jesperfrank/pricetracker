@@ -214,7 +214,10 @@ may be waiting at "Vælg variant"), then the `compare` rows, oldest request firs
 
 `resolver_set(p_id, p_url)` stores the link of a `name` product (a prisjagt.dk page, or one shop's product page),
 `resolver_fail(p_id, p_note)` marks it as not found with a short Danish note. Both return `false` for a product that is not a
-waiting `name` product, and both clear any suggestions on it.
+waiting `name` product, and both clear any suggestions on it. `resolver_fail` also records the time of the failure. A failed name row
+is not listed again by itself, but the person can send it back with "Prøv igen" (the database allows it an hour after the failure, 3 times
+in 7 days), so the same product may come back as a `name` row after you failed it: answer it afresh, with `resolver_suggest` where the name
+is loose.
 
 ## `resolver_suggest`: "Mente du", several likely products for a `name` row
 
@@ -440,8 +443,14 @@ It returns at most 100 products, newest first, and ONLY products whose owner is 
 nothing about anybody else's products, and no user ids or e-mail addresses at all. Per product: `id`, `name`, `title`, `active`,
 `status`, `check_note`, `last_checked`, `host` (the shop's host name, no path), `target_type`, `target_value`, `lowest` (the lowest
 price in stock), `cheapest` (the 5 cheapest offers as `[{store, price, stock, stale}]`; `stale` means the shop could not be read
-and this is its last known offer), `shops` (the extra shops as `[{host, origin, why, price, seen}]`; `origin` is `search`
-for a shop found by the web search, `brand` for the manufacturer's own shop, null for the person's or the agent's link),
-`compare_state`, `compare_tries`, `discover_state` (what the last look for shops did, including `brand`: `{brand, shop, result}`
-with `result` one of `added`, `covered`, `no shop`, `no match`, `not same product`, `refused`, `own shop`, `no model`, `full`),
-`requirements`, `has_name_options`, `verdict_level`, `notified_price`, `notified_at`, `bought_at` and `created_at`.
+and this is its last known offer), `shops` (the extra shops as `[{host, url, name, at, origin, why, price, seen}]`; `url` is the
+full link, `name` is the shop page's own product name as the job read it last (decoded, at most 120 characters) and `at` is when
+it was read, both null for a link that was never read, so a wrong match can be seen: an extra shop at 129 kr. for a product that costs
+219 to 369 elsewhere shows what that page is called; `origin` is `search` for a shop found by the web search, `brand` for the
+manufacturer's own shop, null for the person's or the agent's link; `why` is why the link gives no offer: `err`, `noprice`,
+`outlier`, `dup`), `compare_state`, `compare_tries`, `discover_state` (what the last look for shops did, including `brand`:
+`{brand, shop, result}` with `result` one of `added`, `covered`, `no shop`, `no match`, `not same product`, `refused`, `own shop`,
+`no model`, `full`), `requirements`, `has_name_options`, `verdict_level`, `notified_price`, `notified_at`, `bought_at`,
+`created_at`, `source_url` and `shop_url` (the product's own links in full, the second one is the original shop link after a switch
+to Prisjagt), `offers_count` (how many offers are stored) and `in_list` (true when the product is on a list; never the list's name).
+The links are the owner's own, complete with any query string, and are returned for administrators' products only.

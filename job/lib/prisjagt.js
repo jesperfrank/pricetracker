@@ -11,6 +11,7 @@
 //                 (3) else "Variant N".
 
 const { normShop, copenhagenDate } = require('./pricing');
+const { cleanText } = require('./text');
 
 const UA = 'Prisvagten-pricecheck/1.0 (personal price watch; plain HTTP client)';
 const TIMEOUT_MS = 30000;
@@ -73,10 +74,6 @@ function parsePrisjagtHistory(html) {
 
 // ---------------------------------------------------------------- offers
 
-function cleanText(s, max) {
-  return String(s == null ? '' : s).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max || 200);
-}
-
 // returns eligible rows (new, DKK, no membership price, https link), one per listing key:
 // {key, variant, store, price, url, inStock, stock, note, sale, name}
 function parseRows(s) {
@@ -117,7 +114,7 @@ function parseTitle(s, html) {
   if (m) { try { const t = cleanText(JSON.parse('"' + m[1] + '"'), 200); if (t) return t; } catch (e) { /* fall through */ } }
   const t = /<title>([^<]*)<\/title>/.exec(html);
   if (t) {
-    const x = cleanText(t[1].replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/\s+-\s+(Black Friday.*|fra \d.*|Sammenlign.*)$/i, ''), 200);
+    const x = cleanText(t[1], 400).replace(/\s+-\s+(Black Friday.*|fra \d.*|Sammenlign.*)$/i, '').trim().slice(0, 200);
     if (x) return x;
   }
   return null;

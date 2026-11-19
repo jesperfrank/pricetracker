@@ -1022,13 +1022,13 @@ reset role;
 -- a donor row that differs from a-gave in every column but the bought ones, used to try every column
 insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
   status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id,
-  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state, requirements, req_state, notify_silent_until, discover_state)
+  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state, requirements, req_state, notify_silent_until, discover_state, lookup_failed_at, retry_requested_at, retry_log)
 values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
   'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01',
-  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}', 'donor krav', '{"want":true}', '2001-08-08', '{"at":"2001-09-09T00:00:00Z","added":0}');
+  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}', 'donor krav', '{"want":true}', '2001-08-08', '{"at":"2001-09-09T00:00:00Z","added":0}', '2001-10-10', '2001-11-11', array['2001-11-11'::timestamptz]);
 update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
   variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04',
-  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg', extra_urls = '["https://tredje.example.dk/gave"]', extra_state = '{"x":{"fails":3}}', requirements = 'gave krav', req_state = '{"for":"gave krav","by":"agent"}', notify_silent_until = '2002-07-07', discover_state = '{"at":"2002-08-08T00:00:00Z","added":1}'
+  alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg', extra_urls = '["https://tredje.example.dk/gave"]', extra_state = '{"x":{"fails":3}}', requirements = 'gave krav', req_state = '{"for":"gave krav","by":"agent"}', notify_silent_until = '2002-07-07', discover_state = '{"at":"2002-08-08T00:00:00Z","added":1}', lookup_failed_at = '2002-09-09', retry_requested_at = '2002-10-10', retry_log = array['2002-10-10'::timestamptz]
  where name = 'a-gave';
 create table t.donor as select * from public.products where name = 'donor';
 create table t.snap as select id, to_jsonb(p) as j from public.products p where name = 'a-gave';
@@ -3249,6 +3249,103 @@ delete from public.lists where id = '00000000-0000-0000-0000-00000000aa0f';
 select set_config('request.jwt.claims', '', false);
 select t.tok(null);
 
+-- --- "Prøv igen": a failed name-only product goes back to the agent's queue by the person's own request (1 hour after the failure, 3 per 7 days)
+insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000aa0e', '00000000-0000-0000-0000-0000000000a1', 'Igen');
+insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa0e', '00000000-0000-0000-0000-0000000000b2') on conflict do nothing;
+create function t.rst(n text) returns text language sql security definer as $$
+  select status || '|' || coalesce(check_note, '-') || '|' || coalesce(cardinality(retry_log), 0) || '|' || (lookup_failed_at is not null)::text || '|' || (retry_requested_at is not null)::text from public.products where name = n $$;
+create function t.failed_ago(n text, h numeric) returns void language sql security definer as $$ update public.products set lookup_failed_at = now() - h * interval '1 hour' where name = n $$;
+create function t.log_ago(n text, d numeric) returns void language sql security definer as $$ update public.products set retry_log = (select array_agg(x - d * interval '1 day') from unnest(retry_log) x) where name = n $$;
+create function t.retry(n text) returns text language plpgsql as $$
+begin update public.products set retry_requested_at = now() where name = n; return 'ok'; exception when others then return sqlerrm; end $$;
+grant execute on function t.rst(text), t.failed_ago(text, numeric), t.log_ago(text, numeric), t.retry(text) to public;
+select t.tok(repeat('a', 64));
+select t.chk('retry: the columns exist', (select count(*) = 3 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name in ('lookup_failed_at', 'retry_requested_at', 'retry_log')));
+set role authenticated;
+select t.asA();
+insert into public.products (name, target_type, list_id) values ('igen-a', 'auto', '00000000-0000-0000-0000-00000000aa0e');
+insert into public.products (name, target_type) values ('igen-pending', 'auto');
+insert into public.products (name, source_url, target_type) values ('igen-link', 'https://shop.example.dk/igen', 'auto');
+select t.chk('retry: a browser insert cannot preset the retry columns', t.try($$insert into public.products (name, target_type, lookup_failed_at, retry_log, retry_requested_at) values ('igen-snyd', 'auto', now(), array[now()], now())$$) = 'ok'
+  and t.rst('igen-snyd') = 'pending|-|0|false|false');
+delete from public.products where name = 'igen-snyd';
+reset role;
+set role anon;
+select t.chk('retry: resolver_fail records the time of the failure', public.resolver_fail(t.pid('igen-a'), 'Kunne ikke finde produktet.') and t.rst('igen-a') = 'error|Kunne ikke finde produktet.|0|true|false');
+reset role;
+set role authenticated;
+select t.asA();
+select t.chk('retry: right after the failure it is refused with a Danish message, nothing changes', t.retry('igen-a') = 'Vent en time, før du prøver igen.' and t.rst('igen-a') = 'error|Kunne ikke finde produktet.|0|true|false');
+select t.chk('retry: a product that is not failed (pending) or has a link is refused',
+  t.retry('igen-pending') = 'Varen kan ikke prøves igen nu.' and t.retry('igen-link') = 'Varen kan ikke prøves igen nu.');
+reset role;
+select t.failed_ago('igen-a', 2);
+set role authenticated;
+select t.asB();
+select t.chk('retry: a member of the shared list cannot ask (not their product)', t.retry('igen-a') like 'Kun den, der har tilføjet%' and t.rst('igen-a') = 'error|Kunne ikke finde produktet.|0|true|false');
+select t.asA();
+select t.chk('retry: the browser cannot set the failure time or the log itself', t.try($$update public.products set lookup_failed_at = now() - interval '9 days', retry_log = array[now()] where name = 'igen-a'$$) = 'ok'
+  and t.rst('igen-a') = 'error|Kunne ikke finde produktet.|0|true|false' and (select lookup_failed_at < now() - interval '1 hour' and lookup_failed_at > now() - interval '3 hours' from public.products where name = 'igen-a'));
+select t.chk('retry: after an hour A asks: pending again, the note is gone, one entry in the log', t.retry('igen-a') = 'ok' and t.rst('igen-a') = 'pending|-|1|true|true');
+select t.chk('retry: ... the time is the server''s, the person''s fields are as they were',
+  (select retry_requested_at >= now() - interval '1 minute' and retry_requested_at <= now() + interval '1 minute' and source_url is null and target_type = 'auto' and active from public.products where name = 'igen-a'));
+reset role;
+set role anon;
+select t.chk('retry: ... and the agent''s queue has it', t.queue() like '%igen-a%' and t.queue() like '%igen-pending%');
+select t.chk('retry: ... fails again', public.resolver_fail(t.pid('igen-a'), 'Igen intet.') and t.rst('igen-a') = 'error|Igen intet.|1|true|true');
+reset role;
+set role authenticated;
+select t.asA();
+select t.chk('retry: an immediate second ask waits for an hour again', t.retry('igen-a') = 'Vent en time, før du prøver igen.');
+reset role;
+select t.failed_ago('igen-a', 3);
+set role authenticated;
+select t.asA();
+select t.chk('retry: the second ask', t.retry('igen-a') = 'ok' and t.rst('igen-a') = 'pending|-|2|true|true');
+reset role;
+set role anon; select public.resolver_fail(t.pid('igen-a'), 'x'); reset role;
+select t.failed_ago('igen-a', 3);
+set role authenticated;
+select t.asA();
+select t.chk('retry: the third ask', t.retry('igen-a') = 'ok' and t.rst('igen-a') = 'pending|-|3|true|true');
+reset role;
+set role anon; select public.resolver_fail(t.pid('igen-a'), 'x'); reset role;
+select t.failed_ago('igen-a', 3);
+set role authenticated;
+select t.asA();
+select t.chk('retry: the fourth ask in 7 days is refused with a Danish message, nothing changes',
+  t.retry('igen-a') = 'Du har prøvet tre gange i denne uge. Skriv varen om i stedet.' and t.rst('igen-a') = 'error|x|3|true|true');
+select t.chk('retry: ... but a new name still works (the old way), and does not use up a try', (select 1) = 1 and t.try($$update public.products set name = 'igen-a2' where name = 'igen-a'$$) = 'ok'
+  and t.rst('igen-a2') = 'pending|-|3|true|true');
+reset role;
+set role anon; select public.resolver_fail(t.pid('igen-a2'), 'y'); reset role;
+select t.failed_ago('igen-a2', 3);
+select t.log_ago('igen-a2', 8);
+set role authenticated;
+select t.asA();
+select t.chk('retry: tries older than 7 days do not count: allowed again, the old ones are pruned from the log', t.retry('igen-a2') = 'ok' and t.rst('igen-a2') = 'pending|-|1|true|true');
+reset role;
+-- a failure from before the column existed (no time) can be retried at once
+update public.products set status = 'error', check_note = 'Gammel fejl', lookup_failed_at = null, retry_log = null where name = 'igen-a2';
+set role authenticated;
+select t.asA();
+select t.chk('retry: an old failure without a time can be retried', t.retry('igen-a2') = 'ok' and t.rst('igen-a2') = 'pending|-|1|false|true');
+reset role;
+-- the one-time repair is one-time: a failed row that appears after the schema was applied is not touched by later runs
+update public.products set status = 'error', check_note = 'Ny fejl', lookup_failed_at = now() where name = 'igen-a2';
+\o /dev/null
+\i :schema
+\i :schema
+\o
+select t.chk('retry: a failed name-only row created after the mark stays failed over two more schema runs (the repair ran once)',
+  t.rst('igen-a2') = 'error|Ny fejl|1|true|true' and (select count(*) = 1 from public.schema_marks where name = 'requeue-failed-name-lookups'));
+select t.chk('retry: schema_marks is closed to the browser roles and open to the service role, RLS on',
+  (select relrowsecurity from pg_class where oid = 'public.schema_marks'::regclass) and not has_table_privilege('authenticated', 'public.schema_marks', 'select')
+  and not has_table_privilege('anon', 'public.schema_marks', 'insert') and has_table_privilege('service_role', 'public.schema_marks', 'insert'));
+delete from public.products where name like 'igen-%';
+delete from public.lists where id = '00000000-0000-0000-0000-00000000aa0e';
+select t.tok(null);
+
 -- --- "Butikssøgning": the job writes extra_urls / extra_state / discover_state with the service role; the browser cannot write discover_state
 insert into public.products (id, user_id, name, source_url, target_type, target_value, status, title, requirements) values
   ('00000000-0000-0000-0000-00000000d501', '00000000-0000-0000-0000-0000000000a1', 'sok-pj', 'https://prisjagt.dk/product.php?p=77', 'price', 100, 'tracking', 'Roborock Saros 10R', null);
@@ -3342,10 +3439,12 @@ insert into public.products (id, user_id, name, source_url, target_type, target_
    '[{"store":"Elgiganten","price":5500,"inStock":true,"url":"https://prisjagt.dk/go-to-shop/1"},{"store":"Roborock","price":4049,"inStock":false,"readAt":"2026-11-18T10:00:00Z"},{"store":"Power","price":5650,"inStock":true},{"store":"Proshop","price":5600,"inStock":true},{"store":"Komplett","price":5700,"inStock":true},{"store":"Coolshop","price":5800,"inStock":true},{"store":"Lager","price":4000}]',
    '{"level":"good","text":"x"}', 'noget', '2026-11-19T10:00:00Z', 4049, '2026-11-19T10:00:00Z', 'none', 2,
    '["https://dk.roborock.com/products/roborock-saros-10r?utm_source=hemmelig","https://www.kampagne.dk/p/1"]',
-   '{"https://dk.roborock.com/products/roborock-saros-10r?utm_source=hemmelig":{"origin":"brand","seen":true,"fails":0,"offer":{"store":"Roborock","price":4049,"inStock":true,"at":"2026-11-19T10:00:00Z"}},"https://www.kampagne.dk/p/1":{"why":"err","fails":2}}',
+   '{"https://dk.roborock.com/products/roborock-saros-10r?utm_source=hemmelig":{"origin":"brand","seen":true,"fails":0,"offer":{"store":"Roborock","price":4049,"inStock":true,"name":"Roborock Saros 10R robotstøvsuger","at":"2026-11-19T10:00:00Z"}},"https://www.kampagne.dk/p/1":{"why":"err","fails":2}}',
    '{"at":"2026-11-19T10:00:00Z","found":0,"added":1,"note":"ny butik","brand":{"brand":"roborock","shop":"dk.roborock.com","result":"added"}}', '2026-11-19 09:00'),
   ('00000000-0000-0000-0000-00000000d602', '00000000-0000-0000-0000-0000000000b2', 'diag-far', 'https://shop.example.dk/hemmelig', 'price', 5, 'tracking', 'Fars hemmelige ting', 'krav', '[{"store":"X","price":9,"inStock":true}]', null, null, null, null, null, null, 0, null, null, null, '2026-11-19 11:00'),
   ('00000000-0000-0000-0000-00000000d603', '00000000-0000-0000-0000-0000000000a1', 'diag-mor-ny', 'https://shop.example.dk/a/b/c?q=1', 'auto', null, 'pending', null, null, null, null, null, null, null, null, null, 0, null, null, null, '2026-11-19 12:00');
+insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000d6a1', '00000000-0000-0000-0000-0000000000a1', 'diag-hemmelig-liste');
+update public.products set list_id = '00000000-0000-0000-0000-00000000d6a1' where name = 'diag-mor';
 create function t.mcnt() returns bigint language sql security definer as $$ select count(*) from public.products p join auth.users u on u.id = p.user_id where u.email = 'mor@familie.dk' $$;
 grant execute on function t.mcnt() to public;
 create function t.dcnt() returns text language plpgsql as $$ begin return (select count(*) from public.diag_products())::text; exception when others then return sqlerrm; end $$;
@@ -3371,17 +3470,23 @@ select t.chk('diag: with the token only the administrator''s own products are re
   (select array_agg(name order by ord) from (select name, row_number() over () as ord from public.diag_products()) z where name like 'diag-%') = array['diag-mor-ny', 'diag-mor']
   and (select count(*) = 0 from public.diag_products() where name = 'diag-far' or title = 'Fars hemmelige ting')
   and (select count(*) = t.mcnt() from public.diag_products()));
-select t.chk('diag: the shape: host without path, lowest in-stock price, the 5 cheapest offers with stock and stale, the shops, the states, no query strings',
+select t.chk('diag: the shape: host without path, lowest in-stock price, the 5 cheapest offers with stock and stale, the shops with their full link, page name and read time, the states, the full source_url, the offers count, in_list',
   (select host = 'prisjagt.dk' and lowest = 5500 and target_type = 'price' and target_value = 4100 and status = 'tracking' and check_note = 'noget' and title = 'Roborock Saros 10R'
       and cheapest = '[{"store":"Lager","price":4000,"stock":false,"stale":false},{"store":"Roborock","price":4049,"stock":false,"stale":true},{"store":"Elgiganten","price":5500,"stock":true,"stale":false},{"store":"Proshop","price":5600,"stock":true,"stale":false},{"store":"Power","price":5650,"stock":true,"stale":false}]'::jsonb
-      and shops = '[{"host":"dk.roborock.com","origin":"brand","why":null,"price":4049,"seen":true},{"host":"kampagne.dk","origin":null,"why":"err","price":null,"seen":false}]'::jsonb
+      and shops = '[{"host":"dk.roborock.com","url":"https://dk.roborock.com/products/roborock-saros-10r?utm_source=hemmelig","name":"Roborock Saros 10R robotstøvsuger","at":"2026-11-19T10:00:00Z","origin":"brand","why":null,"price":4049,"seen":true},{"host":"kampagne.dk","url":"https://www.kampagne.dk/p/1","name":null,"at":null,"origin":null,"why":"err","price":null,"seen":false}]'::jsonb
+      and source_url = 'https://www.prisjagt.dk/product.php?p=16373878?utm=hemmelig' and shop_url is null and offers_count = 7 and in_list
       and compare_state = 'none' and compare_tries = 2 and discover_state -> 'brand' ->> 'result' = 'added' and requirements = 'hvid, 256 GB' and not has_name_options
       and verdict_level = 'good' and notified_price = 4049 and notified_at is not null and bought_at is null and active
     from public.diag_products() where name = 'diag-mor'));
 select t.chk('diag: a product with nothing read yet gives empty lists and nulls; no user id or e-mail column exists',
   (select host = 'shop.example.dk' and cheapest = '[]'::jsonb and shops = '[]'::jsonb and lowest is null and verdict_level is null and discover_state is null and title is null from public.diag_products() where name = 'diag-mor-ny')
   and not exists (select 1 from information_schema.routines r, information_schema.parameters q where r.routine_name = 'diag_products' and q.specific_name = r.specific_name and q.parameter_mode = 'OUT' and q.parameter_name ~* '(user|mail)'));
-select t.chk('diag: the secret text of the links (query strings) appears nowhere in the answer', (select count(*) = 0 from public.diag_products() d where d::text like '%hemmelig%' and d.name <> 'diag-mor' or (d.name = 'diag-mor' and d::text like '%utm_source%')));
+select t.chk('diag: the full links are the administrator''s own only: nothing of a non-administrator''s product appears in the answer',
+  (select count(*) = 0 from public.diag_products() d where d::text like '%Fars hemmelige%' or d::text like '%shop.example.dk/hemmelig%')
+  and (select count(*) = 0 from public.diag_products() d where d::text ~* '(mor@|far@|familie\.dk)'));
+select t.chk('diag: in_list is true for a product on a list, and no list name or id is in the answer',
+  (select in_list from public.diag_products() where name = 'diag-mor') and (select not in_list from public.diag_products() where name = 'diag-mor-ny')
+  and (select count(*) = 0 from public.diag_products() d where d::text like '%hemmelig-liste%' or d::text like '%d6a1%') and (select offers_count = 0 and source_url = 'https://shop.example.dk/a/b/c?q=1' from public.diag_products() where name = 'diag-mor-ny'));
 reset role;
 set session_replication_role = replica;      -- the cap of 40 products per person is a trigger: left out for this bulk insert only
 insert into public.products (user_id, name, target_type, target_value, created_at)
@@ -3393,6 +3498,7 @@ reset role;
 select t.chk('diag: the grants are the resolver''s: anon and authenticated may call it, the token decides',
   has_function_privilege('anon', 'public.diag_products()', 'execute') and has_function_privilege('authenticated', 'public.diag_products()', 'execute'));
 delete from public.products where name like 'diag-%';
+delete from public.lists where id = '00000000-0000-0000-0000-00000000d6a1';
 select t.tok(null);
 
 -- 12. final whole-file run on the populated database

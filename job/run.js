@@ -90,6 +90,32 @@ function initialPatch(prod, parsed, now) {
   return { patch, track: false };
 }
 
+// The brand words a brand-shop link stands for: the ALIAS brands whose shop is on the link's domain, and the brand of the last probe.
+function brandKeysFor(prod, url) {
+  const dom = SHOP.registrableDomain(X.hostOf(url));
+  const keys = Object.keys(BS.ALIAS).filter((k) => BS.baseParts(BS.ALIAS[k]).domain === dom);
+  const d = prod && prod.discover_state && prod.discover_state.brand;
+  if (d && typeof d.brand === 'string' && d.brand) keys.push(d.brand);
+  return keys;
+}
+
+// extra_state[url].offer of a link that was read: the offer plus the page's own product name (see extras.js), when the page gave one.
+function offerEntry(row, page, iso) {
+  const o = { store: row.store, price: row.price, inStock: row.inStock !== false, note: row.note || null };
+  const name = X.pageName(page && page.title);
+  if (name) o.name = name;
+  o.at = iso;
+  return o;
+}
+
+// The stored title is kept as it is (set once), except when it still holds HTML entities from before the pages were decoded ("Tilbeh&oslash;r"):
+// then the freshly read, decoded title replaces it (when the page gave one).
+function titleFor(prod, parsed) {
+  const cur = typeof prod.title === 'string' && prod.title.trim() ? prod.title : null;
+  if (cur && parsed && parsed.title && /&(#x?[0-9a-f]+|[a-z][a-z0-9]*);/i.test(cur) && parsed.title !== cur) return parsed.title;
+  return cur || (parsed && parsed.title) || null;
+}
+
 // Tracking run for one product. Returns {patch, hit}; hit = {low, newHit...} data for the e-mail.
 function trackingPatch(prod, profile, parsed, now) {
   const iso = isoNow(now), today = P.copenhagenDate(now);
@@ -146,7 +172,7 @@ function trackingPatch(prod, profile, parsed, now) {
   if (silent && !bought && goal.newHit) goal = { hit: goal.hit, newHit: false, fields: goal.fields, reason: null };
 
   const patch = Object.assign({
-    status: 'tracking', title: prod.title || parsed.title || null, variants, offers, history, normal_price: normal, verdict, warning,
+    status: 'tracking', title: titleFor(prod, parsed), variants, offers, history, normal_price: normal, verdict, warning,
     check_note: filtered.length === 0 ? 'Ingen butikker matcher dine butiksvalg.' : (parsed.note || null), last_checked: iso,
   }, goal.fields);
   addImage(patch, prod, parsed);
@@ -484,7 +510,7 @@ async function run(ctx) {
     const keep = (url) => {
       const o = X.lastOffer(prod, prev[url], url, now);
       if (!o) return null;
-      offerOf[url] = { store: o.store, price: o.price, inStock: o.inStock, note: o.note, at: new Date(o.at).toISOString().replace(/\.\d+Z$/, 'Z') };
+      offerOf[url] = Object.assign({ store: o.store, price: o.price, inStock: o.inStock, note: o.note }, o.name ? { name: o.name } : {}, { at: new Date(o.at).toISOString().replace(/\.\d+Z$/, 'Z') });
       return { key: url, variant: vid, store: o.store, price: o.price, url, inStock: o.inStock, stock: o.inStock ? 'InStock' : 'OutOfStock', note: o.note, name: o.store, saleKnown: false, sale: false, carried: true, stale: true, readAt: o.at };
     };
     const carry = (url) => {
@@ -564,7 +590,7 @@ async function run(ctx) {
       kept.forEach((f) => {
         if (extraRows.indexOf(f.row) !== -1) {
           next[f.url] = { seen: !!f.stt.seen || recorded, fails: 0, at: iso };
-          offerOf[f.url] = { store: f.row.store, price: f.row.price, inStock: f.row.inStock !== false, note: f.row.note || null, at: iso };
+          offerOf[f.url] = offerEntry(f.row, f.page, iso);
         } else next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso, why: 'dup' };
       });
       const out = {};
@@ -576,7 +602,7 @@ async function run(ctx) {
         out[u] = e;
       });
       // the main shop has an entry only to remember its last offer (it is not an extra link)
-      if (main && main.rows[0] && typeof main.rows[0].price === 'number') out[target.url] = { offer: { store: main.rows[0].store, price: main.rows[0].price, inStock: main.rows[0].inStock !== false, note: main.rows[0].note || null, at: iso } };
+      if (main && main.rows[0] && typeof main.rows[0].price === 'number') out[target.url] = { offer: offerEntry(main.rows[0], main, iso) };
       else if (mainStale && offerOf[target.url]) out[target.url] = { offer: offerOf[target.url] };
       const val = Object.keys(out).length ? out : null;
       return JSON.stringify(val) === JSON.stringify(prod.extra_state === undefined ? null : prod.extra_state) ? {} : { extra_state: val };
@@ -634,13 +660,15 @@ async function run(ctx) {
     const { fresh, carried } = await readExtras(prod, ls, variant.id, prev, next, offerOf, iso);
     // 1. a shop that Prisjagt lists already: the Prisjagt row stays
     const drop = (f) => { next[f.url] = { seen: !!f.stt.seen, fails: 0, at: iso, why: 'dup' }; };
+    // A link the brand probe added (origin 'brand') is a duplicate too when Prisjagt lists the manufacturer under the brand's own name ("Dreame").
+    const brandDup = (url) => !!prev[url] && prev[url].origin === 'brand' && X.brandListed(base, brandKeysFor(prod, url));
     const fresh1 = fresh.filter((f) => {
-      if (!X.covered(base, { url: f.url, store: f.row.store })) return true;
+      if (!X.covered(base, { url: f.url, store: f.row.store }) && !brandDup(f.url)) return true;
       log('  ' + tag(prod) + ' (' + f.hostKey + '): butikken er med på Prisjagt, Prisjagts pris bruges.');
       drop(f); return false;
     });
     const carried1 = carried.filter((c) => {
-      if (!X.covered(base, { url: c.url, store: c.store })) return true;
+      if (!X.covered(base, { url: c.url, store: c.store }) && !brandDup(c.url)) return true;
       delete offerOf[c.url]; next[c.url] = Object.assign({}, prev[c.url], { why: 'dup' }); return false;
     });
     // 2. another product: far from the median of the other prices of this run
@@ -668,7 +696,7 @@ async function run(ctx) {
       kept.forEach((f) => {
         if (extraRows.indexOf(f.row) !== -1) {
           next[f.url] = { seen: !!f.stt.seen || recorded, fails: 0, at: iso };
-          offerOf[f.url] = { store: f.row.store, price: f.row.price, inStock: f.row.inStock !== false, note: f.row.note || null, at: iso };
+          offerOf[f.url] = offerEntry(f.row, f.page, iso);
         } else next[f.url] = { seen: !!f.stt.seen, fails: (Number(f.stt.fails) || 0) + 1, at: iso, why: 'dup' };
       });
       const out = {};
@@ -1031,7 +1059,7 @@ async function run(ctx) {
   return { stats, summary, results };
 }
 
-module.exports = { discoverSummary, autoCompare, AUTO_COMPARE_MAX, COMPARE_EXTRAS_TRIES, run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, wantsCompareAgain, oldErrorWantsCompare, MAX_BACKFILL };
+module.exports = { titleFor, discoverSummary, autoCompare, AUTO_COMPARE_MAX, COMPARE_EXTRAS_TRIES, run, initialPatch, trackingPatch, errorNote, classify, backfillDue, wantsCompare, wantsCompareAgain, oldErrorWantsCompare, MAX_BACKFILL };
 
 if (require.main === module) {
   const e = process.env;

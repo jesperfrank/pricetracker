@@ -202,6 +202,8 @@
       // reqState = what the AI agent answered for them (only its "for" is read here)
       // "Mente du" (products.name_options, the AI agent's suggestions for a name-only product): optsOk = the database has the column (else all of it stays hidden)
       optsOk: "name_options" in r, optsRaw: Array.isArray(r.name_options) ? r.name_options : [],
+      // "Prøv igen" (products.retry_requested_at): retryOk = the database has the column (else the button stays hidden); the answer and the limits are the database's
+      retryOk: "retry_requested_at" in r,
       reqOk: "requirements" in r, req: typeof r.requirements === "string" ? r.requirements.slice(0, 120) : "",
       reqStateOk: "req_state" in r, reqState: r.req_state && typeof r.req_state === "object" ? r.req_state : null
     };
@@ -478,7 +480,15 @@
     var f = mayEdit(p) ? '<form class="edit" data-fixurl="' + esc(id) + '" novalidate><label for="u-' + esc(id) + '">Indsæt linket her</label>' +
       '<input class="wide" type="url" id="u-' + esc(id) + '" maxlength="500" required placeholder="https://…">' +
       '<button class="link" type="submit">Gem linket</button><span class="meta" data-rowmsg="' + esc(id) + '">' + esc(state.rowMsg[id] || "") + '</span></form>' : "";
-    return '<p class="verdict">' + a + '</p>' + f;
+    var again = afterError && p.retryOk && mayEdit(p)
+      ? '<p class="note"><button type="button" class="link" data-act="retry" data-id="' + esc(id) + '">Prøv igen</button> <span class="meta" data-rowmsg="r-' + esc(id) + '">' + esc(state.rowMsg["r-" + id] || "") + '</span></p>' : "";
+    return '<p class="verdict">' + a + '</p>' + f + again;
+  }
+  // the database's own short answers to "Prøv igen" are shown as they are; anything else is the general message
+  var RETRY_MSGS = ["Varen kan ikke prøves igen nu.", "Vent en time, før du prøver igen.", "Du har prøvet tre gange i denne uge. Skriv varen om i stedet."];
+  function retryError(e) {
+    var m = String((e && e.message) || "");
+    return RETRY_MSGS.indexOf(m) >= 0 ? m : "Kunne ikke gemme lige nu. Prøv igen om lidt.";
   }
 
   // One-click goals from the product's own history: a price in whole kroner each (shown value = saved value).
@@ -1655,6 +1665,15 @@
         if (r && r.error) { b.disabled = false; onWriteError(r.error); return; }
         p.boughtAt = null; p.boughtPrice = null; render(); fetchProducts();
       }, function () { b.disabled = false; });
+    }
+    else if (act === "retry" && sb && p && mayEdit(p) && p.retryOk && p.status === "error" && !p.url) {
+      // the product goes back to the agent's queue as it is; the database decides (1 hour after the failure, 3 times in 7 days)
+      b.disabled = true; setRowMsg("r-" + id, "");
+      sb.from("products").update({ retry_requested_at: new Date().toISOString() }).eq("id", id).then(function (r) {
+        if (r && r.error) { b.disabled = false; setRowMsg("r-" + id, retryError(r.error)); onWriteError(r.error); return; }
+        p.status = "pending"; p.checkNote = ""; p.optsRaw = []; state.rowMsg["r-" + id] = "";
+        render(); fetchProducts();
+      }, function () { b.disabled = false; setRowMsg("r-" + id, retryError(null)); });
     }
     else if (act === "alt-find" && sb && p) {
       b.disabled = true; setRowMsg("alt-" + id, "");

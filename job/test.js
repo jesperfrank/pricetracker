@@ -2726,7 +2726,7 @@ test('prisjagt extras, the live scenario: Prisjagt 5.500, the manufacturer 4.050
   assert.strictEqual(S().status, 'tracking'); assert.strictEqual(S().check_note, null);
   assert.strictEqual(res.stats.hits, 0, 'silent: the cheapest price is from a shop read for the first time'); assert.strictEqual(S().notified_price, 4050, 'but the hit is remembered');
   assert.deepStrictEqual(Object.keys(S().extra_state), [MFR]); assert(S().extra_state[MFR].seen === true && S().extra_state[MFR].fails === 0 && S().extra_state[MFR].why === undefined);
-  assert.deepStrictEqual(S().extra_state[MFR].offer, { store: 'Roborock Danmark', price: 4050, inStock: true, note: null, at: H11 });
+  assert.deepStrictEqual(S().extra_state[MFR].offer, { store: 'Roborock Danmark', price: 4050, inStock: true, note: null, name: 'Mayan kuvertlagen 180x200 hvid', at: H11 }, 'with the page\'s own product name');
   assert.strictEqual(S().variants.length, 2, 'the Prisjagt variants are as the page gave them'); assert.strictEqual(S().variants.find((v) => v.id === SAROS_V).lowest, 5500);
   // no deal mail; the product still is a hit and in the daily overview (the only mail is the overview)
   assert.strictEqual(db.sent.length, 1, 'only the daily overview'); assert(/tilbud/.test(db.sent[0].subject) && db.sent[0].text.includes('4.050 kr.') && db.sent[0].text.includes('Roborock Danmark'), db.sent[0].text);
@@ -2919,8 +2919,8 @@ test('prisjagt extras: the person\'s hand-added link is read like the agent\'s, 
   await pjRun(db, saros(), { [MFR]: () => resp(503, 'x') }, H10);
   assert.deepStrictEqual(db.products[0].extra_state, { [MFR]: { seen: false, fails: 1, at: H10, why: 'err' } }, 'no offer to remember: the entry is four small fields');
   await pjRun(db, saros(), { [MFR]: xHtml('Roborock Danmark', 4050, true) }, H11);
-  assert.deepStrictEqual(db.products[0].extra_state, { [MFR]: { seen: true, fails: 0, at: H11, offer: { store: 'Roborock Danmark', price: 4050, inStock: true, note: null, at: H11 } } });
-  assert(JSON.stringify(db.products[0].extra_state).length < 300, 'small');
+  assert.deepStrictEqual(db.products[0].extra_state, { [MFR]: { seen: true, fails: 0, at: H11, offer: { store: 'Roborock Danmark', price: 4050, inStock: true, note: null, name: 'Mayan kuvertlagen 180x200 hvid', at: H11 } } });
+  assert(JSON.stringify(db.products[0].extra_state).length < 360, 'small');
   // the same states for a single-shop product: a link that is another product, one without a price, one that cannot be read
   const d5 = newDb(), EX_D = 'https://www.butik-d.dk/p/4'; d5.products.push(exProduct('W1', [EX_A, EX_B, EX_C, EX_D]));
   await R.run(shopCtx(d5, exMap({ [EX_A]: xHtml('Butik A', 50, true), [EX_B]: xHtml('Butik B', 480, true), [EX_C]: shopHtml('shop-noprice'), [EX_D]: () => resp(404, '') })));
@@ -4177,14 +4177,14 @@ test('notify: the first reading of a shop the job found (origin "brand" or "sear
 // ---------------------------------------------------------------- no product names, e-mail addresses, user ids or links with a path in the public log (P3)
 
 test('logs: a full fake run with distinctive names, requirements, addresses and links: none of them is in the log, the summary or the console; products are told by an 8-character tag', async () => {
-  const NAMES = ['Prinsesse-kjole', 'Maja', 'str. 128', 'anna@example.dk', 'Anna@Example.dk', 'USR-AAAA-BBBB', 'hemmelig-sti', 'Hemmeligt spørgsmål'];
+  const NAMES = ['Hemmeligt-sidenavn', 'Prinsesse-kjole', 'Maja', 'str. 128', 'anna@example.dk', 'Anna@Example.dk', 'USR-AAAA-BBBB', 'hemmelig-sti', 'Hemmeligt spørgsmål'];
   const db = dDb(); db.users['USR-AAAA-BBBB-CCCC'] = 'Anna@Example.dk';
   const S = 'https://www.enkeltbutik.dk/hemmelig-sti/maja-kjole', BAD = 'https://www.fejl.dk/hemmelig-sti/a', LOW = 'https://www.lav.dk/hemmelig-sti/b';
   const pj = dProduct('PRINS123ABC', { name: 'Prinsesse-kjole Maja', requirements: 'Maja skal bruge str. 128 til festen', user_id: 'USR-AAAA-BBBB-CCCC', extra_urls: [D_K, BAD, LOW], extra_state: { [D_K]: { origin: 'search' } }, target_value: 5000 });
   db.products.push(pj);
   db.products.push(dProduct('SINGLE12ABC', { name: 'Prinsesse-kjole Maja single', user_id: 'USR-AAAA-BBBB-CCCC', source_url: 'https://www.fejlbutik.dk/hemmelig-sti/maja', status: 'tracking', tracked_variants: ['shop'], offers: [{ store: 'X', price: 100, url: 'https://www.fejlbutik.dk/hemmelig-sti/maja', inStock: true, note: null, variant: 'shop' }], extra_urls: null }));
   db.products.push(dProduct('BROKEN12ABC', { name: 'Prinsesse-kjole Maja kaput', user_id: 'USR-AAAA-BBBB-CCCC', source_url: 'https://ugyldig' }));
-  const shops = dShops({ [BAD]: () => { throw new PJ.PageError('network', 'fetch failed'); }, [LOW]: dShopHtml('Lav', 'Roborock Saros 10R', 300), 'https://www.fejlbutik.dk/hemmelig-sti/maja': () => { throw Object.assign(new PJ.PageError('blocked', 'HTTP 403'), { shop: true }); } });
+  const shops = dShops({ [BAD]: () => { throw new PJ.PageError('network', 'fetch failed'); }, [LOW]: dShopHtml('Lav', 'Roborock Saros 10R Hemmeligt-sidenavn', 300), 'https://www.fejlbutik.dk/hemmelig-sti/maja': () => { throw Object.assign(new PJ.PageError('blocked', 'HTTP 403'), { shop: true }); } });
   const logs = [], con = [], saved = { log: console.log, error: console.error, warn: console.warn, info: console.info };
   ['log', 'error', 'warn', 'info'].forEach((k) => { console[k] = (...a) => { con.push(a.join(' ')); }; });
   let res;
@@ -4228,6 +4228,153 @@ test('brand shop: a base with a locale needs its locale in the sitemap (a global
   x = mk(rbSites(), { expired: () => true, cache: { get: async () => ({ brand: 'roborock', base: RB, sitemaps: [RB_SM], robots: [], status: 'ok', checked_at: new Date().toISOString() }), put: async () => {} } });
   const r = await x.run.process({ title: 'Roborock Saros 10R', source_url: DPJ, offers: [] });
   assert.strictEqual(r.deferred, true); assert.strictEqual(x.f.calls.length, 0);
+});
+
+// ---------------------------------------------------------------- HTML entities in text from pages
+
+test('entities: one shared decoder: numeric (decimal, hex), the XML five, Latin-1 and punctuation names, decoded once, unknown ones stay, control characters and whitespace as before', () => {
+  const T = require('./lib/text');
+  assert.strictEqual(Object.keys(T.NAMED).length, 132, 'five XML names, 96 Latin-1 names and the punctuation ones');
+  const want = { aring: 'å', Aring: 'Å', aelig: 'æ', AElig: 'Æ', oslash: 'ø', Oslash: 'Ø', eacute: 'é', Eacute: 'É', egrave: 'è', uuml: 'ü', Uuml: 'Ü', ouml: 'ö', Ouml: 'Ö', auml: 'ä', Auml: 'Ä', szlig: 'ß', ccedil: 'ç', ntilde: 'ñ',
+    nbsp: ' ', ndash: '–', mdash: '—', hellip: '…', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', quot: '"', apos: "'", amp: '&', lt: '<', gt: '>', deg: '°', trade: '™', reg: '®', copy: '©', euro: '€', times: '×', frac12: '½', bull: '•', middot: '·', laquo: '«', raquo: '»' };
+  Object.keys(want).forEach((k) => assert.strictEqual(T.decodeEntities('&' + k + ';'), want[k], k));
+  assert.strictEqual(T.decodeEntities('&#216;rerenser &#xF8; &#X00F8; &#8211; &#x1F600;'), 'Ørerenser ø ø – \u{1F600}');
+  assert.strictEqual(T.cleanText('Bebird M9 S Smart Visual Ear-Clean &Oslash;rerenser med Kamera + Tilbeh&oslash;r (90 minutter)'), 'Bebird M9 S Smart Visual Ear-Clean Ørerenser med Kamera + Tilbehør (90 minutter)');
+  assert.strictEqual(T.cleanText('&amp;Oslash;'), '&Oslash;', 'decoded once, not twice');
+  assert.strictEqual(T.cleanText('&amp;amp;'), '&amp;'); assert.strictEqual(T.cleanText('&#38;#216;'), '&#216;');
+  assert.strictEqual(T.cleanText('A &unknown; B &Oslashx; &; &#; &#xZZ; & C'), 'A &unknown; B &Oslashx; &; &#; &#xZZ; & C', 'unknown or malformed entities stay');
+  assert.strictEqual(T.cleanText('&AMP; &QUOT; &Quot; &Amp; &oSLASH;'), '& " &Quot; &Amp; &oSLASH;', 'names are case sensitive (Oslash is not oslash), but the XML five and nbsp are also valid in capitals');
+  assert.strictEqual(T.cleanText('a&nbsp;&nbsp; b\n\t c\u0007d &#0; e &#xD800; f &#1114112; g'), 'a b c d e f g', 'whitespace collapsed, control characters, zero, surrogates and out-of-range code points become a space');
+  assert.strictEqual(T.cleanText('x'.repeat(300), 120).length, 120); assert.strictEqual(T.cleanText(null), ''); assert.strictEqual(T.cleanText(undefined), '');
+  assert.strictEqual(T.cleanText('&lt;b&gt;fed&lt;/b&gt;'), '<b>fed</b>', 'angle brackets are kept as text: nothing here builds markup from them');
+  assert.strictEqual(T.squeeze('&amp;Oslash;  x'), '&amp;Oslash; x', 'squeeze does not decode (for text that was decoded already)');
+});
+
+test('entities: shop pages: JSON-LD name, og:title, microdata name, og:site_name and the <title> tag are decoded once', () => {
+  const NAME = 'Bebird M9 S Smart Visual Ear-Clean &Oslash;rerenser med Kamera + Tilbeh&oslash;r (90 minutter)', WANT = 'Bebird M9 S Smart Visual Ear-Clean Ørerenser med Kamera + Tilbehør (90 minutter)';
+  const U = 'https://www.bebird-shop.dk/m9s';
+  // 1. JSON-LD (the string is JSON: nothing decoded the entities), the store name from og:site_name with an entity in the attribute
+  let r = SHOP.parseShopPage(dShopHtml('Bebird &amp; Co', NAME, 219), U);
+  assert.strictEqual(r.title, WANT); assert.strictEqual(r.rows[0].store, 'Bebird & Co'); assert.strictEqual(r.variants[0].label, 'Bebird & Co'); assert.strictEqual(r.rows[0].name, WANT); assert.strictEqual(r.variants[0].sample, WANT.slice(0, 100));
+  // a JSON-LD name that holds a literal "&amp;Oslash;" (double encoded by the shop) is "&Oslash;" after decoding once
+  r = SHOP.parseShopPage(dShopHtml('Shop', 'Pris &amp;Oslash;', 5), U); assert.strictEqual(r.title, 'Pris &Oslash;');
+  // an angle bracket from an entity is text
+  r = SHOP.parseShopPage(dShopHtml('Shop', 'A &lt;b&gt;fed&lt;/b&gt; vare', 5), U); assert.strictEqual(r.title, 'A <b>fed</b> vare');
+  // 2. og:title with entities (the price from meta tags), og:title is decoded by the attribute reader once
+  const meta = '<html><head><title>Fallback</title><meta property="og:title" content="' + NAME.replace(/&/g, '&amp;') + '"><meta property="product:price:amount" content="219,00"><meta property="product:price:currency" content="DKK"></head></html>';
+  r = SHOP.parseShopPage(meta, U); assert.strictEqual(r.title, NAME, 'an og:title that says &amp;Oslash; is the text "&Oslash;" (once)');
+  const meta2 = '<html><head><meta property="og:title" content="' + NAME + '"><meta property="product:price:amount" content="219,00"><meta property="product:price:currency" content="DKK"></head></html>';
+  r = SHOP.parseShopPage(meta2, U); assert.strictEqual(r.title, WANT);
+  // the <title> tag is read as text
+  r = SHOP.parseShopPage('<html><head><title>' + NAME + '</title><meta property="product:price:amount" content="219,00"><meta property="product:price:currency" content="DKK"></head></html>', U); assert.strictEqual(r.title, WANT);
+  // 3. microdata
+  const micro = '<html><body><div itemscope itemtype="https://schema.org/Product"><h1 itemprop="name">' + NAME + '</h1><meta itemprop="name" content="' + NAME + '"><span itemprop="priceCurrency" content="DKK"></span><span itemprop="price" content="219.00">219</span></div></body></html>';
+  r = SHOP.parseShopPage(micro, U); assert.strictEqual(r.title, WANT, 'the text of a tag is decoded once');
+  const micro2 = '<html><body><div itemscope><meta itemprop="name" content="' + NAME.replace(/&/g, '&amp;') + '"><span itemprop="priceCurrency" content="DKK"></span><span itemprop="price" content="219.00">219</span></div></body></html>';
+  r = SHOP.parseShopPage(micro2, U); assert.strictEqual(r.title, NAME, 'an attribute is decoded once');
+});
+
+test('entities: Prisjagt titles and store names are decoded (the <title> tag, the JSON name, the shop name of an offer)', () => {
+  assert.strictEqual(PJ.parseTitle('', '<html><head><title>Bebird &Oslash;rerenser &amp; Tilbeh&oslash;r - fra 199 kr.</title></head></html>'), 'Bebird Ørerenser & Tilbehør');
+  assert.strictEqual(PJ.parseTitle('', '<title>A &amp;Oslash; &#39;x&#39; &quot;y&quot;</title>'), 'A &Oslash; \'x\' "y"');
+  assert.strictEqual(PJ.parseTitle('xx"@type":"Product","name":"Dyson V15 Detect &amp; K&oslash;kken"yy', ''), 'Dyson V15 Detect & Køkken');
+  const rows = PJ.parseRows('"offerRows":[{"price":{"amount":100,"currency":"DKK"},"shop":{"name":"K&oslash;benhavns Cykler &amp; Co"},"clickoutUrl":"https://prisjagt.dk/go-to-shop/1/offer/2","stockStatus":"InStock","name":"Pris &Oslash;"}]');
+  assert.strictEqual(rows[0].store, 'Københavns Cykler & Co'); assert.strictEqual(rows[0].name, 'Pris Ø');
+});
+
+test('entities: mails are plain text: a name with angle brackets is never sent as html', async () => {
+  const hits = [{ name: 'Tilbeh&oslash;r <img src=x onerror=1> &lt;b&gt;', price: 100, store: 'S <b>x</b>', url: 'https://a.dk/x', verdict: null, warning: null, reason: null }];
+  const m = require('./lib/mail').composeMail(hits, 'https://x.dk');
+  assert(m.text.includes('<img src=x onerror=1>'), 'shown as text'); assert(!('html' in m));
+  let sent = null;
+  await require('./lib/mail').sendResend(async (u, o) => { sent = JSON.parse(o.body); return { ok: true }; }, 'k', 'a@b.dk', 'c@d.dk', m);
+  assert(sent && typeof sent.text === 'string' && !('html' in sent), 'Resend gets text only');
+});
+
+test('entities: a stored title with entities is replaced by the decoded one on the next successful check; a clean title is left alone; offer store names are decoded every run', async () => {
+  const U = 'https://www.bebird-shop.dk/m9s', NAME = 'Bebird M9 S Ear-Clean &Oslash;rerenser + Tilbeh&oslash;r', WANT = 'Bebird M9 S Ear-Clean Ørerenser + Tilbehør';
+  const mk = (title) => shopProduct('E1', 'u1', U, { status: 'tracking', tracked_variants: ['shop'], title, target_type: 'price', target_value: 1, variants: [{ id: 'shop', label: 'Bebird &oslash;', lowest: 219, offers: 1, sample: 'x' }], offers: [{ store: 'Bebird &oslash;', price: 219, url: U, inStock: true, note: null, variant: 'shop' }], history: [{ d: '2026-11-10', p: 219, s: 'x', src: 'check' }], last_checked: '2026-11-15T10:00:00Z' });
+  let db = newDb(); db.products.push(mk(NAME));
+  await R.run(shopCtx(db, { [U]: dShopHtml('Bebird &amp; Co', NAME, 219) }));
+  assert.strictEqual(db.products[0].title, WANT, 'repaired'); assert.strictEqual(db.products[0].offers[0].store, 'Bebird & Co', 'the store name is written every run');
+  assert.strictEqual(db.products[0].variants[0].label, 'Bebird & Co');
+  await R.run(shopCtx(db, { [U]: dShopHtml('Bebird &amp; Co', NAME, 219) }));
+  assert.strictEqual(db.products[0].title, WANT, 'and stays');
+  db = newDb(); db.products.push(mk('Mit eget navn'));
+  await R.run(shopCtx(db, { [U]: dShopHtml('Bebird', NAME, 219) }));
+  assert.strictEqual(db.products[0].title, 'Mit eget navn', 'a title without entities is kept as it is (set once)');
+  assert.strictEqual(R.titleFor({ title: 'A &amp; B' }, { title: null }), 'A &amp; B', 'no fresh title: left alone');
+  assert.strictEqual(R.titleFor({ title: null }, { title: 'Ny' }), 'Ny'); assert.strictEqual(R.titleFor({ title: '  ' }, { title: 'Ny' }), 'Ny'); assert.strictEqual(R.titleFor({ title: null }, { title: null }), null);
+});
+
+// ---------------------------------------------------------------- the page's own name per extra shop (for diag_products)
+
+test('extra_state: the page\'s own product name is kept next to each link\'s last offer (decoded, 120 characters at most), for a Prisjagt product and for a single-shop product, and kept when the shop cannot be read', async () => {
+  const LONG = 'Roborock Saros 10R &Oslash; ' + 'x'.repeat(200);
+  const db = newDb(); db.products.push(pjProduct('N1', { extra_urls: [MFR] }));
+  await pjRun(db, saros(), { [MFR]: dShopHtml('Roborock Danmark', LONG, 4050) }, H10);
+  const o = db.products[0].extra_state[MFR].offer;
+  assert.strictEqual(o.name.length, 120); assert(o.name.startsWith('Roborock Saros 10R Ø xxx')); assert.strictEqual(o.store, 'Roborock Danmark'); assert.strictEqual(o.at, H10);
+  // not readable for a moment: the last offer, with its name, stands in
+  await pjRun(db, saros(), { [MFR]: () => resp(503, 'x') }, H11);
+  assert.strictEqual(db.products[0].extra_state[MFR].offer.name, o.name); assert.strictEqual(db.products[0].extra_state[MFR].offer.at, H10, 'when it was read');
+  // single shop: the extra link and the main shop's own entry
+  const d2 = newDb(), EX = 'https://www.butik-e.dk/p/1'; d2.products.push(exProduct('N2', [EX]));
+  await R.run(shopCtx(d2, exMap({ [EX]: dShopHtml('Butik E', 'Vare fra E &amp; co', 500) })));
+  assert.strictEqual(d2.products[0].extra_state[EX].offer.name, 'Vare fra E & co');
+  assert.strictEqual(typeof d2.products[0].extra_state[EX_MAIN].offer.name, 'string', 'the main shop\'s entry has the page name too');
+  assert.strictEqual(require('./lib/extras').pageName('  a\n b  '), 'a b'); assert.strictEqual(require('./lib/extras').pageName(5), null); assert.strictEqual(require('./lib/extras').pageName('  '), null);
+});
+
+// ---------------------------------------------------------------- a brand shop that Prisjagt lists under the brand's name
+
+test('brand shop: Prisjagt lists "Dreame" for a Dreame product: covered, not added (also "Dreame Official Store", "Dreame DK"); Roborock is not covered by an unrelated list; the old covered() rules stay', async () => {
+  const X = require('./lib/extras');
+  const rows = (...names) => names.map((n) => ({ store: n, url: 'https://prisjagt.dk/go-to-shop/1' }));
+  assert.strictEqual(X.brandListed(rows('Elgiganten', 'Dreame'), 'dreame'), true);
+  ['Dreame Official Store', 'Dreame Officiel', 'dreame.dk', 'DREAME DK', 'Dreame Danmark', 'Dreame Denmark', 'Dreame Shop', 'Dreame Butik', 'Dreame-Store'].forEach((n) => assert.strictEqual(X.brandListed(rows(n), 'dreame'), true, n));
+  ['Dreamer', 'Dreame Outlet', 'Dreameland', 'Elgiganten', 'Coolshop Dreame', 'Dream', ''].forEach((n) => assert.strictEqual(X.brandListed(rows(n), 'dreame'), false, n));
+  assert.strictEqual(X.brandListed(rows('Roborock Outlet', 'Proshop'), 'roborock'), false); assert.strictEqual(X.brandListed([], 'dreame'), false); assert.strictEqual(X.brandListed(null, 'dreame'), false); assert.strictEqual(X.brandListed(rows('Dreame'), ''), false); assert.strictEqual(X.brandListed(rows('Dr'), 'dr'), false, 'too short a brand');
+  assert.strictEqual(X.brandListed(rows('Bang & Olufsen'), ['x', 'bangolufsen']), true, 'a list of brands');
+  // the real Dreame sitemap fixture: the probe knows the brand (ALIAS) and sees "Dreame" among the Prisjagt offers
+  const DR = 'https://dk.dreametech.com';
+  const row = { brand: 'dreame', base: DR, sitemaps: [DR + '/sitemap.xml'], robots: [], status: 'ok', checked_at: '2026-11-10T10:00:00Z' };
+  const mkRun = () => BS.makeBrandRun({ fetch: bFetch({}), sleep: async () => {}, now: () => new Date('2026-11-16T10:00:00Z'), cache: { get: async (b) => (b === 'dreame' ? row : null), put: async () => {} }, read: async () => ({ skip: true }) });
+  const mkOffers = (...names) => names.map((n, i) => ({ store: n, price: 5000 + i, url: 'https://prisjagt.dk/go-to-shop/' + i + '/offer/' + i, inStock: true }));
+  let run = mkRun();
+  let r = await run.process({ title: 'Dreame X50 Ultra', source_url: DPJ, extra_urls: null, offers: mkOffers('Elgiganten', 'Dreame', 'Power') });
+  assert.strictEqual(r.result, 'covered'); assert.strictEqual(r.brand, 'dreame'); assert.strictEqual(run.requests, 0, 'nothing is requested for a covered shop');
+  r = await mkRun().process({ title: 'Dreame X50 Ultra', source_url: DPJ, extra_urls: null, offers: mkOffers('Elgiganten', 'Dreame Official Store') }); assert.strictEqual(r.result, 'covered');
+  // Prisjagt lists no Dreame shop (a similar name is another shop): the probe goes on (the shop's sitemap is not there in this test: no match)
+  r = await mkRun().process({ title: 'Dreame X50 Ultra', source_url: DPJ, extra_urls: null, offers: mkOffers('Elgiganten', 'Dreamer', 'Power') }); assert.notStrictEqual(r.result, 'covered'); assert(r.result === 'no match' || r.deferred, 'went on to the sitemap: ' + JSON.stringify(r));
+  // Roborock: Prisjagt lists no "Roborock" shop: still looked for, and (the full scenario above) added
+  const rrow = { brand: 'roborock', base: RB, sitemaps: [RB_SM], robots: [], status: 'ok', checked_at: '2026-11-10T10:00:00Z' };
+  const rrun = BS.makeBrandRun({ fetch: bFetch(rbSites()), sleep: async () => {}, now: () => new Date('2026-11-16T10:00:00Z'), cache: { get: async (b) => (b === 'roborock' ? rrow : null), put: async () => {} }, read: async () => ({ skip: true }) });
+  r = await rrun.process({ title: 'Roborock Saros 10R', source_url: DPJ, extra_urls: null, offers: dPjPage().rows.map((x) => ({ store: x.store, price: x.price, url: x.url, inStock: true })) });
+  assert.strictEqual(r.deferred, true, 'not covered: it went on to the sitemap'); assert(rrun.requests >= 1);
+});
+
+test('brand shop: a brand-shop link that was added before Prisjagt listed the brand is marked "dup" (only the Prisjagt row counts); a link of the person and a similar shop name are left alone', async () => {
+  const DRL = 'https://dk.dreametech.com/products/dreame-x50-ultra';
+  const withBrandStore = (name) => { const pg = saros(); pg.rows[0] = Object.assign({}, pg.rows[0], { store: name }); return pg; };
+  const run = async (origin, store, extraState) => {
+    const db = newDb(); db.products.push(pjProduct('B1', { extra_urls: [DRL], extra_state: extraState || (origin ? { [DRL]: { origin, seen: true, fails: 0, at: H10 } } : null) }));
+    await pjRun(db, withBrandStore(store), { [DRL]: dShopHtml('Dreame Denmark', 'Dreame X50 Ultra', 4050) }, H11);
+    return db.products[0];
+  };
+  let p = await run('brand', 'Dreame');
+  assert.strictEqual(p.extra_state[DRL].why, 'dup'); assert.strictEqual(p.extra_state[DRL].origin, 'brand', 'the origin is kept'); assert.strictEqual(p.extra_state[DRL].offer, undefined, 'no offer of its own');
+  assert.strictEqual(p.offers.filter((o) => o.url === DRL).length, 0, 'only the Prisjagt row counts'); assert(p.offers.some((o) => o.store === 'Dreame'));
+  p = await run('brand', 'Dreame Official Store'); assert.strictEqual(p.extra_state[DRL].why, 'dup');
+  p = await run('brand', 'Dreamer'); assert.strictEqual(p.extra_state[DRL].why, undefined); assert.strictEqual(p.offers.filter((o) => o.url === DRL).length, 1, 'a similar name is another shop: kept');
+  p = await run(null, 'Dreame'); assert.strictEqual(p.extra_state[DRL].why, undefined, 'a link the person or the agent added keeps its own rules (covered() did not match)'); assert.strictEqual(p.offers.filter((o) => o.url === DRL).length, 1);
+  p = await run('search', 'Dreame'); assert.strictEqual(p.extra_state[DRL].why, undefined, 'only the brand probe\'s links');
+  // the brand of the last probe counts too (a brand that is not in the list of known shops)
+  const db = newDb(), ZL = 'https://www.zulu.dk/p/1'; db.products.push(pjProduct('B2', { extra_urls: [ZL], extra_state: { [ZL]: { origin: 'brand' } }, discover_state: { at: H10, brand: { brand: 'zulu', shop: 'zulu.dk', result: 'added' } } }));
+  await pjRun(db, withBrandStore('Zulu Official'), { [ZL]: dShopHtml('Zulu Butikken', 'Zulu Z9', 4050) }, H11); assert.strictEqual(db.products[0].extra_state[ZL].why, 'dup');
+  // a brand shop whose offer is carried (the shop cannot be read now) is dropped the same way
+  const d3 = newDb(); d3.products.push(pjProduct('B3', { extra_urls: [DRL], extra_state: { [DRL]: { origin: 'brand', seen: true, fails: 0, at: H10, offer: { store: 'Dreame Denmark', price: 4050, inStock: true, note: null, at: H10 } } } }));
+  await pjRun(d3, withBrandStore('Dreame'), { [DRL]: () => resp(503, 'x') }, H11); assert.strictEqual(d3.products[0].extra_state[DRL].why, 'dup'); assert.strictEqual(d3.products[0].offers.filter((o) => o.url === DRL).length, 0);
 });
 
 (async () => {

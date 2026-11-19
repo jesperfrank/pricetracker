@@ -89,6 +89,7 @@ const FAKE = `
         }
         if (q.op === "update" && table === "products" && "bought_price" in q.payload && q.payload.bought_price !== null && !(q.payload.bought_price > 0 && q.payload.bought_price <= 10000000)) return resolve({ data: null, error: { code: "23514", message: "products_bought_price_check" } });
         if (q.op === "update" && table === "products" && "alt_requested_at" in q.payload && db.altError) return resolve({ data: null, error: clone(db.altError) });
+        if (q.op === "update" && table === "products" && "retry_requested_at" in q.payload && db.retryError) return resolve({ data: null, error: clone(db.retryError) });
         if (q.op === "update" && table === "products" && "extra_urls" in q.payload && db.xaddError) return resolve({ data: null, error: clone(db.xaddError) });
         if (q.op === "update") {
           rows.filter(match).forEach(function (r) {
@@ -114,6 +115,10 @@ const FAKE = `
               delete q.payload.extra_urls;
             }
             if ("bought_price" in q.payload && q.payload.bought_price !== null && !(q.payload.bought_price > 0 && q.payload.bought_price <= 10000000)) return;   // check constraint (see below)
+            if (table === "products" && "retry_requested_at" in q.payload) {   // products_guard: "Prøv igen" puts a failed name-only product back in the queue; the time is the server's
+              if (!r.source_url && r.status === "error") { r.status = "pending"; r.check_note = null; r.retry_requested_at = new Date().toISOString(); }
+              delete q.payload.retry_requested_at;
+            }
             if (table === "products" && "name_options" in r) {   // products_guard: the options are the agent's; a new link or (without a link) a new name clears them, and a new name queues the product again
               delete q.payload.name_options;
               if (newLink) r.name_options = null;
@@ -573,6 +578,42 @@ let base;
     await p.waitForFunction(() => window.__db.writes().length === 2);
     o = (await ops(p))[1];
     check("name-only error: pasted link writes source_url and the row goes pending", o.payload.source_url === "https://prisjagt.dk/product.php?p=77" && o.filters[0][1] === "n2" && (await p.locator('.item[data-status="pending"]').count()) === 2, JSON.stringify(o));
+    await p.context().close();
+  }
+
+  // 5a2. "Prøv igen" on a failed name-only product: own products only, the database decides and its short Danish answers are shown
+  {
+    const now = new Date().toISOString();
+    const base = { source_url: null, target_type: "auto", target_value: null, status: "error", created_at: now, tracked_variants: null, active: true, retry_requested_at: null };
+    const mine = Object.assign({}, base, { id: "r1", user_id: "u1", name: "Playstation 5 pro", check_note: "Kunne ikke finde produktet. Skriv det præcise navn." });
+    const foreign = Object.assign({}, base, { id: "r2", user_id: "u9", name: "Fars ting", check_note: "Fandt ikke produktet." });
+    const oldDb = Object.assign({}, base, { id: "r3", user_id: "u1", name: "Uden kolonne", check_note: "Fandt ikke produktet." }); delete oldDb.retry_requested_at;
+    const withLink = Object.assign({}, base, { id: "r4", user_id: "u1", name: "Med link", source_url: "https://shop.example.dk/a", check_note: "Siden kunne ikke hentes." });
+    const p = await open({ products: [mine, foreign, oldDb, withLink], label: "retry" });
+    await p.waitForSelector(".item");
+    for (const id of ["r1", "r2", "r3", "r4"]) await p.evaluate((i) => { var h = document.querySelector('.item [data-id="' + i + '"]'); if (h) h.click(); }, id);
+    const rows = await p.evaluate(() => Array.prototype.map.call(document.querySelectorAll(".item"), (e) => ({ n: e.querySelector("h2").textContent, b: !!e.querySelector('[data-act="retry"]'), f: !!e.querySelector("[data-fixurl]") })));
+    const by = (n) => rows.filter((x) => x.n === n)[0];
+    check("retry: 'Prøv igen' only for an own failed name-only product whose database has the column", by("Playstation 5 pro").b && !by("Fars ting").b && !by("Uden kolonne").b && !by("Med link").b, JSON.stringify(rows));
+    check("retry: it sits with the paste form", by("Playstation 5 pro").f);
+    await p.evaluate(() => { window.__db.retryError = { code: "23514", message: "Vent en time, før du prøver igen." }; });
+    await p.click('[data-act="retry"]');
+    await p.waitForFunction(() => /Vent en time/.test(document.querySelector('[data-rowmsg="r-r1"]').textContent));
+    check("retry: the database's short answer is shown, nothing changed on the row", (await ops(p)).length === 1 && (await p.locator('.item[data-status="error"]').count()) >= 1);
+    await p.evaluate(() => { window.__db.retryError = { code: "23514", message: "Du har prøvet tre gange i denne uge. Skriv varen om i stedet." }; });
+    await p.click('[data-act="retry"]');
+    await p.waitForFunction(() => /tre gange/.test(document.querySelector('[data-rowmsg="r-r1"]').textContent));
+    await p.evaluate(() => { window.__db.retryError = { message: "boom <script>" }; });
+    await p.click('[data-act="retry"]');
+    await p.waitForFunction(() => /Kunne ikke gemme lige nu/.test(document.querySelector('[data-rowmsg="r-r1"]').textContent));
+    check("retry: any other error gets the general message, no markup", (await p.locator(".item script").count()) === 0 && !/boom/.test(await p.textContent('[data-rowmsg="r-r1"]')));
+    await p.evaluate(() => { window.__db.retryError = null; });
+    await p.click('[data-act="retry"]');
+    await p.waitForFunction(() => window.__db.writes().length === 4);
+    const w = await ops(p), last = w[3];
+    check("retry: the write asks with retry_requested_at only, on this product", last.table === "products" && last.op === "update" && Object.keys(last.payload).join() === "retry_requested_at" && last.filters[0][1] === "r1", JSON.stringify(last));
+    await p.waitForFunction(() => /Finder produktet …/.test(document.querySelector('.item[data-status="pending"] .head').textContent));
+    check("retry: the row is waiting again ('Finder produktet …')", (await p.locator('.item[data-status="pending"]').count()) === 1);
     await p.context().close();
   }
 

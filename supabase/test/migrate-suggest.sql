@@ -46,10 +46,13 @@ select t.chk('migrated twice: the column, the helper, the function and one check
   and (select count(*) = 1 from pg_constraint where conrelid = 'public.products'::regclass and conname = 'products_name_options_check'));
 select t.chk('migrated twice: the old rows are intact and have no options',
   (select count(*) = 3 and bool_and(name_options is null) from public.products)
-  and (select status = 'error' and check_note = 'Produktet blev ikke fundet.' from public.products where name = 'noget uden hit')
+  and (select status = 'pending' and check_note is null from public.products where name = 'noget uden hit')     -- the one-time repair of failed name lookups (schema_marks)
   and (select count(*) = 1 from public.list_members));
-select t.chk('migrated twice: the agent sees only the waiting name-only row',
-  (select array_agg(name order by name) from public.resolver_list() where kind = 'name') = array['airfryer fra philips']);
+select t.chk('migrated twice: the agent sees the waiting name-only row and the failed one that the one-time repair put back',
+  (select array_agg(name order by name) from public.resolver_list() where kind = 'name') = array['airfryer fra philips', 'noget uden hit']);
+set role anon;
+select t.chk('migrated: the agent gives up on the repaired row again (the state the rest of this test starts from)', public.resolver_fail('00000000-0000-0000-0000-0000000000f3', 'Produktet blev ikke fundet.'));
+reset role;
 
 -- the agent suggests for the waiting product, the person (A, owner) and B (a member of the list) act on the migrated data
 set role anon;

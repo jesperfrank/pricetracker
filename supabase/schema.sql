@@ -405,6 +405,15 @@ begin
 end;
 $$;
 
+-- "Prøv igen" for a name-only product whose lookup failed (see products_guard and resolver_fail):
+--   lookup_failed_at     when the AI agent last gave up on the name (resolver_fail). null for failures from before this column existed.
+--   retry_requested_at   the person's request: any new value from the browser asks, the server clock is what is stored.
+--   retry_log            the times of the accepted requests, the last 7 days only (the guard prunes it): at most 3 in 7 days.
+-- All three are guard/agent-owned: the browser can only ask through retry_requested_at, and the answer is the guard's.
+alter table public.products add column if not exists lookup_failed_at timestamptz;
+alter table public.products add column if not exists retry_requested_at timestamptz;
+alter table public.products add column if not exists retry_log timestamptz[];
+
 alter table public.products drop constraint if exists products_name_options_check;
 alter table public.products add constraint products_name_options_check check (
   name_options is null or (source_url is null and public.name_options_error(name_options) is null));
@@ -440,6 +449,8 @@ declare
   new_link jsonb;
   new_host text;
   on_pj boolean;
+  asked_retry timestamptz;
+  recent timestamptz[];
 begin
   -- requirements: cleaned for every role before anything is compared (see the column): the text never makes a row fail
   new.requirements := nullif(btrim(left(btrim(regexp_replace(regexp_replace(new.requirements, '[\x01-\x1f\x7f-\x9f<>]+', ' ', 'g'), '[ \u00a0]{2,}', ' ', 'g'), E' \u00a0'), 120), E' \u00a0'), '');
@@ -456,6 +467,7 @@ begin
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
     new.compare_state := null; new.compare_at := null; new.shop_url := null; new.image_url := null; new.compare_tries := 0;
     new.extra_urls := null; new.extra_state := null; new.req_state := null; new.name_options := null; new.discover_state := null;
+    new.lookup_failed_at := null; new.retry_requested_at := null; new.retry_log := null;
     -- bought_at / bought_price are the person's own, but the time is the server's and the person is who is signed in
     new.bought_by := null;
     if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; end if;
@@ -607,6 +619,26 @@ begin
     new.bought_at := old.bought_at; new.bought_by := old.bought_by;
   end if;
 
+  -- "Prøv igen": a name-only product (no link) whose lookup failed (status 'error') goes back to the agent's queue as it is, when the last
+  -- failure is at least 1 hour old and fewer than 3 such requests were accepted in the last 7 days. The person's own product only gets this far.
+  -- The failure time, the log and the request time are never the browser's: only a changed retry_requested_at asks, the server clock is stored.
+  asked_retry := new.retry_requested_at;
+  new.lookup_failed_at := old.lookup_failed_at; new.retry_log := old.retry_log; new.retry_requested_at := old.retry_requested_at;
+  if asked_retry is not null and asked_retry is distinct from old.retry_requested_at then
+    if old.source_url is not null or new.source_url is not null or old.status <> 'error' then
+      raise exception 'Varen kan ikke prøves igen nu.' using errcode = 'check_violation';
+    end if;
+    if coalesce(old.lookup_failed_at, '-infinity') > now() - interval '1 hour' then
+      raise exception 'Vent en time, før du prøver igen.' using errcode = 'check_violation';
+    end if;
+    select coalesce(array_agg(x order by x), '{}') into recent from unnest(coalesce(old.retry_log, '{}')) x where x > now() - interval '7 days';
+    if cardinality(recent) >= 3 then
+      raise exception 'Du har prøvet tre gange i denne uge. Skriv varen om i stedet.' using errcode = 'check_violation';
+    end if;
+    new.retry_log := recent || now();
+    new.retry_requested_at := now();
+    new.status := 'pending'; new.check_note := null; new.name_options := null;
+  end if;
   -- A new name for a product that still has no link (the person's "Ingen af dem", or any rename): the lookup starts again. The product is
   -- waiting (status 'pending'), an earlier failure note is gone, and the options for the old words are dropped, so the agent's queue
   -- (resolver_list kind 'name') has it again.
@@ -1175,7 +1207,7 @@ begin
     raise exception 'resolver: invalid or missing token' using errcode = '42501';
   end if;
   update public.products
-     set status = 'error', check_note = nullif(left(btrim(coalesce(p_note, '')), 200), ''), name_options = null
+     set status = 'error', check_note = nullif(left(btrim(coalesce(p_note, '')), 200), ''), name_options = null, lookup_failed_at = now()
    where id = p_id and active and source_url is null and status = 'pending';
   get diagnostics n = row_count;
   return n = 1;
@@ -1359,19 +1391,46 @@ grant execute on function public.resolver_fail(uuid, text) to anon, authenticate
 grant execute on function public.resolver_suggest(uuid, jsonb) to anon, authenticated;
 grant execute on function public.resolver_compare(uuid, text, jsonb) to anon, authenticated;
 
+-- ---------------------------------------------------------------- one-time data fixes
+-- schema_marks: which one-time data fixes have been applied to this database. The schema file runs on every push, so a data fix must be
+-- guarded: it runs only when its name is not in the table yet, and writes the name in the same transaction. Service role only.
+create table if not exists public.schema_marks (
+  name       text primary key check (char_length(name) between 1 and 100),
+  applied_at timestamptz not null default now()
+);
+alter table public.schema_marks enable row level security;       -- and no policy: no access via the API
+revoke all on public.schema_marks from public, anon, authenticated;
+grant select, insert, update, delete on public.schema_marks to service_role;
+
+-- 'requeue-failed-name-lookups': name-only products that failed with the older, weaker lookup agent get another turn now that the agent can
+-- also answer with clickable suggestions. resolver_fail had set status 'error', a note and no options; this undoes exactly that (status
+-- 'pending', no note, no failure time), which is the state resolver_list's kind 'name' lists. The person's own fields are not touched. Once only.
+do $$
+begin
+  if not exists (select 1 from public.schema_marks where name = 'requeue-failed-name-lookups') then
+    update public.products
+       set status = 'pending', check_note = null, name_options = null, lookup_failed_at = null
+     where source_url is null and status = 'error';
+    insert into public.schema_marks (name) values ('requeue-failed-name-lookups');
+  end if;
+end $$;
+
 -- ---------------------------------------------------------------- owner diagnostics (for maintenance, not for the scheduled agents)
 -- diag_products(): the state of the ADMINISTRATORS' own products, so that the project lead can check the job's work (what it read, which shops
 -- it follows, what the search found) without asking the owner to look. Same token check, grants and error as resolver_list: without the
 -- token nothing is returned. Only products whose owner is an administrator (allowed_emails.is_admin), at most 100, newest first. No user ids, no
 -- e-mail addresses, nothing about anybody else's products. host = the shop's host name (no path, no query); cheapest = the 5 lowest offers
 -- [{store, price, stock, stale}] (stock = in stock, stale = the shop could not be read and this is its last known offer); shops = the extra
--- shops [{host, origin, why, price, seen}] from extra_urls and extra_state (origin: 'search', 'brand' or null = the agent's or the person's).
+-- shops [{host, url, name, at, origin, why, price, seen}] from extra_urls and extra_state (origin: 'search', 'brand' or null = the agent's or the person's;
+-- url = the full link; name = the page's own product name as the job read it last and at = when, so that a wrong match can be seen; both
+-- null for a link that was never read). source_url and shop_url are the product's links in full, offers_count the number of stored offers,
+-- in_list whether the product is on a list (no list names). The links are the owner's own and are only returned for administrators' products.
 drop function if exists public.diag_products();
 create or replace function public.diag_products()
 returns table (id uuid, name text, title text, active boolean, status text, check_note text, last_checked timestamptz, host text, target_type text,
                target_value numeric, lowest numeric, cheapest jsonb, shops jsonb, compare_state text, compare_tries integer, discover_state jsonb,
                requirements text, has_name_options boolean, verdict_level text, notified_price numeric, notified_at timestamptz, bought_at timestamptz,
-               created_at timestamptz)
+               created_at timestamptz, source_url text, shop_url text, offers_count integer, in_list boolean)
 language plpgsql
 stable
 security definer
@@ -1394,6 +1453,9 @@ begin
                      where jsonb_typeof(z.e) = 'object' and jsonb_typeof(z.e -> 'price') = 'number' and jsonb_typeof(z.e -> 'store') = 'string'
                      order by (z.e ->> 'price')::numeric, z.n limit 5) w),
            (select coalesce(jsonb_agg(jsonb_build_object('host', nullif(regexp_replace(substring(u.link from '^https://([^/?#]+)'), '^www\.', ''), ''),
+                                                           'url', u.link,
+                                                           'name', case when jsonb_typeof(p.extra_state) = 'object' and jsonb_typeof(p.extra_state -> u.link -> 'offer' -> 'name') = 'string' then left(p.extra_state -> u.link -> 'offer' ->> 'name', 120) end,
+                                                           'at', case when jsonb_typeof(p.extra_state) = 'object' and jsonb_typeof(p.extra_state -> u.link -> 'offer' -> 'at') = 'string' then p.extra_state -> u.link -> 'offer' ->> 'at' end,
                                                            'origin', case when jsonb_typeof(p.extra_state) = 'object' then p.extra_state -> u.link ->> 'origin' end,
                                                            'why', case when jsonb_typeof(p.extra_state) = 'object' then p.extra_state -> u.link ->> 'why' end,
                                                            'price', case when jsonb_typeof(p.extra_state) = 'object' and jsonb_typeof(p.extra_state -> u.link -> 'offer' -> 'price') = 'number'
@@ -1403,7 +1465,9 @@ begin
                      where jsonb_typeof(z.e) = 'string' limit 5) u),
            p.compare_state, p.compare_tries, p.discover_state, p.requirements, (p.name_options is not null),
            case when jsonb_typeof(p.verdict) = 'object' then p.verdict ->> 'level' end,
-           p.notified_price, p.notified_at, p.bought_at, p.created_at
+           p.notified_price, p.notified_at, p.bought_at, p.created_at,
+           p.source_url, p.shop_url,
+           case when jsonb_typeof(p.offers) = 'array' then jsonb_array_length(p.offers) else 0 end, (p.list_id is not null)
       from public.products p
       join auth.users au on au.id = p.user_id
       join public.allowed_emails a on a.email = lower(au.email) and a.is_admin

@@ -7,7 +7,8 @@
 //     seen  = the link has been read successfully and its offer was recorded once (so its price is not "new" any more)
 //     fails = attempts in a row that gave nothing (error, no price, not in kroner, a price far from the other shops)
 //     at    = the last attempt (rotation: the longest-untried link goes first when the run is capped)
-//     offer = the last offer that was READ from this shop: {store, price, inStock, note, at} (at = when it was read). Kept up to 24 hours
+//     offer = the last offer that was READ from this shop: {store, price, inStock, note, name, at} (at = when it was read; name = the page's own
+//             product name, decoded, at most 120 characters, so that a wrong match can be seen in diag_products; absent when the page gave none). Kept up to 24 hours
 //             when the shop cannot be read for a transient reason (refused, timeout, network, 5xx), so the lowest price and the hit do not
 //             flicker. The main shop of a product with extras is kept the same way, under its own link (products.source_url as fetched).
 //             Dropped at once when the page is read and shows no price / another product / is gone (that is real information).
@@ -27,6 +28,7 @@ const MIN_OTHERS = 2;
 const STALE_MS = 24 * 3600 * 1000;    // a shop that cannot be read keeps its last offer this long
 const STALE_NOTE_MS = 6 * 3600 * 1000; // an offer older than this is marked "pris fra i går" / "pris fra tidligere i dag" in the offers list
 const STALE_NOTES = ['pris fra i går', 'pris fra tidligere i dag'];
+const NAME_MAX = 120;                  // the page's product name kept per link (extra_state[url].offer.name)
 
 const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
@@ -100,6 +102,20 @@ function covered(rows, extra) {
   });
 }
 
+// Does Prisjagt list the manufacturer's own shop under the brand's name? True when one of the offers has a store whose normalised name (as in
+// covered()) equals the brand ("Dreame" for brand dreame) or is the brand followed by a word that only says "shop" ("Dreame Official Store",
+// "Roborock Danmark", "Dreame DK"). Never "contains": "Dreamer" or "Roborock Outlet" are other shops. brand = the squashed brand words
+// (brandshop.js: the ALIAS key or the brand candidate that won). rows = the offers of the product's tracked variants.
+const SHOP_WORDS = /^(?:official|officiel|store|shop|butik|danmark|denmark|dk)+$/;
+function brandListed(rows, brand) {
+  const bs = (Array.isArray(brand) ? brand : [brand]).map((x) => PRICING.normShop(x)).filter((b) => b.length >= 3);
+  if (!bs.length) return false;
+  return (rows || []).some((r) => {
+    const n = PRICING.normShop(r && r.store);
+    return !!n && bs.some((b) => n === b || (n.indexOf(b) === 0 && SHOP_WORDS.test(n.slice(b.length))));
+  });
+}
+
 // The fetches of this run: candidates [{key, at, n}] (at = time of the last attempt, 0 = never), the longest-untried first, at most max.
 function pick(cands, max) {
   return cands.slice().sort((a, b) => (a.at - b.at) || (a.n - b.n)).slice(0, max === undefined ? MAX_FETCHES : max).map((c) => c.key);
@@ -115,13 +131,19 @@ const strip = (note) => {
   return n || null;
 };
 
+// The page's own product name for extra_state: squeezed (already decoded by the page parser), at most 120 characters, or null.
+function pageName(s) {
+  const n = typeof s === 'string' ? s.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, NAME_MAX).trim() : '';
+  return n || null;
+}
+
 // The last known offer of one link (the main shop's link or an extra link): {store, price, inStock, note, at (ms)} or null when there is none
 // or it was read more than 24 hours ago. From extra_state[url].offer; for a row from before this existed, from products.offers (readAt of
 // the entry, else the time of the last check).
 function lastOffer(prod, st, url, now) {
   let o = null, at = NaN;
   const so = st && st.offer;
-  if (so && typeof so === 'object' && typeof so.price === 'number' && so.price > 0) { o = { store: so.store, price: so.price, inStock: so.inStock !== false, note: strip(so.note) }; at = Date.parse(so.at); }
+  if (so && typeof so === 'object' && typeof so.price === 'number' && so.price > 0) { o = { store: so.store, price: so.price, inStock: so.inStock !== false, note: strip(so.note), name: pageName(so.name) }; at = Date.parse(so.at); }
   else {
     const f = (Array.isArray(prod && prod.offers) ? prod.offers : []).find((x) => x && x.url === url && typeof x.price === 'number' && x.price > 0);
     if (f) { o = { store: f.store, price: f.price, inStock: f.inStock !== false, note: strip(f.note) }; at = Date.parse(f.readAt || prod.last_checked); }
@@ -137,4 +159,4 @@ function staleNote(readAtMs, now, copenhagenDate) {
   return copenhagenDate(new Date(readAtMs)) === copenhagenDate(now) ? STALE_NOTES[1] : STALE_NOTES[0];
 }
 
-module.exports = { STALE_MS, STALE_NOTE_MS, transient, lastOffer, staleNote, strip, MAX_FETCHES, FAIL_STREAK, covered, SLOW_MS, LOW_RATIO, HIGH_RATIO, links, stateOf, isNew, slow, median, isOutlier, pick, hostOf };
+module.exports = { pageName, STALE_MS, STALE_NOTE_MS, transient, lastOffer, staleNote, strip, MAX_FETCHES, FAIL_STREAK, covered, brandListed, SLOW_MS, LOW_RATIO, HIGH_RATIO, links, stateOf, isNew, slow, median, isOutlier, pick, hostOf };

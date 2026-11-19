@@ -8,6 +8,7 @@
 // The rest of this file is pure functions (tested without a network) and the search client with an injected fetch and sleep.
 
 const SHOP = require('./shop');
+const { decodeEntities } = require('./text');
 const X = require('./extras');
 
 // ---------------------------------------------------------------- the API (Brave Search, web search): the one place to correct
@@ -38,9 +39,7 @@ const MAX_PAGES_PER_RUN = 24;          // pages read for the check per run (4 pr
 
 function cleanResultText(s, max) {
   return String(s == null ? '' : s).replace(/<[^>]*>/g, ' ')
-    .replace(/&#x([0-9a-f]+);/gi, (m, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch (e) { return ' '; } })
-    .replace(/&#(\d+);/g, (m, d) => { try { return String.fromCodePoint(parseInt(d, 10)); } catch (e) { return ' '; } })
-    .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+    .replace(/&[#A-Za-z0-9]+;/g, (m) => decodeEntities(m))
     .replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max || 300);
 }
 

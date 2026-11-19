@@ -10,6 +10,7 @@
 // JavaScript has run are not seen: this is a plain HTTP client, no headless browser.
 
 const { UA, PageError, cleanImageUrl, metaImage } = require('./prisjagt');
+const { decodeEntities, cleanText, squeeze } = require('./text');
 
 const TIMEOUT_MS = 30000;
 const MAX_HTML = 4000000;
@@ -18,16 +19,7 @@ const SHOP_ID = 'shop';
 
 // ---------------------------------------------------------------- small helpers
 
-function decodeEntities(s) {
-  return String(s == null ? '' : s)
-    .replace(/&#x([0-9a-f]+);/gi, (m, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch (e) { return ' '; } })
-    .replace(/&#(\d+);/g, (m, d) => { try { return String.fromCodePoint(parseInt(d, 10)); } catch (e) { return ' '; } })
-    .replace(/&nbsp;/gi, ' ').replace(/&quot;/gi, '"').replace(/&apos;/gi, "'").replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&amp;/gi, '&');
-}
-
-function cleanText(s, max) {
-  return decodeEntities(s).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max || 200);
-}
+// decodeEntities / cleanText: the shared decoder for text out of pages (lib/text.js)
 
 // "579,00" "1.299,00" "1299.00" "1,299.00" "579" "kr. 579,-" 579 -> number, or null. Never throws.
 // A single separator followed by exactly three digits is a thousands separator ("1.299", "1,299"); otherwise it is the decimal mark.
@@ -141,7 +133,7 @@ function canonicalUrl(html, base) {
 
 function pageTitle(html, metas) {
   const og = metaFirst(metas, ['og:title']);
-  if (og && cleanText(og, 200)) return cleanText(og, 200);
+  if (og && squeeze(og, 200)) return squeeze(og, 200);                     // meta content: decoded by parseAttrs already
   const t = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(html);
   if (t && cleanText(t[1], 200)) return cleanText(t[1], 200);
   return null;
@@ -320,8 +312,8 @@ function fromMicrodata(html) {
     const name = String(a.itemprop || a.property || '').toLowerCase().replace(/^(schema|s|product|og):/, '');
     if (!/^(price|pricecurrency|availability|name)$/.test(name)) continue;
     let val = a.content !== undefined ? a.content : a.value !== undefined ? a.value : (m[1].toLowerCase() === 'link' || m[1].toLowerCase() === 'a') && a.href ? a.href : null;
-    if (val === null) { const t = /^([^<]*)/.exec(html.slice(m.index + m[0].length)); val = t ? t[1] : ''; }
-    props.push({ name, val: decodeEntities(val).trim(), pos: m.index });
+    if (val === null) { const t = /^([^<]*)/.exec(html.slice(m.index + m[0].length)); val = decodeEntities(t ? t[1] : ''); }   // attribute values are decoded by parseAttrs already
+    props.push({ name, val: val.trim(), pos: m.index });
   }
   const prices = props.filter((p) => p.name === 'price' && parseNumber(p.val) !== null);
   if (!prices.length) return null;
@@ -333,7 +325,7 @@ function fromMicrodata(html) {
   };
   const cur = nearest('pricecurrency');
   const nm = props.filter((p) => p.name === 'name' && p.val && p.pos < first.pos).pop() || props.find((p) => p.name === 'name' && p.val);
-  return { price: parseNumber(first.val), currency: cur ? cur.toUpperCase() : null, inStock: stockFrom(nearest('availability')), note: null, title: nm ? cleanText(nm.val, 200) : null, source: 'microdata' };
+  return { price: parseNumber(first.val), currency: cur ? cur.toUpperCase() : null, inStock: stockFrom(nearest('availability')), note: null, title: nm ? squeeze(nm.val, 200) : null, source: 'microdata' };
 }
 
 // ---------------------------------------------------------------- 3. Open Graph / product meta tags
@@ -351,7 +343,7 @@ function fromMeta(metas) {
 
 function shopNameFor(host, metas) {
   const og = metaFirst(metas, ['og:site_name']);
-  if (og && cleanText(og, 60)) return cleanText(og, 60);
+  if (og && squeeze(og, 60)) return squeeze(og, 60);                       // decoded by parseAttrs already
   const n = registrable(String(host || '').replace(/^www\./i, '')).name;
   return n ? n.charAt(0).toUpperCase() + n.slice(1) : 'Butikken';
 }
@@ -370,7 +362,7 @@ function parseShopPage(html, pageUrl) {
   const title = found.title || pageTitle(html, metas);
   const store = shopNameFor(host, metas);
   const row = { key: pageUrl, variant: SHOP_ID, store, price: found.price, url: pageUrl, inStock: found.inStock, stock: found.inStock ? 'InStock' : 'OutOfStock', note: null, name: title || store, saleKnown: false, sale: false };
-  const variants = [{ id: SHOP_ID, label: store, lowest: found.inStock ? found.price : null, offers: 1, sample: title ? cleanText(title, 100) : null }];
+  const variants = [{ id: SHOP_ID, label: store, lowest: found.inStock ? found.price : null, offers: 1, sample: title ? squeeze(title, 100) : null }];
   // the picture: the product's own in the JSON-LD, else the page's og:image (never fetched, only the address is kept)
   const image = found.image || metaImage(html, pageUrl);
   return { title, rows: [row], variants, history: [], note: found.note || null, shop: true, source: found.source, image };
