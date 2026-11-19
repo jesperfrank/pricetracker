@@ -904,7 +904,12 @@ async function run(ctx) {
     catch (e) { brandOn = false; d.brandTable = false; log('Producentbutikker springes over: tabellen brand_shops kan ikke læses (' + safe(e, 100) + ').'); }
     if (!braveOn && !brandOn) return;
     const resultOf2 = new Map(results.map((r) => [r.prod.id, r]));
-    const list = DS.order(products.map((p) => { const r = resultOf2.get(p.id); return r ? Object.assign({}, p, r.patch) : p; }), now, { brave: braveOn }).slice(0, DS.MAX_PRODUCTS_PER_RUN);
+    // Every due product is a candidate; the run stops after MAX_PRODUCTS_PER_RUN that were really processed (see the loop). A product whose
+    // brand lookup is deferred (this run's budget for new brands or requests is used up) does not take one of those places. Products of a brand
+    // with a known shop (BS.ALIAS) go first: they cost few requests and are the likeliest to find a cheaper price.
+    const knownBrand = (p) => (brandOn && BS.brandCandidates((typeof p.title === 'string' && p.title.trim()) ? p.title : p.name).some((c) => BS.ALIAS[c.brand])) ? 0 : 1;
+    const list = DS.order(products.map((p) => { const r = resultOf2.get(p.id); return r ? Object.assign({}, p, r.patch) : p; }), now, { brave: braveOn })
+      .map((p, i) => ({ p, i, k: knownBrand(p) })).sort((a, b) => (a.k - b.k) || (a.i - b.i)).map((x) => x.p);
     if (!list.length) return;
     const searcher = braveOn ? DS.makeSearcher({ key, fetch: ctx.braveFetch || fetchImpl, sleep: ctx.braveSleep || sleep }) : null;
     let pagesLeft = DS.MAX_PAGES_PER_RUN;
@@ -942,6 +947,7 @@ async function run(ctx) {
       return { extra_urls: (Array.isArray(cur.extra_urls) ? cur.extra_urls : []).filter((u) => !gone.has(u)).concat(change.add.map((a) => a.url)), extra_state: DS.nextState(cur, change) };
     };
     for (const p of list) {
+      if (d.products >= DS.MAX_PRODUCTS_PER_RUN) break;
       if (Date.now() - started > DEADLINE_MS - 90000) { stats.deadline = true; break; }
       // 1. the manufacturer's shop (no key): a result, or deferred when this run's budget is used up (the product stays due and goes first next time)
       let bres = null;

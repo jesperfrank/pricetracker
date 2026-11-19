@@ -291,7 +291,7 @@ function makeBrandRun(opts) {
       const p = parseRobots(r.text);
       out = disallowsAll(p.rules) ? { refused: true, why: 'robots' } : { rules: p.rules, sitemaps: p.sitemaps };
     } else if (r.status === 404 || r.status === 410) out = { rules: [], sitemaps: [] };
-    else out = { error: true, transient: r.status >= 500 };
+    else out = { error: true, transient: r.status >= 500, net: r.status === 0 };
     robotsMem.set(origin, out);
     return out;
   }
@@ -304,7 +304,7 @@ function makeBrandRun(opts) {
     if (r.refused) out = { refused: true };
     else if (r.tooBig) out = { tooBig: true };
     else if (r.status === 200 && r.text !== undefined) { const p = parseSitemap(r.text); out = p.kind && p.locs.length ? { usable: true, kind: p.kind, locs: p.locs } : { notSitemap: true }; }
-    else out = { error: true, transient: r.status >= 500 };
+    else out = { error: true, transient: r.status >= 500, net: r.status === 0 };
     memo.set(url, out);
     return out;
   }
@@ -332,15 +332,21 @@ function makeBrandRun(opts) {
     for (const base of bases) {
       if (!SHOP.validateShopUrl(base)) continue;
       const bp = baseParts(base);
+      // A shop from ALIAS is known to exist. When it gives no answer at all (network error, timeout) or a server error, that says nothing about
+      // the shop: nothing is remembered and the product stays due, so the next run asks again. Without this, one network hiccup would be
+      // remembered as "no shop" for 30 days.
+      const known = !onlyBases && ALIAS[brand] === base;
       const rb = await getRobots(bp.origin);
       if (rb.deferred) return { deferred: true };
       if (rb.refused) { refused = true; break; }
+      if (rb.error && known && (rb.net || rb.transient)) { if (opts.log) opts.log('  Producentbutik: en kendt butik svarede ikke; prøver igen i næste kørsel.'); return { deferred: true }; }
       if (rb.error) { if (rb.transient) transient = true; continue; }
       for (const sm of sitemapCandidates(bp, rb)) {
         if (!robotsAllows(rb.rules, new URL(sm).pathname)) continue;
         const d = await getSitemap(sm);
         if (d.deferred) return { deferred: true };
         if (d.refused) { refused = true; break outer; }
+        if (d.error && known && (d.net || d.transient)) { if (opts.log) opts.log('  Producentbutik: en kendt butik svarede ikke; prøver igen i næste kørsel.'); return { deferred: true }; }
         if (d.error && d.transient) transient = true;
         // a base with a locale must have its locale in the sitemap (its address or a <loc>): a global sitemap of a shop that has no Danish site
         // does not make the shop a Danish one

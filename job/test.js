@@ -3533,7 +3533,7 @@ function dRun(db, o) {
   const shops = o.shops || dShops();
   const ctx = ctxFor(db, {}, Object.assign({
     braveFetch: (o.brave || dBrave(dResults())).fn, braveSleep: async (ms) => { if (o.sleeps) o.sleeps.push(ms); },
-    brandFetch: o.brandFetch || (async () => { throw new Error('fetch failed'); }),      // by default no brand shop can be reached (the brand probe finds nothing)
+    brandFetch: o.brandFetch || (async () => bRes(404, 'nej')),      // by default no brand has a shop: every address answers 404 (the brand probe finds nothing)
     getPage: async (url) => {
       ctx.fetched.push(url);
       if (url === DPJ) return clone(dPjPage());
@@ -3899,6 +3899,23 @@ test('brand shop: added even when not cheaper and even when sold out (campaigns 
   assert.strictEqual(db2.products[0].extra_urls, null); assert.strictEqual(db2.products[0].discover_state.brand.result, 'not same product'); assert.deepStrictEqual(res.ctx.fetched, [DPJ, RB_ACC, RB + '/products/saros-10r-tilbehorsgaveaeske-2-pak-bundle-til-kampagnepris']);
 });
 
+test('brand shop: a KNOWN shop that does not answer (network error, timeout, 5xx) is not remembered as "no shop": nothing is cached, the product stays due and the next run finds it', async () => {
+  const cases = [['robots network', { [RB + '/robots.txt']: new Error('getaddrinfo EAI_AGAIN') }], ['robots 503', { [RB + '/robots.txt']: { status: 503, body: '' } }],
+    ['sitemap network', { [RB_SM]: new Error('socket hang up') }], ['sitemap 502', { [RB_SM]: { status: 502, body: '' } }]];
+  for (const [name, over] of cases) {
+    const db = dDb(); db.products.push(dProduct('N1ABCDEF12'));
+    const res = await dRun(db, { key: null, brandFetch: bFetch(rbSites(over)), shops: rbShops() });
+    assert.deepStrictEqual(db.brand_shops, [], name + ': nothing is cached');
+    assert.strictEqual(db.products[0].discover_state, null, name + ': the product is not marked as searched');
+    assert.strictEqual(db.products[0].extra_urls, null, name);
+    assert(!res.ctx.fetched.some((u) => u.indexOf('roborock.com') !== -1), name + ': no page of the shop is read');
+    // one hour later the shop answers: found and added
+    await dRun(db, { key: null, brandFetch: bFetch(rbSites()), shops: rbShops(), now: hoursLater(1) });
+    assert.deepStrictEqual(db.products[0].extra_urls, [RB_PAGE], name + ': found on the next run');
+    assert.deepStrictEqual(db.brand_shops.map((r) => [r.brand, r.status]), [['roborock', 'ok']], name);
+  }
+});
+
 test('brand shop: a brand that refuses (403, a robots.txt that disallows everything, a challenge page) is cached as not available and not asked again within 30 days', async () => {
   const cases = [['robots 403', { [RB + '/robots.txt']: { status: 403, body: 'nej' } }], ['sitemap 403', { [RB_SM]: { status: 403, body: 'Forbidden' } }], ['429', { [RB + '/robots.txt']: { status: 429, body: '' } }],
     ['disallow all', { [RB + '/robots.txt']: { body: 'User-agent: *\nDisallow: /\n' } }], ['challenge', { [RB_SM]: { body: '<html><head><title>Just a moment...</title></head><body>cf-chl</body></html>' } }]];
@@ -4117,7 +4134,9 @@ test('brand shop: nothing is looked up twice for a shop that is followed or is t
   // every request fails: no shop, the run goes on
   const db = dDb(); db.products.push(dProduct('E1ABCDEF12'), dProduct('E2ABCDEF12', { title: 'Zulu Z9 lampe' })); const logs = [];
   const res = await dRun(db, { key: null, brandFetch: async () => { throw new TypeError('boom'); }, logs });
-  assert.strictEqual(res.stats.written, 2, 'the price checks are done'); assert(db.products.every((p) => p.discover_state && p.discover_state.brand.result === 'no shop'));
+  assert.strictEqual(res.stats.written, 2, 'the price checks are done');
+  // Zulu is an unknown brand: no address answers, so "no shop". Roborock's shop is a known one: no answer says nothing, the product stays due (not marked)
+  assert.strictEqual(db.products[1].discover_state.brand.result, 'no shop'); assert.strictEqual(db.products[0].discover_state, null);
   // a cache that cannot be written: the result is used all the same, one line in the log
   const db2 = dDb(); db2.brandFail = true; db2.products.push(dProduct('E3ABCDEF12')); const l2 = [];
   await dRun(db2, { key: null, brandFetch: bFetch(rbSites()), shops: rbShops(), logs: l2 });
