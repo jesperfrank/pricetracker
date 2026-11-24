@@ -692,8 +692,8 @@ security definer
 set search_path = public
 as $$
 begin
-  if (select count(*) from public.products where user_id = new.user_id) >= 40 then
-    raise exception 'Du kan højst følge 40 produkter. Slet et produkt først.' using errcode = 'check_violation';
+  if (select count(*) from public.products where user_id = new.user_id) >= 100 then
+    raise exception 'Du kan højst følge 100 produkter. Slet et produkt først.' using errcode = 'check_violation';
   end if;
   return new;
 end;
@@ -1452,6 +1452,28 @@ begin
                       and j.status = 'error' and j.note = i.note
                     order by j.created_at desc nulls last, j.id desc limit 1);
     insert into public.schema_marks (name) values ('requeue-imports-not-saved');
+  end if;
+end $$;
+
+-- One time: the cap went from 40 to 100 products per person. A wish list that only partly fitted under the old cap is read again at
+-- the next run (synced_at null), so the wishes that were left out come in without waiting a day. An import that was refused
+-- because the person was at 40 gets another turn, unless the same wish list is already followed into the same list (then the
+-- followed one brings the wishes) - and only the newest attempt, so a list is not followed twice.
+do $$
+begin
+  if not exists (select 1 from public.schema_marks where name = 'cap-100-reread-imports') then
+    update public.imports set synced_at = null
+     where status = 'done' and note like 'Der var kun plads til %';
+    update public.imports i
+       set status = 'pending', note = null, found = null, added = null, done_at = null
+     where i.status = 'error' and i.note = 'Du følger allerede 40 varer, så der er ikke plads til flere. Fjern nogle varer først.'
+       and not exists (select 1 from public.imports d
+                        where d.user_id = i.user_id and d.url = i.url and d.list_id is not distinct from i.list_id and d.status = 'done')
+       and i.id = (select j.id from public.imports j
+                    where j.user_id = i.user_id and j.url = i.url and j.list_id is not distinct from i.list_id
+                      and j.status = 'error' and j.note = i.note
+                    order by j.created_at desc nulls last, j.id desc limit 1);
+    insert into public.schema_marks (name) values ('cap-100-reread-imports');
   end if;
 end $$;
 

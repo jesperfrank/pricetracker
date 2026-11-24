@@ -1237,7 +1237,7 @@ set role authenticated; select t.asC();
 select t.chk('delete list: C keeps own product, sees nothing else', (select count(*) = 2 and bool_and(user_id = '00000000-0000-0000-0000-0000000000c5') from public.products));
 reset role;
 
--- --- the cap: 10 members per list, 40 products per adding person
+-- --- the cap: 10 members per list, 100 products per adding person
 insert into public.lists (id, user_id, name) values ('00000000-0000-0000-0000-00000000aa03', '00000000-0000-0000-0000-0000000000a1', 'Stor');
 insert into auth.users (id, email) select ('00000000-0000-0000-0000-000000000' || lpad(g::text, 3, '0'))::uuid, 'medlem' || g || '@familie.dk' from generate_series(101, 111) g;
 insert into public.allowed_emails (email) select 'medlem' || g || '@familie.dk' from generate_series(101, 111) g;
@@ -1254,11 +1254,11 @@ select t.chk('cap: only allowed people can be members (checked for every role)',
   and t.try($$insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa03', gen_random_uuid())$$) in ('fk', 'check'));
 delete from public.list_members where user_id = '00000000-0000-0000-0000-000000000110';
 select t.chk('cap: ... the eleventh fits now', t.try($$insert into public.list_members (list_id, user_id) values ('00000000-0000-0000-0000-00000000aa03', '00000000-0000-0000-0000-000000000111')$$) = 'ok');
--- 40 products per adding person: member products count for the member, not for the owner
-insert into public.products (user_id, name, target_type, list_id) select '00000000-0000-0000-0000-000000000101', 'm' || g, 'auto', '00000000-0000-0000-0000-00000000aa03' from generate_series(1, 40) g;
+-- 100 products per adding person: member products count for the member, not for the owner
+insert into public.products (user_id, name, target_type, list_id) select '00000000-0000-0000-0000-000000000101', 'm' || g, 'auto', '00000000-0000-0000-0000-00000000aa03' from generate_series(1, 100) g;
 set role authenticated;
 select set_config('request.jwt.claims', '{"email":"medlem101@familie.dk","sub":"00000000-0000-0000-0000-000000000101"}', false);
-select t.chk('cap: the 41st product of a member is refused, even in the shared list', t.putnew('m41', '00000000-0000-0000-0000-00000000aa03') = 'check');
+select t.chk('cap: the 101st product of a member is refused, even in the shared list', t.putnew('m101', '00000000-0000-0000-0000-00000000aa03') = 'check');
 select t.asA();
 select t.chk('cap: the owner''s own count is separate (A can still add to the shared list)', t.putnew('a-ny', '00000000-0000-0000-0000-00000000aa03') = 'ok');
 reset role;
@@ -3507,7 +3507,7 @@ select t.chk('diag: in_list is true for a product on a list, and no list name or
   (select in_list from public.diag_products() where name = 'diag-mor') and (select not in_list from public.diag_products() where name = 'diag-mor-ny')
   and (select count(*) = 0 from public.diag_products() d where d::text like '%hemmelig-liste%' or d::text like '%d6a1%') and (select offers_count = 0 and source_url = 'https://shop.example.dk/a/b/c?q=1' from public.diag_products() where name = 'diag-mor-ny'));
 reset role;
-set session_replication_role = replica;      -- the cap of 40 products per person is a trigger: left out for this bulk insert only
+set session_replication_role = replica;      -- the cap of 100 products per person is a trigger: left out for this bulk insert only
 insert into public.products (user_id, name, target_type, target_value, created_at)
   select '00000000-0000-0000-0000-0000000000a1', 'diag-bulk-' || g, 'price', 10, '2026-11-18'::timestamptz + g * interval '1 minute' from generate_series(1, 120) g;
 set session_replication_role = origin;

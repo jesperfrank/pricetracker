@@ -575,7 +575,7 @@ function makeFake(db) {
           if (mm[1] === 'products') {
             assert.strictEqual(h.Prefer, 'return=minimal');
             const mine = t.filter((x) => x.user_id === r.user_id).length;
-            if (mine >= 40) return reply(400, { code: '23514', message: 'Du kan højst følge 40 produkter. Slet et produkt først.' });
+            if (mine >= 100) return reply(400, { code: '23514', message: 'Du kan højst følge 100 produkter. Slet et produkt først.' });
             if (db.noCompareColumn && 'compare_state' in r) return reply(400, { code: 'PGRST204', message: "Could not find the 'compare_state' column of 'products' in the schema cache" });   // the database has not got the column yet
             if (typeof r.name !== 'string' || r.name.trim() === '' || Array.from(r.name).length > 140) return reply(400, { code: '23514', message: 'name check' });
             if (r.source_url != null && !(r.source_url.length <= 500 && /^https:\/\/[^/?#@:\s]+\.[^/?#@:\s]+([/?#][^\s]*)?$/.test(r.source_url))) return reply(400, { code: '23514', message: 'source_url check' });
@@ -1438,12 +1438,13 @@ test('onskeskyen: pagination by nextCursor (page size 30), the endpoint from the
   await runImp(db);
   assert.deepStrictEqual(web.posts().map((c) => [c.url, JSON.parse(c.body).variables.input.cursor]), [['https://api.gowish.com/graphql', 0], [HASH_URL, 0], [HASH_URL, 30]]);
   assert.strictEqual(db.imports[0].found, 35); assert.strictEqual(db.imports[0].added, 35); assert.strictEqual(mine(db).length, 35);
-  // 70 wishes: only the first 60 are read (two pages), the rest is said in the note; the cap of 40 products then applies
+  // 70 wishes: only the first 60 are read (two pages), the rest is said in the note; the cap of 100 products then applies (60 are followed already)
   web = onskeWeb({ lists: { [LIST_ID]: { title: 'Mange', accessLevel: 'Public', wishes: many(70) } } }); db = importsDb(web); impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID);
+  for (let i = 0; i < 60; i++) db.products.push(product('k' + i, 'u1', 'dyson'));
   await runImp(db);
   assert.deepStrictEqual(web.posts().map((c) => JSON.parse(c.body).variables.input.cursor), [0, 0, 30], 'no third page');
   assert.strictEqual(db.imports[0].found, 60); assert.strictEqual(db.imports[0].added, 40);
-  assert(/^Der var kun plads til 40 af 60 ønsker\. Du kan højst følge 40 varer\. Kun de første 60 ønsker blev hentet\./.test(db.imports[0].note), db.imports[0].note);
+  assert(/^Der var kun plads til 40 af 60 ønsker\. Du kan højst følge 100 varer\. Kun de første 60 ønsker blev hentet\./.test(db.imports[0].note), db.imports[0].note);
   // a server that keeps answering the same cursor does not loop
   web = onskeWeb({ lists: { [LIST_ID]: { title: 'X', accessLevel: 'Public', wishes: many(3) } } });
   const orig = web; const looping = async (url, init) => { const r = await orig(url, init); return r.status === 200 && init.method === 'POST' ? jsonResp(200, JSON.parse(await r.text(), (k, v) => (k === 'nextCursor' ? 0 : v))) : r; };
@@ -1471,21 +1472,21 @@ test('onskeskyen: wishes already followed, or listed twice, are skipped (links c
   assert.strictEqual(mine(db).length, 3 + 10);
 });
 
-test('onskeskyen: at most 40 products per person; the note says how many fitted', async () => {
+test('onskeskyen: at most 100 products per person; the note says how many fitted', async () => {
   const web = onskeWeb(), db = importsDb(web); impRow(db, SHARE);
-  for (let i = 0; i < 33; i++) db.products.push(product('m' + i, 'u1', 'dyson', { source_url: i % 3 ? 'https://shop.dk/x' + i : null, active: i % 5 !== 0 }));   // name-only and inactive ones count too
-  for (let i = 0; i < 40; i++) db.products.push(product('o' + i, 'u2', 'dyson'));          // another person at the cap does not matter
+  for (let i = 0; i < 93; i++) db.products.push(product('m' + i, 'u1', 'dyson', { source_url: i % 3 ? 'https://shop.dk/x' + i : null, active: i % 5 !== 0 }));   // name-only and inactive ones count too
+  for (let i = 0; i < 100; i++) db.products.push(product('o' + i, 'u2', 'dyson'));         // another person at the cap does not matter
   await runImp(db);
   assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(db.imports[0].found, 12); assert.strictEqual(db.imports[0].added, 7);
-  assert(db.imports[0].note.indexOf('Der var kun plads til 7 af 12 ønsker. Du kan højst følge 40 varer.') === 0, db.imports[0].note);
-  assert.strictEqual(mine(db).length, 40); assert.strictEqual(db.inserted.filter((x) => x.table === 'products').length, 7);
+  assert(db.imports[0].note.indexOf('Der var kun plads til 7 af 12 ønsker. Du kan højst følge 100 varer.') === 0, db.imports[0].note);
+  assert.strictEqual(mine(db).length, 100); assert.strictEqual(db.inserted.filter((x) => x.table === 'products').length, 7);
   assert.strictEqual(db.inserted.filter((x) => x.table === 'products')[0].row.name, WISHES[0].title, 'the first wishes are the ones added');
   // one request for all rows
   // at the cap: an error, nothing added
   const other = { 'ZZZ': { title: 'En anden', accessLevel: 'Public', wishes: [{ id: 'z', title: 'Noget andet', url: 'https://nyt.dk/a' }] } };
   const web2 = onskeWeb({ lists: other }); db.web = web2; impRow(db, 'https://onskeskyen.dk/wishlists/ZZZ');
   await runImp(db);
-  assert.strictEqual(db.imports[1].status, 'error'); assert.strictEqual(db.imports[1].note, ONSKE.NOTE.full); assert.strictEqual(db.imports[1].added, 0); assert.strictEqual(mine(db).length, 40);
+  assert.strictEqual(db.imports[1].status, 'error'); assert.strictEqual(db.imports[1].note, ONSKE.NOTE.full); assert.strictEqual(db.imports[1].added, 0); assert.strictEqual(mine(db).length, 100);
 });
 
 test('onskeskyen: the rows are inserted in one request, as a browser would have added them', async () => {
@@ -2006,13 +2007,13 @@ test('sync: a site that does not answer counts as a failed day too, with its own
   assert.strictEqual((await runImp(d4)).stats.synced, 0);
 });
 
-test('sync: the 40-product cap holds; wishes that did not fit are looked at again once there is room', async () => {
+test('sync: the 100-product cap holds; wishes that did not fit are looked at again once there is room', async () => {
   const web = mutableWeb(WISHES), db = importsDb(web);
   impRow(db, WL); await runImp(db);
-  for (let i = 0; i < 27; i++) db.products.push(product('f' + i, 'u1', 'dyson', { source_url: 'https://fyld.dk/' + i }));     // 12 + 27 = 39
+  for (let i = 0; i < 87; i++) db.products.push(product('f' + i, 'u1', 'dyson', { source_url: 'https://fyld.dk/' + i }));     // 12 + 87 = 99
   web.lists[LIST_ID].wishes = WISHES.concat([{ id: 'c1', title: 'Et', url: null }, { id: 'c2', title: 'To', url: null }, { id: 'c3', title: 'Tre', url: null }]);
   await runImp(db, { now: at(D1) });
-  assert.strictEqual(mine(db).length, 40); assert.deepStrictEqual(db.imports[0].seen.slice(-1), ['c1']);
+  assert.strictEqual(mine(db).length, 100); assert.deepStrictEqual(db.imports[0].seen.slice(-1), ['c1']);
   assert(db.imports[0].seen.includes('c1') && !db.imports[0].seen.includes('c2') && !db.imports[0].seen.includes('c3'), 'only the one that fitted is handled');
   assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(db.imports[0].sync_fails, 0);
   db.products = db.products.filter((p) => !/^f\d+$/.test(p.id));                          // the person makes room

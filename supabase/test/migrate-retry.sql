@@ -44,7 +44,14 @@ insert into public.imports (id, user_id, list_id, url, status, note, created_at)
   ('00000000-0000-0000-0000-0000000000e2', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000aa01', 'https://onskeskyen.dk/s/abc123', 'error', 'Ønskerne kunne ikke gemmes. Prøv igen senere.', '2026-11-24 09:00+00'),
   ('00000000-0000-0000-0000-0000000000e3', '00000000-0000-0000-0000-0000000000a1', null, 'https://onskeskyen.dk/s/other1', 'error', 'Ønskelisten er ikke offentlig eller findes ikke. Bed ejeren om at dele den offentligt.', '2026-11-20 08:00+00'),
   ('00000000-0000-0000-0000-0000000000e4', '00000000-0000-0000-0000-0000000000b2', null, 'https://onskeskyen.dk/s/abc123', 'error', 'Ønskerne kunne ikke gemmes. Prøv igen senere.', '2026-11-23 08:00+00'),
-  ('00000000-0000-0000-0000-0000000000e5', '00000000-0000-0000-0000-0000000000a1', null, 'https://onskeskyen.dk/s/done12', 'done', null, '2026-11-10 08:00+00');
+  ('00000000-0000-0000-0000-0000000000e5', '00000000-0000-0000-0000-0000000000a1', null, 'https://onskeskyen.dk/s/done12', 'done', null, '2026-11-10 08:00+00'),
+-- the old cap of 40 products: a wish list that only partly fitted (followed since), the same wish list refused on the same list afterwards,
+-- and another wish list refused twice for B
+  ('00000000-0000-0000-0000-0000000000e6', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000aa01', 'https://onskeskyen.dk/s/part01', 'done', 'Der var kun plads til 19 af 34 ønsker. Du kan højst følge 40 varer.', '2026-11-24 10:00+00'),
+  ('00000000-0000-0000-0000-0000000000e7', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000aa01', 'https://onskeskyen.dk/s/part01', 'error', 'Du følger allerede 40 varer, så der er ikke plads til flere. Fjern nogle varer først.', '2026-11-24 10:01+00'),
+  ('00000000-0000-0000-0000-0000000000e8', '00000000-0000-0000-0000-0000000000b2', null, 'https://onskeskyen.dk/s/full01', 'error', 'Du følger allerede 40 varer, så der er ikke plads til flere. Fjern nogle varer først.', '2026-11-24 08:00+00'),
+  ('00000000-0000-0000-0000-0000000000e9', '00000000-0000-0000-0000-0000000000b2', null, 'https://onskeskyen.dk/s/full01', 'error', 'Du følger allerede 40 varer, så der er ikke plads til flere. Fjern nogle varer først.', '2026-11-24 09:00+00');
+update public.imports set synced_at = '2026-11-24 10:00+00' where status = 'done';
 create function t.imp() returns text language sql security definer as $$
   select string_agg(right(id::text, 2) || ':' || status || ':' || (note is null)::text, ',' order by id) from public.imports $$;
 grant execute on function t.imp() to public;
@@ -65,8 +72,14 @@ select t.chk('migrated twice: schema_marks holds the one mark (closed to the bro
   and (select count(*) = 3 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name in ('lookup_failed_at', 'retry_requested_at', 'retry_log'))
   and (select count(*) = 1 from pg_proc where proname = 'products_guard' and pronamespace = 'public'::regnamespace));
 select t.chk('migrated: imports that could not be saved wait again, only the newest attempt per person, wish list and list; other failures and finished ones are untouched',
-  t.imp() = 'e1:error:false,e2:pending:true,e3:error:false,e4:pending:true,e5:done:true'
+  t.imp() like 'e1:error:false,e2:pending:true,e3:error:false,e4:pending:true,e5:done:true,%'
   and (select count(*) = 1 from public.schema_marks where name = 'requeue-imports-not-saved'));
+select t.chk('migrated: the cap is 100 now; the wish list that only partly fitted is read again at once (the other followed one keeps its time), the refused import waits again - only the newest attempt, and not when the same wish list is already followed into the same list',
+  t.imp() like '%,e6:done:false,e7:error:false,e8:error:false,e9:pending:true'
+  and (select synced_at is null from public.imports where id = '00000000-0000-0000-0000-0000000000e6')
+  and (select synced_at = '2026-11-24 10:00+00' from public.imports where id = '00000000-0000-0000-0000-0000000000e5')
+  and (select count(*) = 1 from public.schema_marks where name = 'cap-100-reread-imports')
+  and (select prosrc like '%>= 100 then%' from pg_proc where proname = 'products_limit' and pronamespace = 'public'::regnamespace));
 select t.chk('migrated: the three failed name-only products are waiting again (pending, no note, no options), the rest is as it was',
   t.st('Playstation 5 pro') = 'pending|-|false' and t.st('Xiaomi Mijia 6') = 'pending|-|false' and t.st('Roborock R10') = 'pending|-|false'
   and t.st('ny vare') = 'pending|-|false' and t.st('med link i fejl') = 'error|Siden kunne ikke hentes.|false' and t.st('sporet') = 'tracking|-|false');
@@ -84,13 +97,16 @@ set role anon;
 select t.chk('migrated: the agent fails the PlayStation again', public.resolver_fail('00000000-0000-0000-0000-0000000000f1', 'Kunne ikke finde produktet.'));
 reset role;
 update public.imports set status = 'error', note = 'Ønskerne kunne ikke gemmes. Prøv igen senere.' where id = '00000000-0000-0000-0000-0000000000e2';
+update public.imports set synced_at = '2026-11-25 10:00+00' where id = '00000000-0000-0000-0000-0000000000e6';
+update public.imports set status = 'error', note = 'Du følger allerede 40 varer, så der er ikke plads til flere. Fjern nogle varer først.' where id = '00000000-0000-0000-0000-0000000000e9';
 \o /dev/null
 \i :new
 \o
 select t.chk('migrated: a third run does not requeue the new failure, nor change anything else',
   t.st('Playstation 5 pro') = 'error|Kunne ikke finde produktet.|false' and t.st('Xiaomi Mijia 6') = 'pending|-|false'
-  and (select count(*) = 1 from public.schema_marks where name = 'requeue-failed-name-lookups') and (select count(*) = 2 from public.schema_marks)
-  and t.imp() = 'e1:error:false,e2:error:false,e3:error:false,e4:pending:true,e5:done:true');
+  and (select count(*) = 1 from public.schema_marks where name = 'requeue-failed-name-lookups') and (select count(*) = 3 from public.schema_marks)
+  and t.imp() = 'e1:error:false,e2:error:false,e3:error:false,e4:pending:true,e5:done:true,e6:done:false,e7:error:false,e8:error:false,e9:error:false'
+  and (select synced_at is not null from public.imports where id = '00000000-0000-0000-0000-0000000000e6'));
 set role authenticated;
 select t.asA();
 select t.chk('migrated: "Prøv igen" is refused within the hour', t.err($$update public.products set retry_requested_at = now() where name = 'Playstation 5 pro'$$) = 'Vent en time, før du prøver igen.');
