@@ -1437,6 +1437,24 @@ begin
   end if;
 end $$;
 
+-- 'requeue-imports-not-saved': until 24 November 2026 the job could not save a wish list in which some wishes had a note and others did not
+-- (the rows of its one insert did not all have the same keys, which PostgREST refuses). Those imports ended as 'error' with the note below.
+-- They get another turn: back to 'pending'. When a person tried the same wish list on the same list several times, only the newest of those
+-- attempts is taken (the others stay as they are and can be hidden), so the list is not followed twice. Once only.
+do $$
+begin
+  if not exists (select 1 from public.schema_marks where name = 'requeue-imports-not-saved') then
+    update public.imports i
+       set status = 'pending', note = null, found = null, added = null, done_at = null
+     where i.status = 'error' and i.note = 'Ønskerne kunne ikke gemmes. Prøv igen senere.'
+       and i.id = (select j.id from public.imports j
+                    where j.user_id = i.user_id and j.url = i.url and j.list_id is not distinct from i.list_id
+                      and j.status = 'error' and j.note = i.note
+                    order by j.created_at desc nulls last, j.id desc limit 1);
+    insert into public.schema_marks (name) values ('requeue-imports-not-saved');
+  end if;
+end $$;
+
 -- ---------------------------------------------------------------- owner diagnostics (for maintenance, not for the scheduled agents)
 -- diag_products(): the state of the ADMINISTRATORS' own products, so that the project lead can check the job's work (what it read, which shops
 -- it follows, what the search found) without asking the owner to look. Same token check, grants and error as resolver_list: without the

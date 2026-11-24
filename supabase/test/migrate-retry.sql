@@ -37,6 +37,17 @@ insert into public.products (id, user_id, name, source_url, target_type, target_
   ('00000000-0000-0000-0000-0000000000f4', '00000000-0000-0000-0000-0000000000a1', 'ny vare', null, 'auto', null, 'pending', null, null, true, null, '2026-11-04'),
   ('00000000-0000-0000-0000-0000000000f5', '00000000-0000-0000-0000-0000000000a1', 'med link i fejl', 'https://shop.example.dk/a', 'auto', null, 'error', 'Siden kunne ikke hentes.', null, true, null, '2026-11-05'),
   ('00000000-0000-0000-0000-0000000000f6', '00000000-0000-0000-0000-0000000000b2', 'sporet', 'https://shop.example.dk/b', 'auto', null, 'tracking', null, null, true, null, '2026-11-06');
+-- wish list imports that failed because the job could not save the wishes (the same wish list tried twice on the same list by A, once by B),
+-- one that failed for another reason, and a finished one
+insert into public.imports (id, user_id, list_id, url, status, note, created_at) values
+  ('00000000-0000-0000-0000-0000000000e1', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000aa01', 'https://onskeskyen.dk/s/abc123', 'error', 'Ønskerne kunne ikke gemmes. Prøv igen senere.', '2026-11-24 08:00+00'),
+  ('00000000-0000-0000-0000-0000000000e2', '00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-00000000aa01', 'https://onskeskyen.dk/s/abc123', 'error', 'Ønskerne kunne ikke gemmes. Prøv igen senere.', '2026-11-24 09:00+00'),
+  ('00000000-0000-0000-0000-0000000000e3', '00000000-0000-0000-0000-0000000000a1', null, 'https://onskeskyen.dk/s/other1', 'error', 'Ønskelisten er ikke offentlig eller findes ikke. Bed ejeren om at dele den offentligt.', '2026-11-20 08:00+00'),
+  ('00000000-0000-0000-0000-0000000000e4', '00000000-0000-0000-0000-0000000000b2', null, 'https://onskeskyen.dk/s/abc123', 'error', 'Ønskerne kunne ikke gemmes. Prøv igen senere.', '2026-11-23 08:00+00'),
+  ('00000000-0000-0000-0000-0000000000e5', '00000000-0000-0000-0000-0000000000a1', null, 'https://onskeskyen.dk/s/done12', 'done', null, '2026-11-10 08:00+00');
+create function t.imp() returns text language sql security definer as $$
+  select string_agg(right(id::text, 2) || ':' || status || ':' || (note is null)::text, ',' order by id) from public.imports $$;
+grant execute on function t.imp() to public;
 update public.resolver_secret set token = repeat('a', 64);
 select t.chk('old schema: no schema_marks table, no retry columns, the failed rows are failed',
   to_regclass('public.schema_marks') is null
@@ -53,6 +64,9 @@ select t.chk('migrated twice: schema_marks holds the one mark (closed to the bro
   and not has_table_privilege('authenticated', 'public.schema_marks', 'select') and has_table_privilege('service_role', 'public.schema_marks', 'insert')
   and (select count(*) = 3 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name in ('lookup_failed_at', 'retry_requested_at', 'retry_log'))
   and (select count(*) = 1 from pg_proc where proname = 'products_guard' and pronamespace = 'public'::regnamespace));
+select t.chk('migrated: imports that could not be saved wait again, only the newest attempt per person, wish list and list; other failures and finished ones are untouched',
+  t.imp() = 'e1:error:false,e2:pending:true,e3:error:false,e4:pending:true,e5:done:true'
+  and (select count(*) = 1 from public.schema_marks where name = 'requeue-imports-not-saved'));
 select t.chk('migrated: the three failed name-only products are waiting again (pending, no note, no options), the rest is as it was',
   t.st('Playstation 5 pro') = 'pending|-|false' and t.st('Xiaomi Mijia 6') = 'pending|-|false' and t.st('Roborock R10') = 'pending|-|false'
   and t.st('ny vare') = 'pending|-|false' and t.st('med link i fejl') = 'error|Siden kunne ikke hentes.|false' and t.st('sporet') = 'tracking|-|false');
@@ -69,11 +83,14 @@ reset role;
 set role anon;
 select t.chk('migrated: the agent fails the PlayStation again', public.resolver_fail('00000000-0000-0000-0000-0000000000f1', 'Kunne ikke finde produktet.'));
 reset role;
+update public.imports set status = 'error', note = 'Ønskerne kunne ikke gemmes. Prøv igen senere.' where id = '00000000-0000-0000-0000-0000000000e2';
 \o /dev/null
 \i :new
 \o
 select t.chk('migrated: a third run does not requeue the new failure, nor change anything else',
-  t.st('Playstation 5 pro') = 'error|Kunne ikke finde produktet.|false' and t.st('Xiaomi Mijia 6') = 'pending|-|false' and (select count(*) = 1 from public.schema_marks));
+  t.st('Playstation 5 pro') = 'error|Kunne ikke finde produktet.|false' and t.st('Xiaomi Mijia 6') = 'pending|-|false'
+  and (select count(*) = 1 from public.schema_marks where name = 'requeue-failed-name-lookups') and (select count(*) = 2 from public.schema_marks)
+  and t.imp() = 'e1:error:false,e2:error:false,e3:error:false,e4:pending:true,e5:done:true');
 set role authenticated;
 select t.asA();
 select t.chk('migrated: "Prøv igen" is refused within the hour', t.err($$update public.products set retry_requested_at = now() where name = 'Playstation 5 pro'$$) = 'Vent en time, før du prøver igen.');
