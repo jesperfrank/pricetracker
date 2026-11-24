@@ -568,6 +568,9 @@ function makeFake(db) {
       if (m === 'POST') {   // inserts, with the database's own rules for the columns the import step writes
         const body = JSON.parse(opts.body), list = Array.isArray(body) ? body : [body], out = [];
         if (db.insertFail === mm[1]) return reply(500, { message: 'db error' });
+        // PostgREST's own rule for an insert of several rows: every object must have exactly the same keys, or the whole insert is refused
+        const keysOf = (o) => Object.keys(o).sort().join(',');
+        if (list.some((r) => keysOf(r) !== keysOf(list[0]))) return reply(400, { code: 'PGRST102', message: 'All object keys must match' });
         for (const r of list) {
           if (mm[1] === 'products') {
             assert.strictEqual(h.Prefer, 'return=minimal');
@@ -1550,10 +1553,12 @@ test('requirements: a wish note is copied into requirements at insert (cleaned, 
   const rows = db.inserted.filter((x) => x.table === 'products').map((x) => x.row);
   WISHES.forEach((w, i) => {
     const want = ONSKE.cleanRequirements(w.description);
-    if (want === null) assert(!('requirements' in rows[i]), 'wish ' + i + ' has no usable note, so no key');
+    if (want === null) assert.strictEqual(rows[i].requirements, null, 'wish ' + i + ' has no usable note: the key is there with null (every row of one insert must have the same keys)');
     else assert.strictEqual(rows[i].requirements, want, 'wish ' + i);
   });
-  assert.strictEqual(rows[0].requirements, 'XL'); assert.strictEqual(rows[2].requirements, 'Størrelse 43'); assert.strictEqual(rows[3].hasOwnProperty('requirements'), false);
+  assert.strictEqual(rows[0].requirements, 'XL'); assert.strictEqual(rows[2].requirements, 'Størrelse 43'); assert.strictEqual(rows[3].requirements, null);
+  // every row of the one insert has exactly the same keys (PostgREST refuses the whole insert otherwise: "All object keys must match")
+  const keys = (o) => Object.keys(o).sort().join(','); assert(rows.every((r) => keys(r) === keys(rows[0])), 'the rows must all have the same keys');
 });
 
 test('requirements: cleanRequirements keeps 1 to 120 characters, drops control characters and angle brackets, never throws', () => {
@@ -1575,7 +1580,7 @@ test('requirements: the daily sync gives a new wish its note; the person\'s own 
     fetch: f, now: at('2026-11-17T08:00:00Z'), sleep: async () => {}, log: () => {} });
   assert.deepStrictEqual(bodies.map((x) => x.m), ['POST'], 'one insert, no patch of existing products');
   const rows = JSON.parse(bodies[0].b);
-  assert.strictEqual(rows.length, 2); assert.strictEqual(rows[0].requirements, '56 cm, sort'); assert(!('requirements' in rows[1]), 'a note over 120 characters is not used');
+  assert.strictEqual(rows.length, 2); assert.strictEqual(rows[0].requirements, '56 cm, sort'); assert.strictEqual(rows[1].requirements, null, 'a note over 120 characters is not used (null, the key itself must be on every row)');
   assert.strictEqual(mine(db)[0].requirements, 'mine egne ord');
 });
 

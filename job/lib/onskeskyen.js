@@ -295,8 +295,10 @@ async function addProducts(sb, imp, take, title, log) {
   // 'wanted'). A prisjagt.dk link is already the comparison; a wish without a link is found by name first.
   // image_url: the wish's first photo (the address only), from the answer the job already has
   let rows = take.map((c) => ({ user_id: imp.user_id, name: c.name, source_url: c.source_url, target_type: 'auto', target_value: null, list_id: pl.listId, active: true, status: 'pending', compare_state: wantsCompare(c.source_url) ? 'wanted' : null, image_url: c.image || null }));
-  // requirements: only at insert and only when the wish has a usable note (never written again, so the person's own words are never overwritten)
-  rows = rows.map((r, i) => (take[i].requirements ? Object.assign(r, { requirements: take[i].requirements }) : r));
+  // requirements: only at insert, from the wish's own note when it has a usable one (never written again, so the person's own words are never
+  // overwritten). The key is on EVERY row, null when there is no note: all rows of one insert must have the same keys, or PostgREST refuses
+  // the whole insert (PGRST102 "All object keys must match"), which is what happened when some wishes had a note and others did not.
+  rows = rows.map((r, i) => Object.assign(r, { requirements: take[i].requirements || null }));
   // the database has not been given the newer columns yet (the script is applied on push): add the products without them
   for (let tries = 0; tries < 4; tries++) {
     try { await sb.insert('products', rows, false); return pl; }
