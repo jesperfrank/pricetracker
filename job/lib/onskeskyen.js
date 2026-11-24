@@ -275,14 +275,30 @@ const uniqueTail = (ids, max) => {
 
 // From the wishes still to be looked at: the ones that become products (cands), how many were links the person already follows (dup)
 // and how many had no usable name. have: link keys of the person's products, extended here so that a link listed twice counts once.
+// What the person follows already: the links, and the names (for wishes without a link).
+const nameKey = (s) => 'name:' + String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+function haveOf(products) {
+  const have = new Set();
+  (Array.isArray(products) ? products : []).forEach((p) => {
+    const k = p.source_url ? urlKey(p.source_url) : null;
+    if (k) have.add(k);
+    if (p.name) have.add(nameKey(p.name));
+  });
+  return have;
+}
+
+// A wish with a link is already followed when the person follows that link. A wish without a link has only its name to go by: it is
+// already followed when the person has a product with that name (the same wish list read through two imports, e.g. pasted as two
+// different links, must not add the name-only wishes twice). Two wishes with links and the same name are two products.
 function pickCandidates(wishList, have) {
   let noTitle = 0, dup = 0;
   const cands = [];
   wishList.forEach((w) => {
     const name = cleanName(w.title);
     if (!name) { noTitle++; return; }
-    const url = cleanWishUrl(w.url), key = url ? urlKey(url) : null;
-    if (key) { if (have.has(key)) { dup++; return; } have.add(key); }
+    const url = cleanWishUrl(w.url), key = url ? urlKey(url) : nameKey(name);
+    if (have.has(key)) { dup++; return; }
+    have.add(key); have.add(nameKey(name));
     cands.push({ id: w.id, name, source_url: url, image: w.image || null, requirements: cleanRequirements(w.description) });
   });
   return { cands, dup, noTitle };
@@ -337,9 +353,8 @@ async function importOne(imp, deps) {
   if (!found) return result('error', NOTE.empty, 0, 0);
 
   // the user's own products (all of them, also name-only ones): for the cap and for the "already followed" check
-  const mine = await sb.select('products', 'select=id,source_url&user_id=eq.' + encodeURIComponent(imp.user_id) + '&limit=200');
-  const have = new Set();
-  mine.forEach((p) => { const k = p.source_url ? urlKey(p.source_url) : null; if (k) have.add(k); });
+  const mine = await sb.select('products', 'select=id,source_url,name&user_id=eq.' + encodeURIComponent(imp.user_id) + '&limit=200');
+  const have = haveOf(mine);
 
   const { cands, dup, noTitle } = pickCandidates(listData.wishes, have);
 
@@ -393,9 +408,8 @@ async function syncOne(imp, deps) {
   const fresh = listData.wishes.filter((w) => w.id && !knownSet.has(w.id));
   let added = 0, handled = [];
   if (fresh.length) {
-    const mine = await sb.select('products', 'select=id,source_url&user_id=eq.' + encodeURIComponent(imp.user_id) + '&limit=200');
-    const have = new Set();
-    mine.forEach((p) => { const k = p.source_url ? urlKey(p.source_url) : null; if (k) have.add(k); });
+    const mine = await sb.select('products', 'select=id,source_url,name&user_id=eq.' + encodeURIComponent(imp.user_id) + '&limit=200');
+    const have = haveOf(mine);
     const { cands } = pickCandidates(fresh, have);
     const take = cands.slice(0, Math.max(0, PRODUCT_CAP - mine.length));
     if (take.length) {

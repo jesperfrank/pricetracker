@@ -1472,6 +1472,26 @@ test('onskeskyen: wishes already followed, or listed twice, are skipped (links c
   assert.strictEqual(mine(db).length, 3 + 10);
 });
 
+test('onskeskyen: a wish without a link is already followed when the person has a product with that name (the same wish list through two imports adds it once)', async () => {
+  const extra = [{ id: 'n1', title: 'Rød telefonboks', url: null }, { id: 'n2', title: '  rød   TELEFONBOKS ', url: null }, { id: 'n3', title: 'Kun Navn', url: null },
+    { id: 'n4', title: WISHES[0].title, url: 'https://anden-butik.dk/vare' }];
+  const web = onskeWeb({ lists: { [LIST_ID]: { title: 'Jul', accessLevel: 'Public', wishes: WISHES.concat(extra) } } });
+  const db = importsDb(web); impRow(db, SHARE);
+  db.products.push(product('d', 'u1', 'dyson', { source_url: null, name: 'kun navn', status: 'pending' }));          // the person's own, by name only
+  db.products.push(product('e', 'u2', 'dyson', { source_url: null, name: 'Rød telefonboks', status: 'pending' }));   // someone else's does not count
+  await runImp(db);
+  const names = () => db.inserted.filter((x) => x.table === 'products').map((x) => x.row.name);
+  assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(db.imports[0].added, WISHES.length + 2);
+  assert(/^2 ønsker fandtes allerede\./.test(db.imports[0].note), db.imports[0].note);
+  assert.strictEqual(names().filter((n) => /telefonboks/i.test(n)).length, 1, 'the same name twice in one wish list is one product');
+  assert.strictEqual(names().filter((n) => n === WISHES[0].title).length, 2, 'two links with the same name are two products');
+  // the same wish list pasted as another link: a second import, and nothing comes in twice (not the wishes without a link either)
+  impRow(db, 'https://onskeskyen.dk/wishlists/' + LIST_ID); await runImp(db);
+  assert.strictEqual(db.imports[1].status, 'done'); assert.strictEqual(db.imports[1].added, 0);
+  assert(new RegExp('^' + (WISHES.length + 4) + ' ønsker fandtes allerede\\.').test(db.imports[1].note), db.imports[1].note);
+  assert.strictEqual(names().filter((n) => /telefonboks/i.test(n)).length, 1);
+});
+
 test('onskeskyen: at most 100 products per person; the note says how many fitted', async () => {
   const web = onskeWeb(), db = importsDb(web); impRow(db, SHARE);
   for (let i = 0; i < 93; i++) db.products.push(product('m' + i, 'u1', 'dyson', { source_url: i % 3 ? 'https://shop.dk/x' + i : null, active: i % 5 !== 0 }));   // name-only and inactive ones count too
