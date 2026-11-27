@@ -1487,6 +1487,16 @@ begin
   end if;
 end $$;
 
+-- One time: the wish lists are read again at the next runs (three per run), so the prices they show come in for the products that
+-- are already followed (products.wish_offer) without waiting for each list's turn.
+do $$
+begin
+  if not exists (select 1 from public.schema_marks where name = 'wish-price-first-read') then
+    update public.imports set synced_at = null where status = 'done';
+    insert into public.schema_marks (name) values ('wish-price-first-read');
+  end if;
+end $$;
+
 -- ---------------------------------------------------------------- owner diagnostics (for maintenance, not for the scheduled agents)
 -- diag_products(): the state of the ADMINISTRATORS' own products, so that the project lead can check the job's work (what it read, which shops
 -- it follows, what the search found) without asking the owner to look. Same token check, grants and error as resolver_list: without the

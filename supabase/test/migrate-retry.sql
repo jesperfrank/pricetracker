@@ -74,12 +74,15 @@ select t.chk('migrated twice: schema_marks holds the one mark (closed to the bro
 select t.chk('migrated: imports that could not be saved wait again, only the newest attempt per person, wish list and list; other failures and finished ones are untouched',
   t.imp() like 'e1:error:false,e2:pending:true,e3:error:false,e4:pending:true,e5:done:true,%'
   and (select count(*) = 1 from public.schema_marks where name = 'requeue-imports-not-saved'));
-select t.chk('migrated: the cap is 100 now; the wish list that only partly fitted is read again at once (the other followed one keeps its time), the refused import waits again - only the newest attempt, and not when the same wish list is already followed into the same list',
+select t.chk('migrated: the cap is 100 now; the wish list that only partly fitted is read again at once, the refused import waits again - only the newest attempt, and not when the same wish list is already followed into the same list',
   t.imp() like '%,e6:done:false,e7:error:false,e8:error:false,e9:pending:true'
   and (select synced_at is null from public.imports where id = '00000000-0000-0000-0000-0000000000e6')
-  and (select synced_at = '2026-11-24 10:00+00' from public.imports where id = '00000000-0000-0000-0000-0000000000e5')
   and (select count(*) = 1 from public.schema_marks where name = 'cap-100-reread-imports')
   and (select prosrc like '%>= 100 then%' from pg_proc where proname = 'products_limit' and pronamespace = 'public'::regnamespace));
+select t.chk('migrated: every followed wish list is read again once, for the prices it shows (the unfinished imports have no reading time)',
+  (select count(*) = 2 and bool_and(synced_at is null) from public.imports where status = 'done')
+  and (select count(*) = 1 from public.schema_marks where name = 'wish-price-first-read')
+  and (select count(*) = 1 from information_schema.columns where table_schema = 'public' and table_name = 'products' and column_name = 'wish_offer'));
 select t.chk('migrated: the three failed name-only products are waiting again (pending, no note, no options), the rest is as it was',
   t.st('Playstation 5 pro') = 'pending|-|false' and t.st('Xiaomi Mijia 6') = 'pending|-|false' and t.st('Roborock R10') = 'pending|-|false'
   and t.st('ny vare') = 'pending|-|false' and t.st('med link i fejl') = 'error|Siden kunne ikke hentes.|false' and t.st('sporet') = 'tracking|-|false');
@@ -97,16 +100,16 @@ set role anon;
 select t.chk('migrated: the agent fails the PlayStation again', public.resolver_fail('00000000-0000-0000-0000-0000000000f1', 'Kunne ikke finde produktet.'));
 reset role;
 update public.imports set status = 'error', note = 'Ønskerne kunne ikke gemmes. Prøv igen senere.' where id = '00000000-0000-0000-0000-0000000000e2';
-update public.imports set synced_at = '2026-11-25 10:00+00' where id = '00000000-0000-0000-0000-0000000000e6';
+update public.imports set synced_at = '2026-11-25 10:00+00' where status = 'done';
 update public.imports set status = 'error', note = 'Du følger allerede 40 varer, så der er ikke plads til flere. Fjern nogle varer først.' where id = '00000000-0000-0000-0000-0000000000e9';
 \o /dev/null
 \i :new
 \o
 select t.chk('migrated: a third run does not requeue the new failure, nor change anything else',
   t.st('Playstation 5 pro') = 'error|Kunne ikke finde produktet.|false' and t.st('Xiaomi Mijia 6') = 'pending|-|false'
-  and (select count(*) = 1 from public.schema_marks where name = 'requeue-failed-name-lookups') and (select count(*) = 3 from public.schema_marks)
+  and (select count(*) = 1 from public.schema_marks where name = 'requeue-failed-name-lookups') and (select count(*) = 4 from public.schema_marks)
   and t.imp() = 'e1:error:false,e2:error:false,e3:error:false,e4:pending:true,e5:done:true,e6:done:false,e7:error:false,e8:error:false,e9:error:false'
-  and (select synced_at is not null from public.imports where id = '00000000-0000-0000-0000-0000000000e6'));
+  and (select count(*) = 2 and bool_and(synced_at is not null) from public.imports where status = 'done'));
 set role authenticated;
 select t.asA();
 select t.chk('migrated: "Prøv igen" is refused within the hour', t.err($$update public.products set retry_requested_at = now() where name = 'Playstation 5 pro'$$) = 'Vent en time, før du prøver igen.');
