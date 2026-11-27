@@ -4631,6 +4631,14 @@ test('wish price: a shop that refuses us is followed with the price the wish lis
   map[U] = () => resp(403, 'Forbidden');
   ctx = shopCtx(db, map, { now: () => hrs(28) }); await R.run(ctx);
   assert.strictEqual(S().offers[0].price, 279); assert.strictEqual(S().check_note, 'Butikken afviser automatiske opslag.'); assert.strictEqual(S().wish_offer.tried, undefined);
+  // the wish list has a fresh reading again, but the shop's own price is under a day old: a passing refusal does not replace it
+  S().wish_offer = Object.assign({}, S().wish_offer, { at: isoH(29) });
+  ctx = shopCtx(db, map, { now: () => hrs(30) }); await R.run(ctx);
+  assert.deepStrictEqual(ctx.fetched, [U]); assert.strictEqual(S().offers[0].price, 279); assert.strictEqual(S().offers[0].note, null); assert.strictEqual(S().wish_offer.tried, undefined);
+  // a day after the shop last answered it still refuses: now the wish list's price takes over
+  S().wish_offer = Object.assign({}, S().wish_offer, { at: isoH(41) });
+  ctx = shopCtx(db, map, { now: () => hrs(42) }); await R.run(ctx);
+  assert.strictEqual(S().offers[0].price, 199); assert.strictEqual(S().offers[0].note, 'Pris fra Ønskeskyen'); assert.strictEqual(S().check_note, null); assert.strictEqual(S().wish_offer.tried, isoH(42));
 });
 
 test('wish price: it stands in for a link that leads elsewhere, a page without a price and another currency; not for a page that is gone, a stale reading or a Prisjagt link; out of stock is said', async () => {
@@ -4671,6 +4679,28 @@ test('wish price: a product that is in error when the price arrives is followed 
   by('A').wish_offer = Object.assign({}, by('A').wish_offer, { at: isoH(5) });
   ctx = shopCtx(db, map, { now: () => hrs(5.5) }); await R.run(ctx); assert.deepStrictEqual(ctx.fetched, [A, G], 'after six hours both are asked again (the page that was gone as an error row is)');
   assert.strictEqual(by('A').status, 'tracking'); assert.strictEqual(by('A').wish_offer.tried, isoH(5.5));
+});
+
+test('wish price: with extra shops too. The wish list stands in for a main shop that has no readable price, next to the other shops; a passing refusal keeps the shop\'s own last price', async () => {
+  const hrs = (h) => new Date(NOW.getTime() + h * 3600 * 1000), isoH = (h) => hrs(h).toISOString().replace(/\.\d+Z$/, 'Z');
+  const w = { price: 470, inStock: true, store: 'Hovedbutik', at: isoH(-1) };
+  // the main page has no price any more (not a passing failure): the wish list's price is the main shop's offer, the extra shop is read as always
+  const db = newDb(); db.products.push(exProduct('X1', [EX_A], { wish_offer: w, extra_state: { [EX_A]: { seen: true, fails: 0, at: '2026-11-16T09:00:00Z' } } }));
+  let ctx = shopCtx(db, exMap({ [EX_MAIN]: shopHtml('shop-noprice') })); await R.run(ctx);
+  const P = db.products[0];
+  assert.strictEqual(P.status, 'tracking'); assert.strictEqual(P.check_note, null);
+  assert.deepStrictEqual(P.offers.map((o) => [o.store, o.price, o.note]), [['Butik A', 450, null], ['Hovedbutik', 470, 'Pris fra Ønskeskyen']]);
+  assert.strictEqual(P.wish_offer.tried, isoH(0)); assert.strictEqual(P.extra_state[EX_MAIN], undefined, 'the wish list\'s price is not remembered as the shop\'s own offer');
+  assert.strictEqual(P.extra_state[EX_A].fails, 0);
+  // two hours later the main shop is left alone, the extra shop is still read
+  ctx = shopCtx(db, exMap({ [EX_MAIN]: shopHtml('shop-noprice') }), { now: () => hrs(2) }); await R.run(ctx);
+  assert(ctx.fetched.indexOf(EX_MAIN) === -1 && ctx.fetched.indexOf(EX_A) !== -1, ctx.fetched.join(' '));
+  assert.deepStrictEqual(db.products[0].offers.map((o) => o.price), [450, 470]);
+  // a shop that answered an hour ago and refuses this once keeps its own price (500), also with a wish price at hand
+  const db2 = newDb(); db2.products.push(exProduct('X2', [EX_A], { wish_offer: w }));
+  ctx = shopCtx(db2, exMap({ [EX_MAIN]: () => resp(403, '') })); await R.run(ctx);
+  const main2 = db2.products[0].offers.find((o) => o.url === EX_MAIN);
+  assert.strictEqual(main2.price, 500); assert(!/Ønskeskyen/.test(String(main2.note))); assert.strictEqual(db2.products[0].wish_offer.tried, undefined);
 });
 
 (async () => {

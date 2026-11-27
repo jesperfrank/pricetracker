@@ -219,6 +219,14 @@ function wishPage(prod, target, error, now) {
   const row = { key: target.url, variant: SHOP.SHOP_ID, store, price: f.w.price, url: target.url, inStock, stock: inStock ? 'InStock' : 'OutOfStock', note: WISH_NOTE, name: store, saleKnown: false, sale: false, stale: true, readAt: f.at };
   return { title: null, rows: [row], variants: [{ id: SHOP.SHOP_ID, label: store, lowest: inStock ? f.w.price : null, offers: 1, sample: null }], history: [], note: null, shop: true, source: 'wish', image: null, wish: true };
 }
+// The shop's own last price, read from its page within the last 24 hours (X.lastOffer), or null. While there is one, a passing failure
+// (refused this time, a timeout, a network error) does not bring in the wish list's price: the shop's own reading is the better one.
+function ownLastOffer(prod, target, now) {
+  const o = X.lastOffer(prod, X.stateOf(prod)[target.url], target.url, now);
+  return o && String(o.note || '').indexOf(WISH_NOTE) !== 0 ? o : null;
+}
+const wishWanted = (prod, target, error, now) => !(X.transient(error) && ownLastOffer(prod, target, now));
+
 // When the shop's own page last failed: the mark on the wish price, or, for a row that is in error, its last check (that check was the
 // failed attempt) - unless the failure was a page that is gone, which the wish price never stands in for.
 const NOTFOUND_PREFIX = shopErrorNote(Object.assign(new PJ.PageError('notfound', ''), { shop: true })).split('(')[0];
@@ -638,7 +646,7 @@ async function run(ctx) {
     // the main shop could not be read: the wish list's own price stands in for its page (see wishPage)
     let wishExtra = main ? wishPatch(prod, false, true, iso) : {};
     if (!main) {
-      const wp = wishPage(prod, target, mainErr, now);
+      const wp = wishWanted(prod, target, mainErr, now) ? wishPage(prod, target, mainErr, now) : null;
       if (wp) {
         main = wp; stats.wishUsed++;
         wishExtra = Object.assign({}, wantsCompare(prod, target, mainErr) ? wantedPatch(prod, now) : {}, wishPatch(prod, true, mainTried, iso));
@@ -831,7 +839,7 @@ async function run(ctx) {
     const rests = stats.blockedHosts.indexOf(hostKey) === -1 && wishRests(prod, target, now);
     const skipErr = stats.blockedHosts.indexOf(hostKey) !== -1 ? Object.assign(new PJ.PageError('blocked', 'afvist tidligere i kørslen'), { shop: true })
       : rests ? Object.assign(new PJ.PageError('blocked', 'butikken spørges ikke igen endnu'), { shop: true }) : null;
-    if (skipErr && !wishPage(prod, target, skipErr, now)) {
+    if (skipErr && !(wishWanted(prod, target, skipErr, now) && wishPage(prod, target, skipErr, now))) {
       if (wantsCompare(prod, target, skipErr) || wantsCompareAgain(prod, target, skipErr, now)) results.push({ prod, patch: wantedPatch(prod, now), hit: null });
       continue;
     }
@@ -845,7 +853,7 @@ async function run(ctx) {
         const note = errorNote(got.error);
         const want = wantsCompare(prod, target, got.error) || wantsCompareAgain(prod, target, got.error, now) ? wantedPatch(prod, now) : {};
         // the wish list's own price stands in for a shop page that cannot be read (see wishPage)
-        page = wishPage(prod, target, got.error, now);
+        page = wishWanted(prod, target, got.error, now) ? wishPage(prod, target, got.error, now) : null;
         if (!page) {
           log('  ' + tag(prod) + ': ' + note);
           if (todo === 'initial') results.push({ prod, patch: Object.assign({ status: 'error', check_note: note, last_checked: isoNow(now) }, want), hit: null });
