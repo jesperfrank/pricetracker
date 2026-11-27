@@ -17,8 +17,9 @@ const MAX_WISHES = 60;
 const PAGE_SIZE = 30;
 const MAX_PER_RUN = 3;
 const MAX_SYNCS_PER_RUN = 3;     // standing imports re-read per run, on top of MAX_PER_RUN new imports
-const SYNC_EVERY_MS = 22 * 3600 * 1000;   // a finished import is read again at most once a day
-const MAX_SYNC_FAILS = 7;        // a wish list that cannot be read this many days in a row is given up (status 'error')
+const SYNC_EVERY_MS = 5.5 * 3600 * 1000;  // a finished import is read again about four times a day (new wishes, and the prices the list shows)
+const MAX_SYNC_FAILS = 28;       // a wish list that cannot be read this many times in a row (about a week) is given up (status 'error')
+const OFFER_REWRITE_MS = 3 * 3600 * 1000; // an unchanged price is written again when its reading is this old, so the reading stays fresh
 const SEEN_MAX = 300;            // wish ids remembered per import (imports.seen allows 500)
 const TITLE_MAX = 100;           // imports.title
 const NAME_MAX = 140;            // products.name
@@ -29,8 +30,13 @@ const MAX_BODY = 3000000;
 const API_URL = 'https://api.gowish.com/graphql';
 
 // Our own small query (title, access level and the fields we use); the server accepts it as well as the page's own query.
-const QUERY = 'query getWishlistWishes($id: ID!, $input: PaginationInput) { wishlist(id: $id) { id title accessLevel ' +
-  'wishes(input: $input) { data { id title description price currency url photos } totalCount nextCursor } } }';
+// productRef is the wish-list site's own, current data about the product behind the wish's link (the price it shows on the wish, kept up
+// to date by the site). It is asked for with the wishes; if the API ever refuses the field, the plain query is used (QUERY_PLAIN).
+const WISH_FIELDS = 'id title description price currency url photos';
+const mkQuery = (fields) => 'query getWishlistWishes($id: ID!, $input: PaginationInput) { wishlist(id: $id) { id title accessLevel ' +
+  'wishes(input: $input) { data { ' + fields + ' } totalCount nextCursor } } }';
+const QUERY = mkQuery(WISH_FIELDS + ' productRef { price currency inStock originalUrl brand { name } }');
+const QUERY_PLAIN = mkQuery(WISH_FIELDS);
 
 const NOTE = {
   private: 'Ønskelisten er ikke offentlig eller findes ikke. Bed ejeren om at dele den offentligt.',
@@ -39,8 +45,8 @@ const NOTE = {
   badUrl: 'Linket til ønskelisten kan ikke bruges.',
   saveFail: 'Ønskerne kunne ikke gemmes. Prøv igen senere.',
   full: 'Du følger allerede ' + PRODUCT_CAP + ' varer, så der er ikke plads til flere. Fjern nogle varer først.',
-  retryPrivate: 'Ønskelisten er ikke offentlig lige nu. Prøver igen i morgen.',
-  retryUnavailable: 'Ønskeskyen svarede ikke. Prøver igen i morgen.',
+  retryPrivate: 'Ønskelisten er ikke offentlig lige nu. Prøver igen senere.',
+  retryUnavailable: 'Ønskeskyen svarede ikke. Prøver igen senere.',
 };
 
 class ImportError extends Error {
@@ -169,14 +175,35 @@ function firstPhoto(photos) {
   return null;
 }
 
-// {title, wishes: [{id, title, url, image, description}], total, truncated}. Up to MAX_WISHES wishes, PAGE_SIZE per request.
+// The price the wish-list site shows for a wish, or null: {price, inStock, store}. Only a price in kroner, and only when it belongs to
+// the wish's own link (productRef.originalUrl is the wish's link). store = the shop's name as the site has it, when it has one.
+function wishOffer(x) {
+  const r = x && x.productRef;
+  if (!r || typeof r !== 'object') return null;
+  const price = typeof r.price === 'number' ? Math.round(r.price * 100) / 100 : NaN;
+  if (!isFinite(price) || price <= 0 || price > 10000000) return null;
+  if (String(r.currency || '').toUpperCase() !== 'DKK') return null;
+  const a = cleanWishUrl(x.url), b = cleanWishUrl(r.originalUrl);
+  if (!a || !b || urlKey(a) !== urlKey(b)) return null;
+  const nm = r.brand ? cleanName(r.brand.name, 60) : '';
+  return { price, inStock: r.inStock !== false, store: nm || null };
+}
+
+// {title, wishes: [{id, title, url, image, description, offer}], total, truncated}. Up to MAX_WISHES wishes, PAGE_SIZE per request.
 async function fetchWishList(id, http) {
-  const state = { endpoint: API_URL };
+  const state = { endpoint: API_URL, plain: false };
   let cursor = 0, title = null, total = null;
   const wishes = [];
   for (let page = 0; page < 4 && wishes.length < MAX_WISHES; page++) {
-    const body = JSON.stringify({ operationName: 'getWishlistWishes', variables: { id, input: { cursor, limit: PAGE_SIZE } }, query: QUERY });
-    const j = await postGraphql(http, state, body);
+    const ask = async () => postGraphql(http, state, JSON.stringify({ operationName: 'getWishlistWishes', variables: { id, input: { cursor, limit: PAGE_SIZE } }, query: state.plain ? QUERY_PLAIN : QUERY }));
+    let j;
+    try { j = await ask(); }
+    catch (e) {
+      // the API refuses the query as such (HTTP 400): once, the plain query without the site's own price data; the import itself goes on
+      if (state.plain || !(e instanceof ImportError) || e.kind !== 'unavailable' || e.detail !== 'HTTP 400') throw e;
+      state.plain = true; j = await ask();
+    }
+    if (!state.plain && Array.isArray(j.errors) && j.errors.some((e) => /VALIDATION/i.test(String(e && e.extensions && e.extensions.code || '')))) { state.plain = true; j = await ask(); }
     const err = listError(j);
     if (err) throw err;
     const wl = j && j.data && j.data.wishlist;
@@ -186,7 +213,7 @@ async function fetchWishList(id, http) {
     if (!w || !Array.isArray(w.data)) throw new ImportError('unavailable', 'unexpected answer');
     if (title === null && typeof wl.title === 'string') title = wl.title;
     if (typeof w.totalCount === 'number') total = w.totalCount;
-    w.data.forEach((x) => { if (x && typeof x === 'object') wishes.push({ id: wishId(x.id), title: x.title, url: x.url, image: firstPhoto(x.photos), description: x.description }); });
+    w.data.forEach((x) => { if (x && typeof x === 'object') wishes.push({ id: wishId(x.id), title: x.title, url: x.url, image: firstPhoto(x.photos), description: x.description, offer: wishOffer(x) }); });
     const next = w.nextCursor;
     if (typeof next !== 'number' || next <= cursor || !w.data.length) break;
     cursor = next;
@@ -299,12 +326,57 @@ function pickCandidates(wishList, have) {
     const url = cleanWishUrl(w.url), key = url ? urlKey(url) : nameKey(name);
     if (have.has(key)) { dup++; return; }
     have.add(key); have.add(nameKey(name));
-    cands.push({ id: w.id, name, source_url: url, image: w.image || null, requirements: cleanRequirements(w.description) });
+    cands.push({ id: w.id, name, source_url: url, image: w.image || null, requirements: cleanRequirements(w.description), offer: url && w.offer ? w.offer : null });
   });
   return { cands, dup, noTitle };
 }
 
-async function addProducts(sb, imp, take, title, log) {
+// products.wish_offer for a wish's offer read at `iso`. `old` = what the product has now: the job's own mark of when the shop itself
+// last failed (tried) is kept.
+function offerValue(offer, iso, old) {
+  const v = { price: offer.price, inStock: offer.inStock !== false, store: offer.store || null, at: iso };
+  if (old && typeof old === 'object' && typeof old.tried === 'string') v.tried = old.tried;
+  return v;
+}
+const sameOffer = (a, b) => !!a && !!b && a.price === b.price && (a.inStock !== false) === (b.inStock !== false) && (a.store || null) === (b.store || null);
+
+// The wish list was just read: the price it shows for each wish is written to the person's product with that link (products.wish_offer),
+// so the price job can use it when the shop's own page cannot be read. One small write per product, and only when the price changed or
+// the stored reading is over OFFER_REWRITE_MS old (the reading must stay fresh while the price stands still). `mine` = the person's
+// products with id, source_url and wish_offer (a database without the column has no such key: nothing is written). Never throws.
+async function refreshOffers(sb, mine, wishList, iso, log) {
+  const byKey = new Map();
+  (Array.isArray(wishList) ? wishList : []).forEach((w) => {
+    const url = w && w.offer ? cleanWishUrl(w.url) : null, k = url ? urlKey(url) : null;
+    if (k && !byKey.has(k)) byKey.set(k, w.offer);
+  });
+  if (!byKey.size) return 0;
+  const nowMs = Date.parse(iso);
+  let n = 0;
+  for (const p of (Array.isArray(mine) ? mine : [])) {
+    if (!p || !p.source_url || !Object.prototype.hasOwnProperty.call(p, 'wish_offer')) continue;
+    const offer = byKey.get(urlKey(p.source_url));
+    if (!offer) continue;
+    const old = p.wish_offer && typeof p.wish_offer === 'object' ? p.wish_offer : null;
+    const oldAt = old ? Date.parse(old.at) : NaN;
+    if (old && sameOffer(old, offer) && isFinite(oldAt) && nowMs - oldAt < OFFER_REWRITE_MS) continue;
+    try { await sb.patch('products', 'id=eq.' + encodeURIComponent(p.id), { wish_offer: offerValue(offer, iso, old) }); n++; }
+    catch (e) { log('  Ønskeliste: kunne ikke gemme en pris: ' + safe(e)); return n; }
+  }
+  return n;
+}
+
+// The person's products, for "already followed" and for the prices: with wish_offer when the database has the column.
+async function myProducts(sb, userId) {
+  const q = (cols) => sb.select('products', 'select=' + cols + '&user_id=eq.' + encodeURIComponent(userId) + '&limit=200');
+  try { return await q('id,source_url,name,wish_offer'); }
+  catch (e) {
+    if (!/42703|PGRST204|wish_offer/i.test(String(e && (e.body || e.message) || ''))) throw e;
+    return q('id,source_url,name');
+  }
+}
+
+async function addProducts(sb, imp, take, title, log, iso) {
   const pl = await pickList(sb, imp, title, log);
   // status exactly as a product added in the browser: 'pending' (the job fetches the first price), goal 'auto'
   // A wish with one shop's link only follows that shop: the AI agent is asked to look for the product on Prisjagt (compare_state
@@ -314,14 +386,15 @@ async function addProducts(sb, imp, take, title, log) {
   // requirements: only at insert, from the wish's own note when it has a usable one (never written again, so the person's own words are never
   // overwritten). The key is on EVERY row, null when there is no note: all rows of one insert must have the same keys, or PostgREST refuses
   // the whole insert (PGRST102 "All object keys must match"), which is what happened when some wishes had a note and others did not.
-  rows = rows.map((r, i) => Object.assign(r, { requirements: take[i].requirements || null }));
+  // wish_offer: the price the wish list shows for the wish (see refreshOffers), null when it shows none
+  rows = rows.map((r, i) => Object.assign(r, { requirements: take[i].requirements || null, wish_offer: take[i].offer && iso ? offerValue(take[i].offer, iso, null) : null }));
   // the database has not been given the newer columns yet (the script is applied on push): add the products without them
-  for (let tries = 0; tries < 4; tries++) {
+  for (let tries = 0; tries < 5; tries++) {
     try { await sb.insert('products', rows, false); return pl; }
     catch (e) {
       const msg = String(e && (e.body || e.message) || '');
-      const col = /image_url/i.test(msg) ? 'image_url' : /compare_state/i.test(msg) ? 'compare_state' : /requirements/i.test(msg) ? 'requirements' : null;
-      if (!col || tries === 3) throw e;
+      const col = /wish_offer/i.test(msg) ? 'wish_offer' : /image_url/i.test(msg) ? 'image_url' : /compare_state/i.test(msg) ? 'compare_state' : /requirements/i.test(msg) ? 'requirements' : null;
+      if (!col || tries === 4) throw e;
       rows = rows.map((r) => { const o = Object.assign({}, r); delete o[col]; return o; });
     }
   }
@@ -353,8 +426,9 @@ async function importOne(imp, deps) {
   if (!found) return result('error', NOTE.empty, 0, 0);
 
   // the user's own products (all of them, also name-only ones): for the cap and for the "already followed" check
-  const mine = await sb.select('products', 'select=id,source_url,name&user_id=eq.' + encodeURIComponent(imp.user_id) + '&limit=200');
+  const mine = await myProducts(sb, imp.user_id);
   const have = haveOf(mine);
+  const iso = isoSec(now ? now() : new Date());
 
   const { cands, dup, noTitle } = pickCandidates(listData.wishes, have);
 
@@ -363,9 +437,11 @@ async function importOne(imp, deps) {
   const take = cands.slice(0, room);
   let listNote = '', listId = null;
   if (take.length) {
-    try { const pl = await addProducts(sb, imp, take, listData.title, log); listId = pl.listId; listNote = pl.note; }
+    try { const pl = await addProducts(sb, imp, take, listData.title, log, iso); listId = pl.listId; listNote = pl.note; }
     catch (e) { log('  Import ' + imp.id + ': kunne ikke gemme varerne: ' + safe(e)); return result('error', NOTE.saveFail, found, 0); }
   }
+  // wishes the person follows already get the wish list's price too (the new products got theirs at insert)
+  await refreshOffers(sb, mine, listData.wishes, iso, log);
 
   const parts = [];
   if (cands.length > take.length) parts.push('Der var kun plads til ' + take.length + ' af ' + cands.length + ' ønsker. Du kan højst følge ' + PRODUCT_CAP + ' varer.');
@@ -385,7 +461,7 @@ async function importOne(imp, deps) {
 // imp.seen null = an import from before this feature: the list is only memorised, nothing is added.
 // Returns {ok: true, patch} or {ok: false, kind}. Throws ImportError('deadline') when out of time.
 async function syncOne(imp, deps) {
-  const { sb, http, log } = deps;
+  const { sb, http, log, now } = deps;
   let listData;
   try {
     const id = await resolveListId(imp.url, http);
@@ -400,6 +476,13 @@ async function syncOne(imp, deps) {
   const title = cleanName(listData.title, TITLE_MAX) || imp.title || null;
   const known = Array.isArray(imp.seen) ? imp.seen.map(String) : null;
   const patch = { found, title, sync_fails: 0, note: null };
+  // the prices the wish list shows now, for the person's products with those links (also when nothing else is new)
+  const iso = isoSec(now ? now() : new Date());
+  let mine = [];
+  if (listData.wishes.length) {
+    try { mine = await myProducts(sb, imp.user_id); await refreshOffers(sb, mine, listData.wishes, iso, log); }
+    catch (e) { log('  Opdatering ' + imp.id + ': kunne ikke læse varerne: ' + safe(e)); return { ok: false, kind: 'save' }; }
+  }
   if (known === null) {
     patch.seen = uniqueTail(listData.wishes.filter((w) => w.id).map((w) => w.id), SEEN_MAX);
     return { ok: true, patch, added: 0 };
@@ -408,13 +491,12 @@ async function syncOne(imp, deps) {
   const fresh = listData.wishes.filter((w) => w.id && !knownSet.has(w.id));
   let added = 0, handled = [];
   if (fresh.length) {
-    const mine = await sb.select('products', 'select=id,source_url,name&user_id=eq.' + encodeURIComponent(imp.user_id) + '&limit=200');
     const have = haveOf(mine);
     const { cands } = pickCandidates(fresh, have);
     const take = cands.slice(0, Math.max(0, PRODUCT_CAP - mine.length));
     if (take.length) {
       let pl;
-      try { pl = await addProducts(sb, imp, take, listData.title, log); }
+      try { pl = await addProducts(sb, imp, take, listData.title, log, iso); }
       catch (e) { log('  Opdatering ' + imp.id + ': kunne ikke gemme varerne: ' + safe(e)); return { ok: false, kind: 'save' }; }
       added = take.length;
       if (!imp.list_id && pl.listId) patch.list_id = pl.listId;
@@ -523,5 +605,5 @@ async function runSyncs(ctx, deps, stats, nowIso) {
 
 module.exports = {
   runImports, runSyncs, importOne, syncOne, parseListUrl, resolveListId, fetchWishList, makeHttp, cleanWishUrl, urlKey, cleanName, cleanRequirements, isMissingTable,
-  ImportError, QUERY, API_URL, NOTE, MAX_PER_RUN, MAX_SYNCS_PER_RUN, MAX_SYNC_FAILS, SYNC_EVERY_MS, MAX_WISHES, PAGE_SIZE, PRODUCT_CAP, LIST_CAP, NAME_MAX,
+  ImportError, QUERY, QUERY_PLAIN, wishOffer, offerValue, refreshOffers, OFFER_REWRITE_MS, API_URL, NOTE, MAX_PER_RUN, MAX_SYNCS_PER_RUN, MAX_SYNC_FAILS, SYNC_EVERY_MS, MAX_WISHES, PAGE_SIZE, PRODUCT_CAP, LIST_CAP, NAME_MAX,
 };

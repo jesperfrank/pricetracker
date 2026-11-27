@@ -339,6 +339,7 @@
     state.products.forEach(function (p) { var t = Date.parse(p.lastChecked); if (isFinite(t) && t > newest) newest = t; });
     var parts = [newest ? "Opdateret " + dtFmt.format(new Date(newest)) : "Ingen priser endnu"];
     if (bfDays > 0) parts.push(bfDays + (bfDays === 1 ? " dag" : " dage") + " til Black Friday");
+    else if (bfDays === 0) parts.push("Black Friday i dag");
     $("status").textContent = parts.join(" · ");
   }
 

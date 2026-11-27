@@ -180,6 +180,8 @@ Alt er privat for hver person, undtagen en liste, som ejeren selv deler. Vælg l
 
 Indsætter man et delt link fra Ønskeskyen (`onskeskyen.dk/s/…`, eller `gowish.com`) i feltet øverst, henter jobbet ønskerne og tilføjer dem som produkter inden for et kvarter, på den valgte liste, eller på en ny liste med ønskelistens navn. Det virker kun for offentligt delte ønskelister. Det er uofficielt: jobbet bruger de samme offentlige data, som Ønskeskyens egen side henter, så det kan holde op med at virke, hvis Ønskeskyen ændrer sin side. Svarer Ønskeskyen med en blokering eller en fejl, får importen en note, og jobbet forsøger ikke at omgå det. Kør hele `supabase/schema.sql` igen i **SQL Editor**, så tabellen `imports` oprettes; indtil da kan man ikke importere, og alt andet virker som før.
 
+En ønskeliste, der er hentet, følges: jobbet læser den igen cirka fire gange i døgnet og tilføjer nye ønsker. Samtidig læser det den pris, Ønskeskyen selv viser på hvert ønske. Kan butikkens egen side ikke læses (butikken afviser automatiske opslag, linket fører et andet sted hen, eller siden har ingen læsbar pris), følges varen med Ønskeskyens pris i stedet, og tilbuddet er mærket "Pris fra Ønskeskyen". Prisen bruges kun, så længe den er læst inden for det seneste døgn, og kun for priser i kroner. En butik, der har afvist jobbet, bliver højst spurgt igen hver 6. time; svarer den, bruges butikkens egen pris. Ønsker uden link har ingen butik og dermed ingen pris fra Ønskeskyen: dem leder navne-assistenten efter ud fra navnet.
+
 ## Hverdagen
 
 - Ny person: de kan bede om adgang på siden (se ovenfor), eller du tilføjer e-mailen i `allowed_emails` og sender dem linket.

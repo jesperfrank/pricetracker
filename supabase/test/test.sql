@@ -1022,11 +1022,11 @@ reset role;
 -- a donor row that differs from a-gave in every column but the bought ones, used to try every column
 insert into public.products (id, user_id, name, source_url, target_type, target_value, tracked_variants, shops_always, shops_exclude, shops_only, active, created_at,
   status, title, variants, offers, history, normal_price, verdict, warning, check_note, last_checked, notified_price, notified_at, backfill_state, digest_price, digest_at, list_id,
-  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state, requirements, req_state, notify_silent_until, discover_state, lookup_failed_at, retry_requested_at, retry_log)
+  alt_requested_at, alternatives, alt_done_at, alt_note, compare_state, compare_at, shop_url, image_url, compare_tries, extra_urls, extra_state, requirements, req_state, notify_silent_until, discover_state, lookup_failed_at, retry_requested_at, retry_log, wish_offer)
 values ('00000000-0000-0000-0000-00000000dd01', '00000000-0000-0000-0000-0000000000b2', 'donor', 'https://shop.example.dk/donor', 'pct', 15, array['v9'], array['Proshop'], array['CDON'], true, false, '2001-01-01',
   'error', 'Donor', '[{"id":9}]', '[{"price":1}]', '[{"t":2,"p":1}]', 999, '{"level":"poor"}', 'w', 'n', '2001-02-02', 1, '2001-03-03', '{"at":"x"}', 5, '2001-04-04', '00000000-0000-0000-0000-00000000bb01',
-  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}', 'donor krav', '{"want":true}', '2001-08-08', '{"at":"2001-09-09T00:00:00Z","added":0}', '2001-10-10', '2001-11-11', array['2001-11-11'::timestamptz]);
-update public.products set tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
+  '2001-05-05', '[{"kind":"deal"}]', '2001-06-06', 'donor', 'done', '2001-07-07', 'https://shop.example.dk/donor-original', 'https://img.example.dk/donor.jpg', 2, '["https://andet.example.dk/donor"]', '{"https://andet.example.dk/donor":{"seen":true}}', 'donor krav', '{"want":true}', '2001-08-08', '{"at":"2001-09-09T00:00:00Z","added":0}', '2001-10-10', '2001-11-11', array['2001-11-11'::timestamptz], '{"price":9,"at":"2001-12-12T00:00:00Z"}');
+update public.products set wish_offer = '{"price":7,"at":"2002-09-09T00:00:00Z"}', tracked_variants = array['v1'], shops_always = array['Elgiganten'], shops_exclude = array['Power'], shops_only = false, active = true,
   variants = '[{"id":1}]', warning = 'ww', check_note = 'nn', last_checked = '2002-02-02', notified_at = '2002-03-03', backfill_state = '{"at":"y"}', digest_price = 7, digest_at = '2002-04-04',
   alt_requested_at = '2002-05-05', alternatives = '[{"kind":"similar"}]', alt_done_at = '2002-06-06', alt_note = 'gave', image_url = 'https://img.example.dk/gave.jpg', extra_urls = '["https://tredje.example.dk/gave"]', extra_state = '{"x":{"fails":3}}', requirements = 'gave krav', req_state = '{"for":"gave krav","by":"agent"}', notify_silent_until = '2002-07-07', discover_state = '{"at":"2002-08-08T00:00:00Z","added":1}', lookup_failed_at = '2002-09-09', retry_requested_at = '2002-10-10', retry_log = array['2002-10-10'::timestamptz]
  where name = 'a-gave';
@@ -3408,6 +3408,27 @@ reset role;
 set role anon;
 select t.chk('search: ... and to anon', t.try($$select * from public.discover_usage$$) = 'denied');
 reset role;
+
+-- --- wish_offer: the wish list's own price, written by the job only (it stands in for a shop page that cannot be read)
+insert into public.products (id, user_id, name, source_url, target_type, target_value, status) values
+  ('00000000-0000-0000-0000-00000000d601', '00000000-0000-0000-0000-0000000000a1', 'wish-vare', 'https://www.afvisende-butik.dk/vare/1', 'price', 100, 'error');
+set role service_role;
+update public.products set wish_offer = '{"price":295,"inStock":true,"store":"Proshop","at":"2026-11-27T10:00:00Z","tried":"2026-11-27T11:00:00Z"}' where name = 'wish-vare';
+select t.chk('wish price: the job (service role) writes it; it must be an object',
+  (select wish_offer ->> 'price' = '295' and wish_offer ->> 'tried' is not null from public.products where name = 'wish-vare')
+  and t.try($$update public.products set wish_offer = '[295]' where name = 'wish-vare'$$) = 'check'
+  and t.try($$update public.products set wish_offer = '295' where name = 'wish-vare'$$) = 'check');
+reset role;
+set role authenticated;
+select t.asA();
+update public.products set wish_offer = '{"price":1,"at":"2026-11-27T10:00:00Z"}', target_value = 90 where name = 'wish-vare';
+insert into public.products (name, source_url, target_type, target_value, wish_offer) values ('wish-ny', 'https://www.afvisende-butik.dk/vare/2', 'price', 5, '{"price":1,"at":"2026-11-27T10:00:00Z"}');
+select t.chk('wish price: the browser cannot write it (ignored on update, nulled on insert); the person''s own change goes through',
+  (select wish_offer ->> 'price' = '295' and target_value = 90 from public.products where name = 'wish-vare') and (select wish_offer is null from public.products where name = 'wish-ny'));
+update public.products set source_url = 'https://www.anden-butik.dk/vare/9' where name = 'wish-vare';
+select t.chk('wish price: a new link is another shop: the price is cleared', (select wish_offer is null and status = 'pending' from public.products where name = 'wish-vare'));
+reset role;
+delete from public.products where name in ('wish-vare', 'wish-ny');
 set role service_role;
 select t.chk('search: the service role keeps the monthly counter (one row per month, month format checked, never negative)',
   t.try($$insert into public.discover_usage (month, calls) values ('2026-11', 3)$$) = 'ok'

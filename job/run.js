@@ -60,7 +60,7 @@ function errorNote(e) {
     if (e.kind === 'layout') return 'Siden kunne ikke læses (' + e.message.slice(0, 80) + ').';
     return 'Siden kunne ikke hentes (' + e.message.slice(0, 80) + ').';
   }
-  return 'Uventet fejl: ' + Stringsafe(e).slice(0, 80);
+  return 'Uventet fejl: ' + String(safe(e)).slice(0, 80);
 }
 
 function variantsOut(parsed) {
@@ -192,6 +192,60 @@ function trackingPatch(prod, profile, parsed, now) {
     patch,
     hit: goal.newHit ? { productId: prod.id, userId: prod.user_id, name: prod.name, price: low.price, store: low.store, url: low.url, verdict: verdict.text, warning, reason: goal.reason, found: low.extraFound ? low.store : null } : null,
   };
+}
+
+// THE WISH LIST'S OWN PRICE. A product that came from a wish list (Ønskeskyen) carries the price the wish list itself shows for the wish
+// (products.wish_offer, kept fresh by the wish-list step: refreshOffers in lib/onskeskyen.js). When the shop's own page cannot be read
+// (the shop refuses automated requests, the link redirects elsewhere, no readable price, another currency, a timeout), that price
+// stands in for the page: the product is followed with it, and the offer says "Pris fra Ønskeskyen" and when it was read. Not when the
+// page is gone (404/410: the product may be gone too), and only while the reading is at most 24 hours old (X.STALE_MS).
+// A shop whose page failed is then left alone for 6 hours (ERROR_RETRY_MS, as an error row is): wish_offer.tried remembers the attempt.
+const WISH_NOTE = 'Pris fra Ønskeskyen';
+function wishFresh(prod, now) {
+  const w = prod && prod.wish_offer;
+  if (!w || typeof w !== 'object' || typeof w.price !== 'number' || !(w.price > 0)) return null;
+  const at = Date.parse(w.at);
+  if (!isFinite(at) || at > now.getTime() + 60000 || now.getTime() - at > X.STALE_MS) return null;
+  return { w, at };
+}
+// The stand-in page (the shape parseShopPage returns, one offer), or null.
+function wishPage(prod, target, error, now) {
+  if (!target || !target.shop) return null;
+  if (error instanceof PJ.PageError && error.kind === 'notfound') return null;
+  const f = wishFresh(prod, now);
+  if (!f) return null;
+  const store = (typeof f.w.store === 'string' && f.w.store.trim()) || X.hostOf(target.url);
+  const inStock = f.w.inStock !== false;
+  const row = { key: target.url, variant: SHOP.SHOP_ID, store, price: f.w.price, url: target.url, inStock, stock: inStock ? 'InStock' : 'OutOfStock', note: WISH_NOTE, name: store, saleKnown: false, sale: false, stale: true, readAt: f.at };
+  return { title: null, rows: [row], variants: [{ id: SHOP.SHOP_ID, label: store, lowest: inStock ? f.w.price : null, offers: 1, sample: null }], history: [], note: null, shop: true, source: 'wish', image: null, wish: true };
+}
+// When the shop's own page last failed: the mark on the wish price, or, for a row that is in error, its last check (that check was the
+// failed attempt) - unless the failure was a page that is gone, which the wish price never stands in for.
+const NOTFOUND_PREFIX = shopErrorNote(Object.assign(new PJ.PageError('notfound', ''), { shop: true })).split('(')[0];
+function shopTriedAt(prod, w) {
+  if (typeof w.tried === 'string') return Date.parse(w.tried);
+  if (prod.status === 'error' && prod.last_checked && String(prod.check_note || '').indexOf(NOTFOUND_PREFIX) !== 0) return Date.parse(prod.last_checked);
+  return NaN;
+}
+// true while the shop itself is left alone: its page failed less than 6 hours ago and the wish list's price is there to stand in
+function wishRests(prod, target, now) {
+  if (!target || !target.shop) return false;
+  const f = wishFresh(prod, now);
+  const tried = f ? shopTriedAt(prod, f.w) : NaN;
+  return isFinite(tried) && tried <= now.getTime() + 60000 && now.getTime() - tried < ERROR_RETRY_MS;
+}
+// The bookkeeping written along with a check: a failed attempt is remembered (tried), a page that was read clears it. A row in error
+// that gets the wish price without a new attempt keeps the time of the attempt that failed (its last check).
+function wishPatch(prod, used, attempted, iso) {
+  const w = prod && prod.wish_offer;
+  if (!w || typeof w !== 'object') return {};
+  if (used) {
+    if (attempted) return { wish_offer: Object.assign({}, w, { tried: iso }) };
+    return typeof w.tried !== 'string' && prod.status === 'error' && prod.last_checked ? { wish_offer: Object.assign({}, w, { tried: prod.last_checked }) } : {};
+  }
+  if (w.tried === undefined) return {};
+  const c = Object.assign({}, w); delete c.tried;
+  return { wish_offer: c };
 }
 
 // A single-shop product whose shop cannot be followed asks the AI agent to look for the product on Prisjagt (compare_state 'wanted'),
@@ -425,7 +479,7 @@ async function run(ctx) {
   const fetchImpl = ctx.fetch || fetch;
   const sb = makeClient(ctx.supabaseUrl, ctx.serviceKey, fetchImpl);
   const started = Date.now();
-  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, accessPending: null, accessAdmins: null, written: 0, writeFail: 0, deadline: false, extraPages: 0, extraFail: 0, extraDropped: 0, digests: 0, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null, discover: { state: '', products: 0, calls: 0, added: 0, replaced: 0, stopped: '' } };
+  const stats = { total: 0, pending: 0, tracking: 0, choose: 0, error: 0, pages: 0, pageFail: 0, blocked: false, blockedHosts: [], wishUsed: 0, hits: 0, sent: 0, mailSkipped: 0, mailNote: '', accessOwner: 0, accessApproved: 0, accessPending: null, accessAdmins: null, written: 0, writeFail: 0, deadline: false, extraPages: 0, extraFail: 0, extraDropped: 0, digests: 0, backfilled: 0, backfillPoints: 0, waybackStopped: false, imports: null, discover: { state: '', products: 0, calls: 0, added: 0, replaced: 0, stopped: '' } };
 
   // 0. wish-list imports (Ønskeskyen): before the price checks, so that the new products get their first price in this run.
   // Own step: it never fails the run, and it is skipped quietly when the imports table does not exist yet.
@@ -462,6 +516,8 @@ async function run(ctx) {
     if (st === 'error') {
       const last = prod.last_checked ? Date.parse(prod.last_checked) : NaN;
       if (isFinite(last) && now.getTime() - last < ERROR_RETRY_MS) {
+        // the wish list's price has come for a shop that could not be read: the product is followed with it at once, the shop is not asked again yet
+        if (wishRests(prod, classify(prod.source_url), now)) return 'initial';
         const t = X.links(prod).length ? classify(prod.source_url) : null;
         return t && t.shop && prod.compare_state === 'done' && Date.parse(prod.compare_at) > last ? 'initial' : null;
       }
@@ -571,12 +627,22 @@ async function run(ctx) {
     const profile = profiles[prod.user_id] || null, iso = isoNow(now);
     const mainKey = SHOP.registrableDomain(new URL(target.url).hostname);
     const prev = X.stateOf(prod), next = {}, offerOf = {};
-    let main = null, mainErr = null;
+    let main = null, mainErr = null, mainTried = true;
     if (stats.blockedHosts.indexOf(mainKey) !== -1) mainErr = Object.assign(new PJ.PageError('blocked', 'afvist tidligere i kørslen'), { shop: true });
+    else if (wishRests(prod, target, now)) { mainTried = false; mainErr = Object.assign(new PJ.PageError('blocked', 'butikken spørges ikke igen endnu'), { shop: true }); }
     else {
       if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; return; }
       const got = await fetchCached(target.url);
       if (got.error) { stats.pageFail++; noteBlocked(got.error, mainKey); mainErr = got.error; } else main = got.page;
+    }
+    // the main shop could not be read: the wish list's own price stands in for its page (see wishPage)
+    let wishExtra = main ? wishPatch(prod, false, true, iso) : {};
+    if (!main) {
+      const wp = wishPage(prod, target, mainErr, now);
+      if (wp) {
+        main = wp; stats.wishUsed++;
+        wishExtra = Object.assign({}, wantsCompare(prod, target, mainErr) ? wantedPatch(prod, now) : {}, wishPatch(prod, true, mainTried, iso));
+      }
     }
     const vid = main && main.variants && main.variants[0] ? main.variants[0].id : SHOP.SHOP_ID;
     const rd = await readExtras(prod, ls, vid, prev, next, offerOf, iso);
@@ -624,7 +690,7 @@ async function run(ctx) {
         out[u] = e;
       });
       // the main shop has an entry only to remember its last offer (it is not an extra link)
-      if (main && main.rows[0] && typeof main.rows[0].price === 'number') out[target.url] = { offer: offerEntry(main.rows[0], main, iso) };
+      if (main && !main.wish && main.rows[0] && typeof main.rows[0].price === 'number') out[target.url] = { offer: offerEntry(main.rows[0], main, iso) };
       else if (mainStale && offerOf[target.url]) out[target.url] = { offer: offerOf[target.url] };
       const val = Object.keys(out).length ? out : null;
       return JSON.stringify(val) === JSON.stringify(prod.extra_state === undefined ? null : prod.extra_state) ? {} : { extra_state: val };
@@ -656,11 +722,11 @@ async function run(ctx) {
       if (ip.track) {
         const nb = Object.assign({}, prod, ip.patch);
         const tp = trackingPatch(nb, profile, parsed, now);
-        results.push({ prod, patch: Object.assign({}, ip.patch, tp.patch, extraPatch(tp)), hit: tp.hit, base: nb, parsed, profile, shop: true });
-      } else results.push({ prod, patch: Object.assign({}, ip.patch, extraPatch(null)), hit: null });
+        results.push({ prod, patch: Object.assign({}, ip.patch, tp.patch, extraPatch(tp), wishExtra), hit: tp.hit, base: nb, parsed, profile, shop: true });
+      } else results.push({ prod, patch: Object.assign({}, ip.patch, extraPatch(null), wishExtra), hit: null });
     } else {
       const tp = fin(trackingPatch(prod, profile, parsed, now));
-      results.push({ prod, patch: Object.assign({}, tp.patch, extraPatch(tp)), hit: tp.hit, base: prod, parsed, profile, shop: true });
+      results.push({ prod, patch: Object.assign({}, tp.patch, extraPatch(tp), wishExtra), hit: tp.hit, base: prod, parsed, profile, shop: true });
     }
   };
   // A product on prisjagt.dk with extra shops (the shops Prisjagt does not list): called by the tracking check right after the Prisjagt page
@@ -760,26 +826,37 @@ async function run(ctx) {
       continue;
     }
     const url = target.url, hostKey = SHOP.registrableDomain(new URL(url).hostname);
-    if (stats.blockedHosts.indexOf(hostKey) !== -1) {                // refused earlier in this run: leave the rest of that host alone
-      const blockedErr = Object.assign(new PJ.PageError('blocked', 'afvist tidligere i kørslen'), { shop: true });
-      if (wantsCompare(prod, target, blockedErr) || wantsCompareAgain(prod, target, blockedErr, now)) results.push({ prod, patch: wantedPatch(prod, now), hit: null });
+    // The page is not asked for when its host refused earlier in this run (the rest of that host is left alone), or when the shop failed
+    // within the last 6 hours and the wish list's own price stands in for it (wishRests).
+    const rests = stats.blockedHosts.indexOf(hostKey) === -1 && wishRests(prod, target, now);
+    const skipErr = stats.blockedHosts.indexOf(hostKey) !== -1 ? Object.assign(new PJ.PageError('blocked', 'afvist tidligere i kørslen'), { shop: true })
+      : rests ? Object.assign(new PJ.PageError('blocked', 'butikken spørges ikke igen endnu'), { shop: true }) : null;
+    if (skipErr && !wishPage(prod, target, skipErr, now)) {
+      if (wantsCompare(prod, target, skipErr) || wantsCompareAgain(prod, target, skipErr, now)) results.push({ prod, patch: wantedPatch(prod, now), hit: null });
       continue;
     }
-    if (Date.now() - started > DEADLINE_MS) { stats.deadline = true; continue; }
+    if (!skipErr && Date.now() - started > DEADLINE_MS) { stats.deadline = true; continue; }
 
     try {
-      const got = await fetchCached(url);
+      const got = skipErr ? { error: skipErr } : await fetchCached(url);
+      let page = got.page, wishExtra = {};
       if (got.error) {
-        stats.pageFail++;
-        noteBlocked(got.error, hostKey);
+        if (!skipErr) { stats.pageFail++; noteBlocked(got.error, hostKey); }
         const note = errorNote(got.error);
-        log('  ' + tag(prod) + ': ' + note);
         const want = wantsCompare(prod, target, got.error) || wantsCompareAgain(prod, target, got.error, now) ? wantedPatch(prod, now) : {};
-        if (todo === 'initial') results.push({ prod, patch: Object.assign({ status: 'error', check_note: note, last_checked: isoNow(now) }, want), hit: null });
-        else results.push({ prod, patch: Object.assign({ check_note: note }, want), hit: null });
-        continue;
-      }
-      let parsed = got.page, xp = null;
+        // the wish list's own price stands in for a shop page that cannot be read (see wishPage)
+        page = wishPage(prod, target, got.error, now);
+        if (!page) {
+          log('  ' + tag(prod) + ': ' + note);
+          if (todo === 'initial') results.push({ prod, patch: Object.assign({ status: 'error', check_note: note, last_checked: isoNow(now) }, want), hit: null });
+          else results.push({ prod, patch: Object.assign({ check_note: note }, want), hit: null });
+          continue;
+        }
+        if (!skipErr) log('  ' + tag(prod) + ': ' + note + ' Ønskelistens pris bruges.');
+        stats.wishUsed++;
+        wishExtra = Object.assign({}, want, wishPatch(prod, true, !rests, isoNow(now)));
+      } else if (target.shop) wishExtra = wishPatch(prod, false, true, isoNow(now));
+      let parsed = page, xp = null;
       const profile = profiles[prod.user_id] || null;
       if (!target.shop && todo === 'track' && extraLinks.length) {
         xp = await withPrisjagtExtras(prod, parsed, extraLinks);
@@ -790,11 +867,11 @@ async function run(ctx) {
         if (ip.track) {
           const next = Object.assign({}, prod, ip.patch);
           const tp = trackingPatch(next, profile, parsed, now);
-          results.push({ prod, patch: Object.assign({}, ip.patch, tp.patch), hit: tp.hit, base: next, parsed, profile, shop: target.shop });
-        } else results.push({ prod, patch: ip.patch, hit: null });
+          results.push({ prod, patch: Object.assign({}, ip.patch, tp.patch, wishExtra), hit: tp.hit, base: next, parsed, profile, shop: target.shop });
+        } else results.push({ prod, patch: Object.assign({}, ip.patch, wishExtra), hit: null });
       } else {
         const tp = trackingPatch(prod, profile, parsed, now);
-        results.push({ prod, patch: Object.assign({}, tp.patch, xp ? xp.extraPatch(tp) : {}), hit: tp.hit, base: prod, parsed, profile, shop: target.shop });
+        results.push({ prod, patch: Object.assign({}, tp.patch, xp ? xp.extraPatch(tp) : {}, wishExtra), hit: tp.hit, base: prod, parsed, profile, shop: target.shop });
       }
     } catch (e) {
       stats.pageFail++;
@@ -1072,7 +1149,7 @@ async function run(ctx) {
   // 6. summary (5 lines)
   const summary = [
     'Produkter: ' + stats.total + ' aktive (nye: ' + stats.pending + ', følges: ' + stats.tracking + ', venter på valg: ' + stats.choose + ', fejl: ' + stats.error + ').',
-    'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.extraPages ? ' (ekstra butikker: ' + stats.extraPages + ', uden pris: ' + stats.extraFail + ', forkastet som anden vare: ' + stats.extraDropped + ')' : '') + (stats.blockedHosts.length ? ' (afvist af ' + stats.blockedHosts.join(', ') + ': resten derfra sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
+    'Sider hentet: ' + stats.pages + ', fejlede: ' + stats.pageFail + (stats.extraPages ? ' (ekstra butikker: ' + stats.extraPages + ', uden pris: ' + stats.extraFail + ', forkastet som anden vare: ' + stats.extraDropped + ')' : '') + (stats.wishUsed ? ' (ønskelistens pris brugt: ' + stats.wishUsed + ')' : '') + (stats.blockedHosts.length ? ' (afvist af ' + stats.blockedHosts.join(', ') + ': resten derfra sprunget over)' : '') + (stats.deadline ? ' (tidsgrænse nået)' : '') + '.',
     'Nye hits: ' + stats.hits + '.' + (stats.backfilled ? ' Ældre priser fra Internet Archive: ' + stats.backfillPoints + ' for ' + stats.backfilled + ' produkt(er).' : '') + discoverSummary(stats.discover),
     'E-mails sendt: ' + stats.sent + (stats.digests ? ' (heraf oversigter: ' + stats.digests + ')' : '') + ', sprunget over: ' + stats.mailSkipped + (stats.mailNote ? ' (' + stats.mailNote + ')' : '') + ' Adgang: ' + stats.accessOwner + ' til ejer, ' + stats.accessApproved + ' godkendte' + (stats.accessPending == null ? '' : ', ' + stats.accessPending + ' venter') + (stats.accessAdmins == null ? '' : ', ' + stats.accessAdmins + (stats.accessAdmins === 1 ? ' administrator' : ' administratorer')) + '.',
     'Skrevet til databasen: ' + stats.written + ', skrivefejl: ' + stats.writeFail + '. Tid: ' + ((Date.now() - started) / 1000).toFixed(1) + ' s.',

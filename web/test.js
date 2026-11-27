@@ -406,7 +406,9 @@ let base;
       /mor@familie\.dk/.test(await p.textContent("#who")) && /Lyd til/.test(await p.textContent("#soundBtn")) && await p.isVisible("#settingsBtn") && await p.isVisible("#logoutBtn") && !(await p.isVisible("#accessBtn")));
     await p.keyboard.press("Escape");
     const st = await p.textContent("#status");
-    check("status line: last updated and Black Friday, no update interval", /^Opdateret /.test(st) && !/kvarter/.test(st) && /Black Friday/.test(st), st);
+    // Black Friday 2026 is 27 Nov: the countdown before it, "i dag" on the day, nothing after
+    const bfOver = Date.now() >= new Date(2026, 10, 28).getTime();
+    check("status line: last updated and Black Friday, no update interval", /^Opdateret /.test(st) && !/kvarter/.test(st) && (bfOver ? !/Black Friday/.test(st) : /Black Friday/.test(st)), st);
     check("six rows shown", (await p.locator(".item").count()) === 6);
     const pend = await p.locator('.item[data-status="pending"]').textContent();
     check("pending row text", /Henter produktet …/.test(pend) && !/kvarter/.test(pend), pend);

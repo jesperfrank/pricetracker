@@ -1514,7 +1514,7 @@ test('onskeskyen: the rows are inserted in one request, as a browser would have 
   const bodies = []; const f = makeFake(db);
   await ONSKE.runImports({ sb: makeClient('https://x.supabase.test', SERVICE_KEY, async (u, o) => { if (o && o.method === 'POST' && /\/products$/.test(u)) bodies.push(JSON.parse(o.body)); return f(u, o); }), fetch: f, now: () => NOW, sleep: async () => {}, log: () => {} });
   assert.strictEqual(bodies.length, 1); assert.strictEqual(bodies[0].length, 12);
-  assert.deepStrictEqual(Object.keys(bodies[0][0]).sort(), ['active', 'compare_state', 'image_url', 'list_id', 'name', 'requirements', 'source_url', 'status', 'target_type', 'target_value', 'user_id']);
+  assert.deepStrictEqual(Object.keys(bodies[0][0]).sort(), ['active', 'compare_state', 'image_url', 'list_id', 'name', 'requirements', 'source_url', 'status', 'target_type', 'target_value', 'user_id', 'wish_offer']);
 });
 
 test('onskeskyen: the query asks for photos; the first https photo of each wish becomes image_url, nothing else is fetched', async () => {
@@ -1872,7 +1872,7 @@ const idsOf = (ws) => ws.map((w) => w.id);
 const mutableWeb = (wishes, extra) => { const lists = { [LIST_ID]: { title: 'Fødselsdagsønsker', accessLevel: 'Public', wishes: wishes.slice() } }; const web = onskeWeb(Object.assign({ lists }, extra || {})); web.lists = lists; return web; };
 const WL = 'https://onskeskyen.dk/wishlists/' + LIST_ID;
 
-test('sync: a finished import becomes a standing link (title, seen ids, list, synced_at) and is read again at most once a day', async () => {
+test('sync: a finished import becomes a standing link (title, seen ids, list, synced_at) and is read again every five and a half hours at most', async () => {
   const web = mutableWeb(WISHES), db = importsDb(web);
   impRow(db, SHARE);
   await runImp(db);
@@ -1880,15 +1880,16 @@ test('sync: a finished import becomes a standing link (title, seen ids, list, sy
   assert.strictEqual(imp.status, 'done');
   assert.deepStrictEqual(imp.seen, idsOf(WISHES)); assert.strictEqual(imp.title, 'Fødselsdagsønsker'); assert.strictEqual(imp.sync_fails, 0);
   assert.strictEqual(imp.synced_at, '2026-11-16T10:00:00Z'); assert.strictEqual(imp.list_id, db.lists[0].id, 'the list the products went into is remembered');
-  // later the same day: nothing is fetched
+  // a little later: nothing is fetched
   web.calls.length = 0;
-  let r = await runImp(db, { now: at('2026-11-17T07:59:00Z') });                // 21 h 59 min later
+  let r = await runImp(db, { now: at('2026-11-16T15:29:00Z') });                // 5 h 29 min later
   assert.strictEqual(r.stats.synced, 0); assert.strictEqual(web.calls.length, 0);
-  r = await runImp(db, { now: at('2026-11-17T08:00:00Z') });                    // 22 h later: due
+  r = await runImp(db, { now: at('2026-11-16T15:30:00Z') });                    // 5 h 30 min later: due
   assert.strictEqual(r.stats.synced, 1); assert(web.calls.length > 0);
-  assert.strictEqual(db.imports[0].synced_at, '2026-11-17T08:00:00Z');
+  assert.strictEqual(db.imports[0].synced_at, '2026-11-16T15:30:00Z');
   web.calls.length = 0;
-  r = await runImp(db, { now: at('2026-11-17T08:15:00Z') }); assert.strictEqual(web.calls.length, 0, 'not again 15 minutes later');
+  r = await runImp(db, { now: at('2026-11-16T15:45:00Z') }); assert.strictEqual(web.calls.length, 0, 'not again 15 minutes later');
+  assert.strictEqual(ONSKE.SYNC_EVERY_MS, 5.5 * 3600 * 1000);
 });
 
 test('sync: only wishes that are new since last time are added (same dedupe, name cleaning and tracking removal); nothing existing is touched', async () => {
@@ -1973,7 +1974,7 @@ test('sync: at most 3 per run on top of the 3 new imports, the longest-unread fi
   const r3 = await runImp(d2, { deadlineAt: Date.now() - 1 }); assert.strictEqual(w2.calls.length, 0); assert.strictEqual(r3.stats.synced, 0);
 });
 
-test('sync: a list that is private or gone keeps the products, gets a short note, is tried once a day, and is given up after 7 days', async () => {
+test('sync: a list that is private or gone keeps the products, gets a short note, is tried again later, and is given up after 28 failures in a row (about a week)', async () => {
   const web = mutableWeb(WISHES), db = importsDb(web);
   impRow(db, WL); await runImp(db);
   const products = mine(db).length;
@@ -1985,15 +1986,16 @@ test('sync: a list that is private or gone keeps the products, gets a short note
     assert.strictEqual(r.stats.synced, 1, 'day ' + d); assert.strictEqual(r.stats.syncFailed, 1);
     assert.strictEqual(imp.status, 'done', 'day ' + d); assert.strictEqual(imp.sync_fails, d); assert.strictEqual(imp.note, ONSKE.NOTE.retryPrivate); assert.strictEqual(imp.synced_at, dayN(d));
     assert.strictEqual(mine(db).length, products, 'the products stay');
-    const again = await runImp(db, { now: at(dayN(d).replace('T10', 'T18')) }); assert.strictEqual(again.stats.synced, 0, 'only once a day');
+    const again = await runImp(db, { now: at(dayN(d).replace('T10', 'T14')) }); assert.strictEqual(again.stats.synced, 0, 'not again four hours later');
   }
-  assert.strictEqual(ONSKE.NOTE.retryPrivate, 'Ønskelisten er ikke offentlig lige nu. Prøver igen i morgen.');
+  assert.strictEqual(ONSKE.NOTE.retryPrivate, 'Ønskelisten er ikke offentlig lige nu. Prøver igen senere.');
+  assert.strictEqual(ONSKE.MAX_SYNC_FAILS, 28);
+  db.imports[0].sync_fails = ONSKE.MAX_SYNC_FAILS - 1;                          // ... and so on, until the last one
   web.calls.length = 0;
   await runImp(db, { now: at(dayN(7)) });
-  assert.strictEqual(db.imports[0].status, 'error'); assert.strictEqual(db.imports[0].sync_fails, 7); assert.strictEqual(db.imports[0].note, ONSKE.NOTE.private); assert.strictEqual(mine(db).length, products);
+  assert.strictEqual(db.imports[0].status, 'error'); assert.strictEqual(db.imports[0].sync_fails, 28); assert.strictEqual(db.imports[0].note, ONSKE.NOTE.private); assert.strictEqual(mine(db).length, products);
   web.calls.length = 0;
-  const r = await runImp(db, { now: at(dayN(9)) }); assert.strictEqual(web.calls.length, 0, 'after the 7th failure nothing more is fetched'); assert.strictEqual(r.stats.synced, 0);
-  assert.strictEqual(ONSKE.MAX_SYNC_FAILS, 7);
+  const r = await runImp(db, { now: at(dayN(9)) }); assert.strictEqual(web.calls.length, 0, 'after the last failure nothing more is fetched'); assert.strictEqual(r.stats.synced, 0);
   // the list disappears entirely
   const w2 = mutableWeb(WISHES), d2 = importsDb(w2); impRow(d2, WL); await runImp(d2);
   delete w2.lists[LIST_ID]; await runImp(d2, { now: at(D1) });
@@ -2011,7 +2013,7 @@ test('sync: a site that does not answer counts as a failed day too, with its own
   const w2 = mutableWeb(WISHES, { apiStatus: 503 }); db.web = w2;
   await runImp(db, { now: at(D1) });
   assert.strictEqual(db.imports[0].sync_fails, 1); assert.strictEqual(db.imports[0].note, ONSKE.NOTE.retryUnavailable); assert.strictEqual(db.imports[0].status, 'done');
-  db.imports[0].sync_fails = 6;
+  db.imports[0].sync_fails = ONSKE.MAX_SYNC_FAILS - 1;
   await runImp(db, { now: at(D2) });
   assert.strictEqual(db.imports[0].status, 'error'); assert.strictEqual(db.imports[0].note, ONSKE.NOTE.unavailable);
   // inserting the new products fails: tried again tomorrow, no failure counted, the wish is not marked as handled
@@ -4508,6 +4510,167 @@ test('store names of extra shops: the shop is the segment of a title-like site n
   const XT = require('./lib/extras'), rows = [{ store: 'Tøjeksperten', url: 'https://prisjagt.dk/go-to-shop/1/offer/2' }, { store: 'Babysupply.dk', url: 'https://prisjagt.dk/go-to-shop/1/offer/3' }];
   assert.strictEqual(XT.covered(rows, { url: 'https://www.toejeksperten.dk/chinos', store: 'Tøjeksperten' }), true); assert.strictEqual(XT.covered(rows, { url: 'https://www.toejeksperten.dk/chinos', store: 'Tøjeksperten - Shop herretøj online - Hurtig levering' }), false, 'the old name was no duplicate');
   assert.strictEqual(XT.covered(rows, { url: 'https://www.babysupply.dk/x', store: 'Babysupply' }), true, 'Babysupply.dk and Babysupply are the same shop');
+});
+
+// ---------------------------------------------------------------- the wish list's own price (products.wish_offer)
+
+const refOf = (url, o) => Object.assign({ price: 295, currency: 'DKK', inStock: true, originalUrl: url, brand: { name: 'Proshop' } }, o || {});
+
+test('wish price: the price the wish list shows is read with the wish, only in kroner and only for the wish\'s own link', () => {
+  const W = ONSKE.wishOffer, U = 'https://www.proshop.dk/x/1';
+  const wish = (o) => ({ url: U, productRef: refOf(U, o) });
+  assert.deepStrictEqual(W(wish()), { price: 295, inStock: true, store: 'Proshop' });
+  assert.deepStrictEqual(W(wish({ inStock: false, brand: null, price: 293.044 })), { price: 293.04, inStock: false, store: null });
+  assert.deepStrictEqual(W(wish({ inStock: null, originalUrl: 'https://proshop.dk/x/1/?utm_source=a#b' })), { price: 295, inStock: true, store: 'Proshop' }, 'the same link, compared as links are everywhere else');
+  assert.strictEqual(W(wish({ brand: { name: '  Pro\nshop  ' + 'x'.repeat(80) } })).store.length, 60);
+  for (const bad of [wish({ currency: 'GBP' }), wish({ currency: null }), wish({ price: 0 }), wish({ price: -5 }), wish({ price: '295' }), wish({ price: 1e9 }), wish({ price: NaN }),
+    wish({ originalUrl: 'https://www.proshop.dk/x/2' }), wish({ originalUrl: null }), { url: U }, { url: U, productRef: 'x' }, { url: null, productRef: refOf(U) }, { url: 'http://www.proshop.dk/x/1', productRef: refOf('http://www.proshop.dk/x/1') }, null])
+    assert.strictEqual(W(bad), null, JSON.stringify(bad));
+  assert(/productRef \{ price currency inStock originalUrl brand \{ name \} \}/.test(ONSKE.QUERY)); assert(!/productRef/.test(ONSKE.QUERY_PLAIN)); assert(/photos/.test(ONSKE.QUERY_PLAIN));
+});
+
+test('wish price: an import stores it on the new products and on a product the person follows already; an API that refuses the field still imports', async () => {
+  const A = 'https://www.proshop.dk/x/1', B = 'https://www.boozt.com/dk/da/y/2', C = 'https://www.lilleshop.dk/z';
+  const wl = [{ id: 'w1', title: 'Pære', price: 295, currency: 'DKK', url: A, productRef: refOf(A) },
+    { id: 'w2', title: 'Jakke', price: 750, currency: 'DKK', url: B, productRef: refOf(B, { price: 500, brand: { name: 'Boozt' }, inStock: false }) },
+    { id: 'w3', title: 'Uden pris', price: 10, currency: 'DKK', url: C, productRef: null }, { id: 'w4', title: 'Kun navn', price: 10, currency: 'DKK', url: null, productRef: refOf(A) }];
+  const web = onskeWeb({ lists: { [LIST_ID]: { title: 'Jul', accessLevel: 'Public', wishes: wl } } }), db = importsDb(web); impRow(db, WL);
+  db.products.push(product('old', 'u1', 'dyson', { source_url: 'https://boozt.com/dk/da/y/2', name: 'Min jakke', wish_offer: null }));
+  db.products.push(product('other', 'u2', 'dyson', { source_url: A, name: 'En andens', wish_offer: null }));
+  await runImp(db);
+  const by = (n) => db.products.find((p) => p.name === n);
+  assert.strictEqual(db.imports[0].status, 'done'); assert.strictEqual(db.imports[0].added, 3);
+  assert(web.posts().every((c) => /productRef/.test(c.body)), 'the price is asked for with the wishes, no extra request');
+  assert.deepStrictEqual(by('Pære').wish_offer, { price: 295, inStock: true, store: 'Proshop', at: '2026-11-16T10:00:00Z' });
+  assert.strictEqual(by('Uden pris').wish_offer, null); assert.strictEqual(by('Kun navn').wish_offer, null, 'a wish without a link has no shop the price could belong to');
+  assert.deepStrictEqual(by('Min jakke').wish_offer, { price: 500, inStock: false, store: 'Boozt', at: '2026-11-16T10:00:00Z' }, 'already followed: the price is written to that product');
+  assert.strictEqual(by('En andens').wish_offer, null, 'never another person\'s product');
+  // the API refuses the query (HTTP 400): the plain query is sent instead, the wishes come in without a price
+  const base = onskeWeb({ lists: { [LIST_ID]: { title: 'Jul', accessLevel: 'Public', wishes: wl } } });
+  const strict = Object.assign(async (url, init) => (init && init.method === 'POST' && /productRef/.test(String(init.body)) && new URL(url).pathname !== '/graphql')
+    ? jsonResp(400, { errors: [{ message: 'Invalid request.', extensions: { code: 'GRAPHQL_VALIDATION_FAILED' } }] }) : base(url, init), { calls: base.calls, foreign: base.foreign, posts: base.posts, gets: base.gets });
+  const db2 = importsDb(strict); impRow(db2, WL);
+  await runImp(db2);
+  assert.strictEqual(db2.imports[0].status, 'done'); assert.strictEqual(db2.imports[0].added, 4);
+  const posts2 = base.posts().filter((c) => new URL(c.url).pathname !== '/graphql');
+  assert(base.posts().some((c) => /productRef/.test(c.body)) && posts2.length === 1 && !/productRef/.test(posts2[0].body), 'asked with the field first, then once without it (the refused request never reached the list)');
+  // ... also when the refusal comes as a GraphQL error with status 200
+  const base3 = onskeWeb({ lists: { [LIST_ID]: { title: 'Jul', accessLevel: 'Public', wishes: wl } } });
+  const strict3 = Object.assign(async (url, init) => (init && init.method === 'POST' && /productRef/.test(String(init.body)) && new URL(url).pathname !== '/graphql')
+    ? jsonResp(200, { errors: [{ message: 'Cannot query field', extensions: { code: 'GRAPHQL_VALIDATION_FAILED' } }], data: null }) : base3(url, init), { calls: base3.calls, foreign: base3.foreign, posts: base3.posts, gets: base3.gets });
+  const db3 = importsDb(strict3); impRow(db3, WL);
+  await runImp(db3);
+  assert.strictEqual(db3.imports[0].status, 'done'); assert.strictEqual(db3.imports[0].added, 4);
+});
+
+test('wish price: every re-read of the wish list refreshes it (a changed price at once, an unchanged one when the reading is three hours old); the job\'s own mark stays', async () => {
+  const A = 'https://www.proshop.dk/x/1', B = 'https://www.boozt.com/dk/da/y/2';
+  const patches = [], sb = { patch: async (t, f, b) => { patches.push([t, f, JSON.parse(JSON.stringify(b))]); } };
+  const wishesNow = [{ url: A, offer: { price: 295, inStock: true, store: 'Proshop' } }, { url: B + '?utm_source=x', offer: { price: 450, inStock: true, store: 'Boozt' } }, { url: 'https://www.lilleshop.dk/z', offer: null }];
+  const rows = () => [
+    { id: 'a', source_url: A, wish_offer: { price: 295, inStock: true, store: 'Proshop', at: '2026-11-16T09:00:00Z', tried: '2026-11-16T08:00:00Z' } },
+    { id: 'b', source_url: B, wish_offer: { price: 500, inStock: true, store: 'Boozt', at: '2026-11-16T09:00:00Z' } },
+    { id: 'c', source_url: 'https://www.lilleshop.dk/z', wish_offer: null }, { id: 'd', source_url: 'https://www.andet.dk/q', wish_offer: null },
+    { id: 'e', source_url: A }, { id: 'f', source_url: null, wish_offer: null }];
+  // one hour after the last reading: only the changed price is written
+  assert.strictEqual(await ONSKE.refreshOffers(sb, rows(), wishesNow, '2026-11-16T10:00:00Z', () => {}), 1);
+  assert.deepStrictEqual(patches, [['products', 'id=eq.b', { wish_offer: { price: 450, inStock: true, store: 'Boozt', at: '2026-11-16T10:00:00Z' } }]]);
+  // three hours after: the unchanged one too, so its reading stays fresh; the mark of the failed shop attempt is kept
+  patches.length = 0;
+  assert.strictEqual(await ONSKE.refreshOffers(sb, rows(), wishesNow, '2026-11-16T12:00:00Z', () => {}), 2);
+  assert.deepStrictEqual(patches[0], ['products', 'id=eq.a', { wish_offer: { price: 295, inStock: true, store: 'Proshop', at: '2026-11-16T12:00:00Z', tried: '2026-11-16T08:00:00Z' } }]);
+  assert.strictEqual(ONSKE.OFFER_REWRITE_MS, 3 * 3600 * 1000);
+  // a product without the column (an older database) is never written; a failing write stops quietly
+  assert(!patches.some((x) => x[1] === 'id=eq.e'));
+  const logs = [];
+  assert.strictEqual(await ONSKE.refreshOffers({ patch: async () => { throw new Error('nede'); } }, rows(), wishesNow, '2026-11-16T12:00:00Z', (l) => logs.push(l)), 0); assert.strictEqual(logs.length, 1);
+  // through a run: the list is read again five and a half hours later and the new price is on the product
+  const wl = [{ id: 'w1', title: 'Pære', price: 295, currency: 'DKK', url: A, productRef: refOf(A) }];
+  const web = mutableWeb(wl), db = importsDb(web); impRow(db, WL); await runImp(db);
+  db.products[0].wish_offer.tried = '2026-11-16T10:05:00Z';
+  web.lists[LIST_ID].wishes = [Object.assign({}, wl[0], { productRef: refOf(A, { price: 249 }) })];
+  const r = await runImp(db, { now: at('2026-11-16T15:30:00Z') });
+  assert.strictEqual(r.stats.synced, 1); assert.strictEqual(mine(db).length, 1);
+  assert.deepStrictEqual(db.products[0].wish_offer, { price: 249, inStock: true, store: 'Proshop', at: '2026-11-16T15:30:00Z', tried: '2026-11-16T10:05:00Z' });
+});
+
+test('wish price: a shop that refuses us is followed with the price the wish list shows; the shop is left alone for six hours; its own page wins when it can be read', async () => {
+  const U = 'https://www.afvisende.dk/vare/1', db = newDb();
+  const hrs = (h) => new Date(NOW.getTime() + h * 3600 * 1000), isoH = (h) => hrs(h).toISOString().replace(/\.\d+Z$/, 'Z');
+  db.products.push(shopProduct('W1', 'u1', U, { name: 'Vare', target_value: 250, wish_offer: { price: 295, inStock: true, store: 'Proshop', at: isoH(-1) } }));
+  const S = () => db.products[0];
+  const map = { [U]: () => resp(403, 'Forbidden') };
+  let ctx = shopCtx(db, map); let res = await R.run(ctx);
+  assert.deepStrictEqual(ctx.fetched, [U]);
+  assert.strictEqual(S().status, 'tracking'); assert.strictEqual(S().check_note, null, 'no error is shown'); assert.deepStrictEqual(S().tracked_variants, ['shop']);
+  assert.deepStrictEqual(S().offers, [{ store: 'Proshop', price: 295, url: U, inStock: true, note: 'Pris fra Ønskeskyen', variant: 'shop', readAt: isoH(-1) }]);
+  assert.deepStrictEqual(S().variants, [{ id: 'shop', label: 'Proshop', lowest: 295, offers: 1, sample: null }]);
+  assert.deepStrictEqual(S().history, [{ d: '2026-11-16', p: 295, s: 'Proshop', src: 'check' }]); assert.strictEqual(S().last_checked, isoH(0));
+  assert.strictEqual(S().compare_state, 'wanted', 'the agent is still asked to look for the product on Prisjagt');
+  assert.deepStrictEqual(S().wish_offer, { price: 295, inStock: true, store: 'Proshop', at: isoH(-1), tried: isoH(0) }); assert.strictEqual(db.sent.length, 0);
+  assert(res.summary.some((l) => /ønskelistens pris brugt: 1/.test(l)), res.summary.join('\n'));
+  // two hours later: the shop is not asked again, the product is checked with the wish list's price
+  ctx = shopCtx(db, map, { now: () => hrs(2) }); await R.run(ctx);
+  assert.deepStrictEqual(ctx.fetched, [], 'left alone'); assert.strictEqual(S().status, 'tracking'); assert.strictEqual(S().offers[0].price, 295); assert.strictEqual(S().wish_offer.tried, isoH(0));
+  assert.strictEqual(S().last_checked, isoH(2));
+  // the wish list shows a lower price (below the person's goal): it counts, and it mails, still without asking the shop
+  S().wish_offer = Object.assign({}, S().wish_offer, { price: 199, at: isoH(3) });
+  ctx = shopCtx(db, map, { now: () => hrs(4) }); await R.run(ctx);
+  assert.deepStrictEqual(ctx.fetched, []); assert.strictEqual(S().offers[0].price, 199); assert.strictEqual(S().notified_price, 199);
+  assert.strictEqual(db.sent.length, 1); assert(db.sent[0].text.includes('199 kr.') && db.sent[0].text.includes('Proshop'), db.sent[0].text);
+  // seven hours after the refusal: the shop is asked once more, refuses, and the mark moves; a reading over six hours old says so
+  ctx = shopCtx(db, map, { now: () => hrs(10) }); await R.run(ctx);
+  assert.deepStrictEqual(ctx.fetched, [U]); assert.strictEqual(S().wish_offer.tried, isoH(10)); assert.strictEqual(S().offers[0].note, 'Pris fra Ønskeskyen · pris fra tidligere i dag');
+  assert.strictEqual(db.sent.length, 1, 'the same price again does not mail');
+  // the shop answers: its own page is used and the mark is gone
+  map[U] = xHtml('Afvisende', '279.00', true);
+  ctx = shopCtx(db, map, { now: () => hrs(17) }); await R.run(ctx);
+  assert.deepStrictEqual(ctx.fetched, [U]); assert.deepStrictEqual(S().offers, [{ store: 'Afvisende', price: 279, url: U, inStock: true, note: null, variant: 'shop' }]);
+  assert.deepStrictEqual(S().wish_offer, { price: 199, inStock: true, store: 'Proshop', at: isoH(3) }); assert.strictEqual(S().title, 'Vare');
+  // it refuses again while the wish list's reading is over 24 hours old: the old price is not used, the last real offer stays with the note
+  map[U] = () => resp(403, 'Forbidden');
+  ctx = shopCtx(db, map, { now: () => hrs(28) }); await R.run(ctx);
+  assert.strictEqual(S().offers[0].price, 279); assert.strictEqual(S().check_note, 'Butikken afviser automatiske opslag.'); assert.strictEqual(S().wish_offer.tried, undefined);
+});
+
+test('wish price: it stands in for a link that leads elsewhere, a page without a price and another currency; not for a page that is gone, a stale reading or a Prisjagt link; out of stock is said', async () => {
+  const hrs = (h) => new Date(NOW.getTime() + h * 3600 * 1000), isoH = (h) => hrs(h).toISOString().replace(/\.\d+Z$/, 'Z');
+  const w = (o) => Object.assign({ price: 120, inStock: true, store: null, at: isoH(-2) }, o || {});
+  const RED = 'https://butik.onelink.dk/abc', NOP = 'https://www.udenpris.dk/x', EUR = 'https://www.euro.dk/x', GONE = 'https://www.vaek.dk/x', OLD = 'https://www.gammel.dk/x', OOS = 'https://www.udsolgt.dk/x', NONE = 'https://www.ingen.dk/x';
+  const db = newDb();
+  db.products.push(shopProduct('R', 'u1', RED, { wish_offer: w() }), shopProduct('N', 'u1', NOP, { wish_offer: w({ store: 'Uden Pris' }) }), shopProduct('E', 'u1', EUR, { wish_offer: w() }),
+    shopProduct('G', 'u1', GONE, { wish_offer: w() }), shopProduct('O', 'u1', OLD, { wish_offer: w({ at: isoH(-25) }) }), shopProduct('S', 'u1', OOS, { wish_offer: w({ inStock: false }) }),
+    shopProduct('X', 'u1', NONE, { wish_offer: null }), product('P', 'u1', 'dyson', { wish_offer: w() }));
+  const map = { [RED]: () => resp(302, '', { location: 'https://www.helt-andet.dk/vare' }), [NOP]: shopHtml('shop-noprice'), [EUR]: shopHtml('shop-eur'), [OLD]: () => resp(403, ''), [OOS]: () => resp(429, ''), [NONE]: () => resp(403, '') };
+  const ctx = shopCtx(db, map, { getPage: async (url) => { ctx.fetched.push(url); if (SHOP.isPrisjagtHost(new URL(url).hostname)) throw new PJ.PageError('blocked', 'HTTP 403'); return fetchShop(url, map); } });
+  await R.run(ctx);
+  const by = (id) => db.products.find((p) => p.id === id);
+  for (const id of ['R', 'N', 'E']) { assert.strictEqual(by(id).status, 'tracking', id); assert.strictEqual(by(id).offers[0].price, 120, id); assert.strictEqual(by(id).offers[0].note, 'Pris fra Ønskeskyen', id); assert.strictEqual(by(id).check_note, null, id); }
+  assert.strictEqual(by('R').offers[0].store, 'butik.onelink.dk', 'no shop name from the wish list: the address'); assert.strictEqual(by('N').offers[0].store, 'Uden Pris');
+  assert.strictEqual(by('G').status, 'error'); assert.strictEqual(by('G').offers, null, 'a page that is gone is not papered over');
+  assert.strictEqual(by('O').status, 'error'); assert.strictEqual(by('O').check_note, 'Butikken afviser automatiske opslag.');
+  assert.strictEqual(by('S').status, 'tracking'); assert.strictEqual(by('S').offers[0].inStock, false); assert.strictEqual(by('S').variants[0].lowest, null);
+  assert.strictEqual(by('X').status, 'error');
+  assert.strictEqual(by('P').status, 'error', 'a Prisjagt link never uses it'); assert.strictEqual(by('P').offers, null); assert.strictEqual(by('P').wish_offer.tried, undefined);
+});
+
+test('wish price: a product that is in error when the price arrives is followed at once, without asking the shop again before its six hours are up', async () => {
+  const hrs = (h) => new Date(NOW.getTime() + h * 3600 * 1000), isoH = (h) => hrs(h).toISOString().replace(/\.\d+Z$/, 'Z');
+  const A = 'https://www.afvisende.dk/a', G = 'https://www.vaek.dk/g', db = newDb();
+  const w = () => ({ price: 449, inStock: true, store: 'Elgiganten', at: isoH(0) });
+  db.products.push(shopProduct('A', 'u1', A, { status: 'error', check_note: 'Butikken afviser automatiske opslag.', last_checked: isoH(-1), compare_state: 'wanted', compare_tries: 1, wish_offer: w() }));
+  db.products.push(shopProduct('G', 'u1', G, { status: 'error', check_note: 'Siden findes ikke (HTTP 404). Tjek linket.', last_checked: isoH(-1), wish_offer: w() }));
+  const map = { [A]: () => resp(403, '') };
+  let ctx = shopCtx(db, map); await R.run(ctx);
+  const by = (id) => db.products.find((p) => p.id === id);
+  assert.deepStrictEqual(ctx.fetched, [], 'no shop is asked');
+  assert.strictEqual(by('A').status, 'tracking'); assert.strictEqual(by('A').check_note, null); assert.strictEqual(by('A').offers[0].price, 449); assert.strictEqual(by('A').offers[0].store, 'Elgiganten');
+  assert.strictEqual(by('A').wish_offer.tried, isoH(-1), 'the six hours count from the attempt that failed');
+  assert.strictEqual(by('G').status, 'error'); assert.strictEqual(by('G').offers, null);
+  ctx = shopCtx(db, map, { now: () => hrs(4) }); await R.run(ctx); assert.deepStrictEqual(ctx.fetched, []);
+  by('A').wish_offer = Object.assign({}, by('A').wish_offer, { at: isoH(5) });
+  ctx = shopCtx(db, map, { now: () => hrs(5.5) }); await R.run(ctx); assert.deepStrictEqual(ctx.fetched, [A, G], 'after six hours both are asked again (the page that was gone as an error row is)');
+  assert.strictEqual(by('A').status, 'tracking'); assert.strictEqual(by('A').wish_offer.tried, isoH(5.5));
 });
 
 (async () => {

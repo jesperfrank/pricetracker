@@ -308,6 +308,15 @@ alter table public.products add column if not exists discover_state jsonb;
 alter table public.products drop constraint if exists products_discover_state_check;
 alter table public.products add constraint products_discover_state_check check (discover_state is null or jsonb_typeof(discover_state) = 'object');
 
+-- wish_offer: the price the wish-list site (Ønskeskyen) itself shows for the wish this product came from, read with the wish list by the
+-- job (job/lib/onskeskyen.js): {"price": 295, "inStock": true, "store": "Proshop", "at": "<when it was read>"}, plus "tried" = when the
+-- job last failed to read the shop's own page. It stands in for a shop page the job cannot read (the shop refuses automated requests,
+-- the link redirects elsewhere, no readable price): the product is then followed with this price, marked "Pris fra Ønskeskyen", for as
+-- long as the wish list keeps it fresh (24 hours). Written by the job only: the browser cannot write it, and a new source_url clears it.
+alter table public.products add column if not exists wish_offer jsonb;
+alter table public.products drop constraint if exists products_wish_offer_check;
+alter table public.products add constraint products_wish_offer_check check (wish_offer is null or jsonb_typeof(wish_offer) = 'object');
+
 -- Calls to the search API per calendar month (job only), so that the free credit cannot be exceeded: one row per month 'YYYY-MM'.
 -- No policy and no rights for the browser roles: only the service role reads and writes it.
 create table if not exists public.discover_usage (
@@ -469,7 +478,7 @@ begin
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null;
     new.compare_state := null; new.compare_at := null; new.shop_url := null; new.image_url := null; new.compare_tries := 0;
     new.extra_urls := null; new.extra_state := null; new.req_state := null; new.name_options := null; new.discover_state := null;
-    new.lookup_failed_at := null; new.retry_requested_at := null; new.retry_log := null;
+    new.lookup_failed_at := null; new.retry_requested_at := null; new.retry_log := null; new.wish_offer := null;
     -- bought_at / bought_price are the person's own, but the time is the server's and the person is who is signed in
     new.bought_by := null;
     if new.bought_at is not null then new.bought_at := now(); new.bought_by := uid; end if;
@@ -512,6 +521,7 @@ begin
   -- Anything else the browser sends is ignored.
   new.extra_state := old.extra_state;
   new.discover_state := old.discover_state;       -- the job's search bookkeeping (see "Butikssøgning" above)
+  new.wish_offer := old.wish_offer;               -- the wish list's own price, the job's (see wish_offer above)
   asked_extra := new.extra_urls;
   new.extra_urls := old.extra_urls;
   if asked_extra is distinct from old.extra_urls then
@@ -665,7 +675,7 @@ begin
     new.normal_price := null; new.verdict := null; new.warning := null; new.check_note := null;
     new.last_checked := null; new.notified_price := null; new.notified_at := null; new.backfill_state := null;
     new.digest_price := null; new.digest_at := null; new.image_url := null; new.compare_tries := 0;
-    new.extra_urls := null; new.extra_state := null; new.discover_state := null;
+    new.extra_urls := null; new.extra_state := null; new.discover_state := null; new.wish_offer := null;
     new.alt_requested_at := null; new.alternatives := null; new.alt_done_at := null; new.alt_note := null; new.req_state := null;
     -- A new link is the person's own choice: the comparison starts over, except for going back to the original shop link after a
     -- switch to Prisjagt (exactly shop_url): that is 'none' from now on, so the product is not switched again.
